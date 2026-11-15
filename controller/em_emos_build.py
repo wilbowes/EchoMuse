@@ -219,7 +219,7 @@ def build_ramdisk(init_binary: bytes, version: str, build_id: str = "",
     /system, which is why no Amazon code is redistributed.
 
     `sbin` maps name -> bytes for what emOS carries in /sbin: `wpa_supplicant`,
-    `wpa_cli`, `em-wifi`, `busybox`. Optional — a FireOS 5 image falls back to
+    `wpa_cli`, `em-wifi`, `busybox`, `e2fsck`. Optional — a FireOS 5 image falls back to
     /system/bin/wpa_supplicant, which the fleet runs today. FireOS 6 needs ours,
     since Amazon's aborts under emOS before main() (it opens /dev/binder).
 

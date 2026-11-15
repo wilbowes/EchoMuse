@@ -185,6 +185,7 @@ COPY em_http.py .
 COPY em_events.py .
 COPY em_shell.py .
 COPY em_releases.py .
+COPY em_release_sig.py .
 COPY em_payloads.py .
 COPY em_ota.py .
 COPY em_oww_sync.py .
@@ -205,6 +206,8 @@ COPY em_crashlog.py .
 COPY em_emos_build.py .
 COPY em_emos_update.py .
 COPY em_recordings.py .
+COPY em_tts_audio.py .
+COPY em_turn_record.py .
 COPY em_turnclock.py .
 COPY em_firmware.py .
 COPY em_announce.py .

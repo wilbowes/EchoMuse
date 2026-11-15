@@ -871,7 +871,9 @@ def test_em_wifi_rides_in_both_architectures():
             f"{binary} would be installed into a FireOS 5 image, which moves "
             f"that fleet off Amazon's supplicant as a side effect"
         )
-    assert both <= every, (
+    # e2fsck is the one optional member: in both images when a release has it,
+    # required of none but a board with no checker of its own (NEEDS_OWN_E2FSCK).
+    assert both - {"e2fsck"} <= every, (
         "a name that is not in the payload allowlist can never be in a bundle"
     )
 
@@ -928,7 +930,7 @@ def test_em_wifi_writes_a_conf_the_wifi_user_can_read():
     five seconds, and the device sits at boot stage 11 with a perfectly
     correct conf and the right password.
 
-    Measured on G090LF11803611NF, 2026-09-21 — em-wifi reported the join and
+    Measured on G090LF99207711NF, 2026-09-21 — em-wifi reported the join and
     the device dropped off the network seconds later. Root ignores
     permissions, so one mode serves both bases.
     """

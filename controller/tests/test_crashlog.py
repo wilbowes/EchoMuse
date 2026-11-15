@@ -21,8 +21,8 @@ CRASH = "".join(
     [f"[64460.{i:06d}] <1> (1)[0:swapper/1]filler line {i}\n" for i in range(50)]
     + [
         "[64463.012000] <1> (1)[118:mtk_stp_btm][STP-BTM] set fw issue infor fail(-15)\n",
-        "[64463.700000] <1> (1)[472:tx_thread][wlan]wlanoidSetConnect:(OID INFO)ssid XXXXXX, bssid 74:ac:b9:d6:9b:22\n",
-        "[64463.800000] <1> (1)[472:tx_thread][wlan] peer 10.10.1.81 unreachable\n",
+        "[64463.700000] <1> (1)[472:tx_thread][wlan]wlanoidSetConnect:(OID INFO)ssid XXXXXX, bssid 02:00:00:5a:9b:22\n",
+        "[64463.800000] <1> (1)[472:tx_thread][wlan] peer 10.99.1.81 unreachable\n",
         "[64468.800000] <0> (0)[0:swapper/0]Internal error: : 1d [#1] PREEMPT SMP\n",
         "[64468.800100] <0> (0)[0:swapper/0][<ffffffc0000824c0>] el1_da+0x18/0x78\n",
         "[64468.800200] <0> (0)[0:swapper/0][<ffffffc000082120>] do_mem_abort+0x40/0xa0\n",
@@ -62,8 +62,8 @@ def test_no_marker_falls_back_to_the_tail():
 def test_the_excerpt_carries_no_network_identifiers():
     msg = cl.summarise(CRASH)
     assert "ssid" not in msg.lower()
-    assert "74:ac:b9" not in msg
-    assert "10.10.1.81" not in msg and "<ip>" in msg
+    assert "02:00:00:5a" not in msg
+    assert "10.99.1.81" not in msg and "<ip>" in msg
 
 
 def test_the_excerpt_is_bounded():

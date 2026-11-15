@@ -2,7 +2,7 @@ package speaker
 
 import "testing"
 
-// Verbatim from Test Device (G090LF1180570SPJ) 2026-08-09, while Android's
+// Verbatim from Test Device (G090LF9920670SPJ) 2026-08-09, while Android's
 // mediaserver held the speaker and the server was stranded in snd_pcm_open.
 const heldStatus = `state: PREPARED
 owner_pid   : 659

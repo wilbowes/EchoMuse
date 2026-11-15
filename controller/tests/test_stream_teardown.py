@@ -28,22 +28,19 @@ exercised directly.
 """
 
 import ast
-from pathlib import Path
 
-CONTROLLER = Path(__file__).resolve().parents[1]
-FUNC = "_ffmpeg_decode"
+import _sources
+
+FUNC = "em_tts_audio._ffmpeg_decode"
 
 
 def _finally_body() -> list[ast.stmt]:
     """The `finally:` block of _ffmpeg_decode."""
-    tree = ast.parse((CONTROLLER / "em_esphome.py").read_text())
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == FUNC:
-            for stmt in ast.walk(node):
-                if isinstance(stmt, ast.Try) and stmt.finalbody:
-                    return stmt.finalbody
-            raise AssertionError(f"{FUNC} has no try/finally — restructured?")
-    raise AssertionError(f"{FUNC} not found in em_esphome.py — renamed?")
+    _, node = _sources.find_def(FUNC)
+    for stmt in ast.walk(node):
+        if isinstance(stmt, ast.Try) and stmt.finalbody:
+            return stmt.finalbody
+    raise AssertionError(f"{FUNC} has no try/finally — restructured?")
 
 
 def _first_lineno(body: list[ast.stmt], predicate) -> int | None:

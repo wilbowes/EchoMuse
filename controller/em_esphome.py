@@ -95,6 +95,8 @@ import em_oww_metadata
 import em_player
 import em_tasks
 import em_timers
+import em_tts_audio
+import em_turn_record
 import em_turnclock
 import em_volume
 import em_wakeword
@@ -113,92 +115,6 @@ import em_output_mute
 VAD_SENTINEL_END     = "vad_end"
 VAD_SENTINEL_TIMEOUT = "vad_no_speech_timeout"
 
-# ── Per-turn trace ─────────────────────────────────────────────────────────────
-# Collects timestamps and key metrics through a voice turn and emits a single
-# structured [TURN] log line at completion. Makes it possible to see at a glance
-# where time is going and whether quality correlates with any specific stage.
-#
-# All times are offsets in milliseconds from t0 (turn start / wake detected).
-# -1 means the stage was not reached in this turn.
-
-import dataclasses
-
-@dataclasses.dataclass
-class TurnTrace:
-    trigger:          str   = ""      # "wakeword(0.522)" or "button"
-    t0:               float = 0.0     # turn start (time.monotonic())
-    t_first_frame_ms: int   = -1      # ms from t0 to first real audio frame
-    # ms from t0 to HA's STT_VAD_START. Stays -1 when HA's VAD never engaged,
-    # which is the whole point of recording it: that is the turn shape that
-    # runs to HA's 15s cap, and until now nothing distinguished it from a turn
-    # HA endpointed properly. It is also the number the fallback's grace
-    # window should be tuned from — 2.5s is currently set against a single
-    # measured turn (1.077s) plus microVAD's floor of ~1.06s.
-    t_vad_start_ms:   int   = -1
-    t_vad_end_ms:     int   = -1      # ms from t0 to VAD sentinel received
-    audio_frames:     int   = 0       # number of PCM frames sent to HA
-    t_stt_ms:         int   = -1      # ms from t0 to STT result received
-    stt_text:         str   = ""      # STT transcript
-    t_tts_url_ms:     int   = -1      # ms from t0 to TTS URL received
-    t_tts_fetched_ms: int   = -1      # ms from t0 to TTS audio fetched+decoded
-    tts_bytes:        int   = 0       # decoded PCM bytes
-    t_playback_ms:    int   = -1      # ms from t0 to playback started
-    t_complete_ms:    int   = -1      # ms from t0 to turn complete
-    # HA-side segment timings, derived from the marks above at emit time.
-    # Broken out because "the turn felt slow" needs to point at a stage:
-    # ha_think = HA's own STT+intent time, tts_gen = how long HA took to
-    # produce the audio URL after deciding what to say, fetch = our pull
-    # of that audio. Together they separate "HA was slow" from "we were".
-    ha_think_ms:      int   = -1
-    tts_gen_ms:       int   = -1
-    fetch_ms:         int   = -1
-    outcome:          str   = ""      # "ok", "no_speech", "cancelled", "barged", "tts_error", "timeout"
-    # Wake detection detail (model, score, threshold, noise_floor) popped
-    # from device.last_wake at turn start — None for button/continuation
-    # turns. Persisted with the turn for threshold tuning and model A/Bs.
-    wake_info:        Optional[dict] = None
-
-    def elapsed_ms(self) -> int:
-        return int((time.monotonic() - self.t0) * 1000)
-
-    def mark(self, attr: str) -> None:
-        """Record current elapsed time into the named timestamp field."""
-        setattr(self, attr, self.elapsed_ms())
-
-    def derive(self) -> None:
-        """
-        Fill the HA-side segment durations from the absolute marks. Pure
-        arithmetic on values already captured — no extra timing calls.
-        """
-        if self.t_vad_end_ms >= 0 and self.t_stt_ms >= 0:
-            self.ha_think_ms = self.t_stt_ms - self.t_vad_end_ms
-        if self.t_stt_ms >= 0 and self.t_tts_url_ms >= 0:
-            self.tts_gen_ms = self.t_tts_url_ms - self.t_stt_ms
-        if self.t_tts_url_ms >= 0 and self.t_tts_fetched_ms >= 0:
-            self.fetch_ms = self.t_tts_fetched_ms - self.t_tts_url_ms
-
-    def emit(self) -> None:
-        """Emit a single structured [TURN] log line."""
-        self.derive()
-
-        def fmt(v: int) -> str:
-            return f"+{v}ms" if v >= 0 else "—"
-
-        audio_ms = self.audio_frames * 80  # each frame is 80ms at 16kHz
-        log.info(
-            f"[TURN] trigger={self.trigger} outcome={self.outcome} "
-            f"total={fmt(self.t_complete_ms)} "
-            f"first_frame={fmt(self.t_first_frame_ms)} "
-            f"vad_start={fmt(self.t_vad_start_ms)} "
-            f"vad_end={fmt(self.t_vad_end_ms)} audio={self.audio_frames}frames/{audio_ms}ms "
-            f"stt={fmt(self.t_stt_ms)} text={self.stt_text!r} "
-            f"tts_url={fmt(self.t_tts_url_ms)} "
-            f"tts_fetch={fmt(self.t_tts_fetched_ms)} tts_bytes={self.tts_bytes} "
-            f"playback={fmt(self.t_playback_ms)} "
-            f"| segments: ha_think={fmt(self.ha_think_ms)} "
-            f"tts_gen={fmt(self.tts_gen_ms)} fetch={fmt(self.fetch_ms)}"
-        )
-
 # Frames to discard from voice_queue at the start of each turn.
 # The stream no longer stops at wake, so voice_queue contains the tail of
 # "...Jarvis" before the command arrives. N×80ms of bleed removed upfront.
@@ -206,8 +122,6 @@ class TurnTrace:
 # tail bleeds into transcripts.
 VOICE_PREROLL_DISCARD = 3
 
-# The rate the device plays: TTS is asked for, and decoded to, exactly this.
-WIRE_RATE = 48000
 from esphome.satellite_server import SatelliteServerProtocol, serve, _HANDLED
 from esphome.feature_flags import (
     MediaPlayerEntityFeature,
@@ -262,6 +176,8 @@ MEDIA_PLAYER_KEY = 1
 EVENT_KEY        = 2   # action-button hold, as an HA event entity
 AMBIENT_LUX_KEY  = 3   # TSL2540 ambient light, as an HA sensor
 MIC_MUTED_KEY    = 4   # the mic mute button, as a read-only binary sensor (#438)
+CPU_TEMP_KEY     = 5   # the CPU thermal zone (cpuTempC), as an HA sensor
+MAX_TEMP_KEY     = 6   # the hottest thermal zone now (maxTempC), as an HA sensor
 
 # Press types the event entity advertises. double/triple were parked because
 # detecting them means delaying the single press by the multi-tap window to
@@ -428,7 +344,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # default: see em_earlytts for why this is the user's choice).
         self._stream_reply      = False
         self._conversation_id:  str = ""
-        self._trace:            "TurnTrace | None" = None
+        self._trace:            "em_turn_record.TurnTrace | None" = None
         # Set on VOICE_ASSISTANT_INTENT_END — the reliable "STT + intent
         # resolution have genuinely completed" marker. Used to distinguish a
         # real terminal RUN_END from a premature/duplicate one that HA can
@@ -546,6 +462,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return self._device_has("ambient_light")
 
     @property
+    def _thermal_capable(self) -> bool:
+        return self._device_has("thermal")
+
+    @property
     def _mic_capable(self) -> bool:
         return self._device_has("mic")
 
@@ -623,12 +543,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # supported_formats: tells HA to run TTS and announcement audio
             # through its ffmpeg proxy and hand us a URL already at the wire
             # format, 48kHz mono S16 — as WAV, which is that PCM behind a
-            # header, so _stream_tts_audio passes it straight through with no
+            # header, so em_tts_audio.stream passes it straight through with no
             # decoder to hold audio back between sentences (em_wav). It was
             # FLAC, copied from Voice PE, which decodes on its own device.
             # Harmless on HA versions that ignore it: anything else is decoded
             # by ffmpeg.
-            _fmt = dict(format="wav", sample_rate=WIRE_RATE,
+            _fmt = dict(format="wav", sample_rate=em_tts_audio.WIRE_RATE,
                         num_channels=1, sample_bytes=2)
             yield api_pb2.ListEntitiesMediaPlayerResponse(
                 object_id="media_player",
@@ -679,6 +599,24 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     device_class="illuminance",
                     state_class=1,   # STATE_CLASS_MEASUREMENT
                 )
+            # The chip, not the room: diagnostics, off until enabled in HA.
+            if self._thermal_capable:
+                for object_id, key, name in (
+                    ("cpu_temperature", CPU_TEMP_KEY, "CPU Temperature"),
+                    ("hottest_zone_temperature", MAX_TEMP_KEY,
+                     "Hottest Zone Temperature"),
+                ):
+                    yield api_pb2.ListEntitiesSensorResponse(
+                        object_id=object_id,
+                        key=key,
+                        name=name,
+                        unit_of_measurement="°C",
+                        accuracy_decimals=1,
+                        device_class="temperature",
+                        state_class=1,   # STATE_CLASS_MEASUREMENT
+                        entity_category=api_pb2.ENTITY_CATEGORY_DIAGNOSTIC,
+                        disabled_by_default=True,
+                    )
             # Read-only (#438): a writable entity would be a remote unmute.
             if self._mic_capable:
                 yield api_pb2.ListEntitiesBinarySensorResponse(
@@ -1240,7 +1178,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         try:
             await em_announce.play_media(
                 media_id,
-                fetch=_fetch_tts_audio,
+                fetch=em_tts_audio.fetch,
                 play=self._announce_play_cb(),
                 log_name=self._log_name,
             )
@@ -1291,14 +1229,14 @@ class EchoMuseSatellite(SatelliteServerProtocol):
 
         await em_announce.run(
             media_id,
-            fetch=_fetch_tts_audio,
+            fetch=em_tts_audio.fetch,
             play=self._announce_play_cb(),
             on_finished=reply,
             log_name=self._log_name,
             preannounce_media_id=preannounce_media_id,
             # The Echo listens straight after this message, so its quiet
             # tail is time the person waits before they can answer.
-            tail=((lambda pcm: em_announce.set_trailing_quiet(pcm, WIRE_RATE))
+            tail=((lambda pcm: em_announce.set_trailing_quiet(pcm, em_tts_audio.WIRE_RATE))
                   if start_conversation else None),
         )
 
@@ -1341,7 +1279,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         device,            # em_controller.Device — avoids circular import
         on_thinking,       # async callable()
         post_turn_play,    # async callable(pcm_chunks) -> decoded byte count
-        trace: "TurnTrace | None" = None,
+        trace: "em_turn_record.TurnTrace | None" = None,
         preroll_discard: int = VOICE_PREROLL_DISCARD,
         wake_word_phrase: str = "",
     ) -> None:
@@ -1547,10 +1485,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 try:
                     if trace:
                         trace.t_playback_ms = trace.elapsed_ms()
-                    chunks = _stream_tts_audio(self._tts_audio_url)
+                    chunks = em_tts_audio.stream(self._tts_audio_url)
                     if self._tts_streamed_early:
-                        # Same reasoning as _stream_tts_audio wrapping
-                        # _stream_tts_audio_once below: closed explicitly so an
+                        # Same reasoning as em_tts_audio.stream wrapping
+                        # em_tts_audio._stream_once below: closed explicitly so an
                         # aborted early stream's pending fetch is cancelled now,
                         # not whenever the generator is collected.
                         chunks = em_earlytts.abortable_stream(chunks, self._tts_abort)
@@ -1701,7 +1639,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     "tts_bytes":      trace.tts_bytes,
                     "stt_text":       trace.stt_text,
                 }
-                await _persist_turn(device, turn_record)
+                await em_turn_record.persist_turn(device, turn_record)
                 device.turn_history.append(turn_record)
                 try:
                     await em_events.push({
@@ -2081,7 +2019,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # Validation tooling: when NS_DEBUG_DIR is set, persist what
             # STT actually received next to what the mic actually sent.
             em_ns.dump_debug_pair(self._log_name, bytes(ns_debug_raw), bytes(ns_debug_out))
-            # Hand the captured utterance to _persist_turn, which owns the
+            # Hand the captured utterance to em_turn_record.persist_turn, which owns the
             # write (it has the rowid the filename is keyed on). In `finally`
             # so a cancelled or errored turn still saves what it heard —
             # those are exactly the turns worth listening back to.
@@ -2201,273 +2139,6 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         # Armed even if the transport is gone: the barrier is cheap, and a
         # reconnect that replays events is exactly when it earns its keep.
         self._barrier.abort()
-
-
-# ─── TTS audio fetch ─────────────────────────────────────────────────────────
-
-async def _stream_tts_audio(url: str) -> AsyncIterator[bytes]:
-    """
-    Incrementally fetch and decode HA TTS audio to 48kHz mono S16_LE PCM.
-
-    The HTTP response is piped into one long-lived ffmpeg process while decoded
-    PCM is yielded immediately. Neither the encoded response nor decoded speech
-    is accumulated in memory. A retry is safe only before PCM has been emitted;
-    retrying later would repeat audio the user has already heard.
-    """
-    emitted = False
-    last_exc: Exception | None = None
-    for attempt in range(2):
-        try:
-            # aclosing, as below: a barge-in closes this generator, and the
-            # inner one must tear ffmpeg down NOW, not when collected.
-            async with contextlib.aclosing(_stream_tts_audio_once(url)) as once:
-                async for pcm in once:
-                    emitted = True
-                    yield pcm
-            return
-        except Exception as err:
-            last_exc = err
-            if attempt == 0 and not emitted:
-                log.warning(
-                    f"_stream_tts_audio: stream failed before playback ({err}) "
-                    "— retrying once"
-                )
-                await asyncio.sleep(0.5)
-                continue
-            raise
-
-    raise last_exc
-
-
-async def _stream_tts_audio_once(url: str) -> AsyncIterator[bytes]:
-    """Run one HTTP streaming attempt for _stream_tts_audio.
-
-    A WAV already at the wire format (what we declare to HA — see
-    supported_formats) is passed straight through: no decoder, so nothing is
-    held back when HA pauses between sentences (em_wav). Anything else is
-    decoded by ffmpeg.
-    """
-    import aiohttp
-
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        connect=10,
-        sock_connect=10,
-        sock_read=60,
-    )
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            chunks = resp.content.iter_chunked(16 * 1024)
-            head = bytearray()
-            wav = em_wav.WavStream()
-            pcm = b""
-            try:
-                async for chunk in chunks:
-                    head += chunk
-                    if len(head) >= 4 and head[:4] != b"RIFF":
-                        break
-                    pcm = wav.push(chunk)
-                    if wav.ready:
-                        break
-            except em_wav.NotWav:
-                pass
-
-            if wav.ready and em_wav.is_wire_pcm(wav.format, WIRE_RATE):
-                log.debug("TTS: WAV passthrough")
-                odd = b""
-                async for part in _prepend(pcm, chunks):
-                    part = odd + part
-                    cut = len(part) & ~1
-                    odd = part[cut:]
-                    if cut:
-                        yield part[:cut]
-                return
-
-            log.info(f"TTS: decoding with ffmpeg ({wav.format or 'not WAV'})")
-            # aclosing: a barge-in closes THIS generator, and an inner one left
-            # to the garbage collector would run its kill-first teardown late,
-            # leaving ffmpeg alive past the turn.
-            async with contextlib.aclosing(
-                    _ffmpeg_decode(_prepend(bytes(head), chunks))) as decoded:
-                async for pcm in decoded:
-                    yield pcm
-
-
-async def _prepend(first: bytes, rest: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-    if first:
-        yield first
-    async for chunk in rest:
-        yield chunk
-
-
-async def _ffmpeg_decode(encoded: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-    """Decode any format ffmpeg reads to wire PCM, yielding as it decodes.
-
-    `-threads 1`: frame-threaded decoding holds one frame per thread before it
-    emits anything, which on an 8-core host kept ~1.7s of FLAC inside ffmpeg
-    (0.9s with one thread) — audio that is then stranded whenever the input
-    pauses. See em_wav for why TTS normally avoids this path altogether.
-    """
-    proc: asyncio.subprocess.Process | None = None
-    feeder: asyncio.Task | None = None
-    stderr_task: asyncio.Task | None = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-threads", "1",
-            "-i", "pipe:0",
-            "-f", "s16le", "-ar", str(WIRE_RATE), "-ac", "1",
-            "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        async def _feed_encoded_audio() -> None:
-            assert proc is not None and proc.stdin is not None
-            try:
-                async for chunk in encoded:
-                    proc.stdin.write(chunk)
-                    await proc.stdin.drain()
-            finally:
-                if not proc.stdin.is_closing():
-                    proc.stdin.close()
-                    await proc.stdin.wait_closed()
-
-        feeder = asyncio.create_task(_feed_encoded_audio())
-
-        # stderr is drained CONCURRENTLY, not after stdout EOF. A pipe
-        # holds ~64KB; if ffmpeg fills it, it blocks writing stderr,
-        # stops producing stdout, and the reader below waits forever.
-        # -loglevel error keeps that rare, but the case that produces
-        # lots of stderr is a malformed or truncated response — exactly
-        # the degraded case this path has to survive.
-        assert proc.stderr is not None
-        stderr_task = asyncio.create_task(proc.stderr.read())
-
-        assert proc.stdout is not None
-        while pcm := await proc.stdout.read(16 * 1024):
-            yield pcm
-
-        await feeder
-        err = await stderr_task
-        return_code = await asyncio.wait_for(proc.wait(), timeout=15.0)
-        if return_code != 0:
-            raise RuntimeError(
-                f"ffmpeg streaming decode failed: {err.decode()[:200]}"
-            )
-    finally:
-        # Kill ffmpeg FIRST, before cancelling the feeder — the ordering is
-        # what makes this teardown terminate at all.
-        #
-        # On a barge-in the consumer stops iterating this generator, so
-        # nobody drains ffmpeg's stdout. Its stdout pipe fills, ffmpeg blocks
-        # writing, and a blocked ffmpeg stops reading stdin. The feeder is
-        # then stuck in drain(), and cancelling it runs its own finally,
-        # which awaits `stdin.wait_closed()` — a flush that needs ffmpeg to
-        # read and therefore never completes. The gather() below never
-        # returns and the kill never happens: teardown hangs, holding the
-        # turn. Killing first breaks both pipes, so those awaits raise
-        # instead of waiting.
-        #
-        # It also fixes #252. The InvalidStateError comes from asyncio
-        # resolving `_stdin_closed` twice — once when we close stdin, once
-        # when the kill tears the transport down. Killing while stdin is
-        # still open collapses that to one resolution, and the feeder's
-        # close() then finds a transport already closing and skips.
-        #
-        # Measured over 20 runs of a standalone repro of this shape, with
-        # nobody reading stdout: cancel-then-kill hung 20/20 and logged
-        # InvalidStateError 20/20; kill-first, 0/20 and 0/20.
-        #
-        # On the success path proc.wait() has already returned, so
-        # returncode is set and nothing is killed.
-        if proc is not None and proc.returncode is None:
-            proc.kill()
-            await proc.wait()
-        for t in (feeder, stderr_task):
-            if t is not None and not t.done():
-                t.cancel()
-        await asyncio.gather(
-            *[t for t in (feeder, stderr_task) if t is not None],
-            return_exceptions=True,
-        )
-
-
-async def _fetch_tts_audio(url: str) -> bytes:
-    """
-    Fetch TTS audio from HA and decode to 48kHz mono S16_LE PCM — the
-    device wire rate, so downstream (EQ → stream) never resamples.
-
-    Uses ffmpeg subprocess — handles MP3, WAV, FLAC, OGG transparently
-    regardless of which TTS provider HA is configured with. When HA honours
-    our declared supported_formats the URL already serves 48kHz mono WAV
-    and the -ar here is a no-op; otherwise ffmpeg's proper resampler does
-    the conversion (better than the numpy linear interpolation this
-    replaced, which cost ~2dB above 8kHz).
-
-    Requires ffmpeg in PATH (installed via Dockerfile apt-get).
-    """
-    import aiohttp
-    # One retry on fetch failure — observed intermittent tts_proxy fetch
-    # failures (outcome=tts_error, tts_bytes=0) where the URL was valid and
-    # the very next turn fetched fine. A single 0.5s-backoff retry converts
-    # those from a silent dead turn into ~1s of extra latency.
-    last_exc: Exception | None = None
-    for attempt in range(2):
-        try:
-            async with aiohttp.ClientSession() as session:
-                # 60s, not 10s: HA's tts_proxy generates the audio while we
-                # hold this GET open, so this is a synthesis deadline, not a
-                # download one. Whether that shows up here or in tts_gen
-                # depends on the engine — a streaming-capable one hands over
-                # the URL early and does the work during the fetch, which is
-                # how a long response (a read-aloud story) blew the old 10s
-                # cap. Reported by @kopiro in #28.
-                #
-                # Voice-turn TTS no longer uses this buffered helper, but
-                # standalone announcements still do.
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                    resp.raise_for_status()
-                    audio_bytes = await resp.read()
-            break
-        except Exception as e:
-            last_exc = e
-            if attempt == 0:
-                log.warning(f"_fetch_tts_audio: fetch failed ({e}) — retrying once")
-                await asyncio.sleep(0.5)
-    else:
-        raise last_exc
-
-    log.debug(f"_fetch_tts_audio: fetched {len(audio_bytes)}b, decoding via ffmpeg")
-
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-i", "pipe:0",
-        "-f", "s16le", "-ar", str(WIRE_RATE), "-ac", "1",
-        "pipe:1",
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    # C1b fix (2026-07-05 review): the aiohttp fetch above is capped at 10s,
-    # but proc.communicate() had no timeout at all — if ffmpeg wedges on
-    # malformed/truncated input, this could hang the turn indefinitely with
-    # no way out. Cheap insurance: 15s cap, kill the process on timeout.
-    try:
-        pcm, err = await asyncio.wait_for(
-            proc.communicate(input=audio_bytes), timeout=15.0
-        )
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        raise RuntimeError("ffmpeg decode timed out after 15s")
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg decode failed: {err.decode()[:200]}")
-
-    log.debug(f"_fetch_tts_audio: decoded to {len(pcm)}b PCM (48kHz mono S16_LE)")
-    return pcm
 
 
 # ─── DeviceESPhomeServer ─────────────────────────────────────────────────────
@@ -2928,193 +2599,14 @@ async def record_dropped_wake(device, trigger_label: str, wake_info) -> None:
     Record a wake that never became a turn because the device has no HA
     behind it, and arm the ring cue for it.
 
-    The turn path reaches `_record_dropped_turn` by starting a turn and
+    The turn path reaches `em_turn_record.record_dropped_turn` by starting a turn and
     finding nothing there; this is the same event caught one step earlier,
     where the device stands down before holding the voice lock. Both must
     record it, or wakes during an HA outage vanish from the activity history
     depending on which path noticed — the events most worth seeing in a trend
     review, distinguishable from a device that heard nothing only by this row.
     """
-    await _record_dropped_turn(device, trigger_label, wake_info)
-
-
-async def _record_dropped_turn(device, trigger_label: str, wake_info) -> None:
-    """
-    Persist a stub record for a turn that never started (no ESPHome server /
-    no HA connection). Without this, wakes during an HA outage would vanish
-    from the activity history — exactly the "device woke but nothing
-    happened" events worth seeing in a trend review.
-
-    Also surfaces the outcome to the turn loop's ring cleanup, the same way a
-    completed turn does — the user standing in front of the device is the one
-    with no other way to find out. Without it the ring lit and cleared inside
-    a few milliseconds, which is the "looked like a glitch" failure ack_anim
-    was added for, on a device that will not answer until HA connects.
-    """
-    wi = wake_info or {}
-    turn_record = {
-        "ts":             time.time(),
-        "trigger":        trigger_label,
-        "wake_model":     wi.get("model"),
-        "wake_score":     wi.get("score"),
-        "wake_threshold": wi.get("threshold"),
-        "noise_floor":    wi.get("noise_floor"),
-        "outcome":        "no_ha",
-        "total_ms":       0,
-    }
-    await _persist_turn(device, turn_record)
-    device.turn_history.append(turn_record)
-    device.last_turn_outcome = turn_record["outcome"]
-
-
-async def _save_utterance(device, turn_id: int, turn_record: dict) -> None:
-    """
-    Write the turn's captured mic audio (if saveUtterances is on) to
-    recordings/ and record the filename on the turn row.
-
-    Runs after the insert because the filename is keyed on the rowid. The
-    buffer is consumed here — a turn that never streamed audio must not
-    inherit the previous turn's recording, and holding ~1MB of speech on
-    the Device past its one use has no upside.
-
-    Best-effort throughout: a full disk or a read-only volume costs the
-    recording, never the turn.
-    """
-    pcm = getattr(device, "last_utterance_pcm", None)
-    device.last_utterance_pcm = None
-    if not pcm:
-        return
-    try:
-        name = await asyncio.get_running_loop().run_in_executor(
-            None, em_recordings.save, device.device_id, turn_id, pcm
-        )
-    except Exception as e:
-        log.warning(f"[{device.device_id}] Utterance save failed: {e}")
-        return
-    if not name:
-        return
-    turn_record["audio_file"] = name
-    try:
-        await asyncio.get_running_loop().run_in_executor(
-            None, db.set_turn_audio, turn_id, name
-        )
-    except Exception as e:
-        log.warning(f"[{device.device_id}] Utterance link failed: {e}")
-        return
-    log.info(
-        f"[{device.device_id}] Utterance saved: {name} "
-        f"({em_recordings.duration_ms(len(pcm)) / 1000:.1f}s)"
-    )
-
-
-async def _persist_turn(device, turn_record: dict) -> None:
-    """
-    Write a completed turn to SQLite (survives controller restarts) and
-    remember the rowid on the device so the firmware's asynchronous
-    playback_stats report — which lands after the turn has already been
-    recorded — can attach its underrun count to this turn. Best-effort:
-    a DB hiccup must never take down the voice pipeline.
-    """
-    loop        = asyncio.get_running_loop()
-    played      = (turn_record.get("playback_ms") or -1) >= 0
-    pending     = device.pending_playback_stats
-    device.pending_playback_stats = None
-    if played and pending is not None and loop.time() - pending[0] < 30.0:
-        # Device reported this playback's stats before the turn row existed
-        # (its buffer drained ahead of our overestimated drain sleep).
-        turn_record["playback_periods"] = pending[1]
-        turn_record["underruns"]        = pending[2]
-        # v7 delivery detail (tuple len 5 from firmware >= v2.9.6; older
-        # stashes are 3-tuples and simply carry none of this).
-        if len(pending) >= 5:
-            pstats = pending[3] or {}
-            turn_record["min_depth"]     = pstats.get("minDepth")
-            turn_record["prime_wait_ms"] = pstats.get("primeWaitMs")
-            turn_record["recv_span_ms"]  = pstats.get("recvSpanMs")
-            turn_record["max_gap_ms"]    = pstats.get("maxGapMs")
-            turn_record["bytes_recv"]    = pstats.get("bytesRecv")
-            if pending[4] is not None and pending[4] >= 0:
-                turn_record["delivery_ms"] = pending[4]
-            turn_record["send_ms"] = device.playback_send_ms
-            turn_record["eq_ms"]   = device.playback_eq_ms
-        pending = None
-    # On-device shadow comparison (schema v13): when THIS controller woke, did
-    # the device's own scoring agree, and how far apart were they? Correlated
-    # here rather than at detection time on purpose — the device's crossing
-    # report travels over the control plane and can land after the wake it
-    # belongs to, and by turn end it has had seconds to arrive.
-    #
-    # dev_shadow records whether the device was scoring at all, so a NULL score
-    # beside a 1 is a genuine miss while a NULL beside a NULL is just absence of
-    # data. Only for wake-triggered turns: a button press has no wake instant to
-    # compare against, and writing 0 there would invent a miss.
-    wake_mono = device.last_wake_mono
-    device.last_wake_mono = None
-    if wake_mono is not None and str(turn_record.get("trigger", "")).startswith("wakeword"):
-        dev_score, dev_delta = device.shadow.match(wake_mono)
-        turn_record["dev_shadow"]        = 1 if device.shadow.active else None
-        turn_record["dev_wake_score"]    = dev_score
-        turn_record["dev_wake_delta_ms"] = dev_delta
-        # The bar the DEVICE was using. Without it a non-crossing cannot be
-        # judged: this controller may have woken at a lower barge-in threshold,
-        # which the device was never asked to match.
-        turn_record["dev_threshold"]     = device.shadow.threshold
-        if device.shadow.active:
-            log.info(
-                f"[{device.device_id}] shadow comparison: controller "
-                f"{turn_record.get('wake_score')} vs device "
-                f"{dev_score if dev_score is not None else 'MISS'}"
-                + (f" ({dev_delta:+d}ms)" if dev_delta is not None else "")
-            )
-        # owwOnDevice="on" inverts the question. The device triggered this
-        # turn, so the side that can be missing is OURS: a NULL here is a wake
-        # this controller did not hear, which is the direction that argues
-        # on-device scoring is worth its ~38% of a core. Only recorded when the
-        # device actually drove the turn — on a controller-triggered turn the
-        # column does not apply, and writing our own score into it would make
-        # every row agree with itself.
-        # A privately listening Echo sends this controller nothing to score,
-        # so there is no comparison to make and no miss to record.
-        if (str(turn_record.get("trigger", "")).startswith("wakeword-dev")
-                and not getattr(device, "private_listening", False)):
-            ctrl_score, ctrl_delta = device.ctrl_shadow.match(wake_mono)
-            turn_record["ctrl_wake_score"]    = ctrl_score
-            turn_record["ctrl_wake_delta_ms"] = ctrl_delta
-            log.info(
-                f"[{device.device_id}] wake comparison: device "
-                f"{turn_record.get('wake_score')} vs controller "
-                f"{ctrl_score if ctrl_score is not None else 'MISS'}"
-                + (f" ({ctrl_delta:+d}ms)" if ctrl_delta is not None else "")
-            )
-
-    # Surface the outcome to the turn loop's ring cleanup. Without this
-    # every ending looks identical to the user — "I didn't hear you",
-    # "HA errored" and "done, nothing to say" all just turn the ring off.
-    device.last_turn_outcome = turn_record.get("outcome")
-    try:
-        turn_id = await loop.run_in_executor(
-            None, db.insert_turn, device.device_id, turn_record
-        )
-        turn_record["turn_id"] = turn_id
-        await _save_utterance(device, turn_id, turn_record)
-        if played and "underruns" not in turn_record:
-            # Playback happened but its stats haven't arrived — leave the
-            # rendezvous open for handle_control's playback_stats branch.
-            device.last_turn_id = turn_id
-    except Exception as e:
-        log.warning(f"[{device.device_id}] Failed to persist turn: {e}")
-    if pending is not None and pending[2]:
-        # Stale/unmatched stash (announcement playback) — keep its underruns
-        # in the hourly counters rather than dropping them.
-        try:
-            await loop.run_in_executor(
-                None,
-                lambda: db.bump_wake_counters(
-                    device.device_id, underruns=pending[2]
-                ),
-            )
-        except Exception:
-            pass
+    await em_turn_record.record_dropped_turn(device, trigger_label, wake_info)
 
 
 async def trigger_voice_turn(
@@ -3157,7 +2649,7 @@ async def trigger_voice_turn(
             f"[{device.device_id}] esphome: no server registered for this device "
             f"— was start_esphome_servers() called?"
         )
-        await _record_dropped_turn(device, trigger_label, wake_info)
+        await em_turn_record.record_dropped_turn(device, trigger_label, wake_info)
         return False
 
     satellite = server.get_satellite()
@@ -3166,10 +2658,10 @@ async def trigger_voice_turn(
             f"[{device.device_id}] esphome: no active HA connection — "
             f"cannot start voice turn (HA not connected to this device's port)"
         )
-        await _record_dropped_turn(device, trigger_label, wake_info)
+        await em_turn_record.record_dropped_turn(device, trigger_label, wake_info)
         return False
 
-    trace = TurnTrace(
+    trace = em_turn_record.TurnTrace(
         trigger=trigger_label, t0=time.monotonic(), wake_info=wake_info
     )
 
@@ -3518,6 +3010,28 @@ def update_ambient_lux(device_id: str, lux) -> None:
         state=float(lux) if lux is not None else 0.0,
         missing_state=lux is None,
     ))
+
+
+def update_temperatures(device_id: str, cpu_c, max_c) -> None:
+    """
+    Push the two thermal readings to HA, off the stats report.
+
+    None is a reading the device could not take, sent as missing_state rather
+    than 0: 0 is a temperature. Older firmware reports these on stats too but
+    has no entity to receive them, hence the capability check.
+    """
+    server = _servers.get(device_id)
+    if server is None:
+        return
+    satellite = server.get_satellite()
+    if satellite is None or not satellite._thermal_capable:
+        return
+    for key, celsius in ((CPU_TEMP_KEY, cpu_c), (MAX_TEMP_KEY, max_c)):
+        satellite._send_one(api_pb2.SensorStateResponse(
+            key=key,
+            state=float(celsius) if celsius is not None else 0.0,
+            missing_state=celsius is None,
+        ))
 
 
 def get_mic_muted_and_wake_word(device_id: str) -> tuple[bool, bool]:

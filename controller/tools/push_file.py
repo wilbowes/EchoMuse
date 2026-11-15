@@ -281,7 +281,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("device", help="device id, e.g. G090LF11803611NF")
+    ap.add_argument("device", help="device id, e.g. G090LF99207711NF")
     ap.add_argument("local", help="local path (inside the controller container)")
     ap.add_argument("remote", help="destination path on the device")
     ap.add_argument("--chmod", metavar="MODE", help="chmod the file after a verified push")

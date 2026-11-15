@@ -24,15 +24,19 @@ name: emOS Release (init binary)
 # aarch64 for FireOS 5 and `init32` is armv7a for FireOS 6. See the compile
 # steps. Nothing else published here is per-architecture.
 #
-# Alongside them: emOS's own `wpa_supplicant`, `wpa_cli`, `em-wifi` and
-# `busybox`. Ours, not Amazon's — hostap is BSD, libnl-tiny LGPL, busybox
-# GPLv2, em-wifi is our source — so they are as distributable as the init. A
+# Alongside them: emOS's own `wpa_supplicant`, `wpa_cli`, `em-wifi`, `busybox`
+# and `e2fsck`. Ours, not Amazon's — hostap is BSD, libnl-tiny LGPL, busybox
+# and e2fsprogs GPLv2, em-wifi is our source — so they are as distributable as
+# the init. The Dot 3's FireOS 6 has no ext4 checker, so e2fsck is not
+# optional there. A
 # FireOS 6 image NEEDS them: Amazon's supplicant aborts under emOS before
 # main() (it opens /dev/binder), and a FireOS 6 /system ships toybox and no
 # busybox at all, so there is no udhcpc to get an address with.
 #
-# busybox is GPLv2, the only licence here that obliges us to distribute SOURCE,
-# and that obligation is met by ASSETS rather than by wording in the notes.
+# busybox and e2fsprogs are GPLv2, the only licence here that obliges us to
+# distribute SOURCE, and that obligation is met by ASSETS rather than by
+# wording in the notes. e2fsck's is `e2fsprogs-<ver>.tar.gz` + `e2fsprogs-NOTICE`
+# beside the binary, built unpatched by emos/tools/build-e2fsck.sh; busybox's:
 # Every release publishes `busybox-<ver>.tar.bz2` (the unmodified upstream
 # tarball this binary was built from, verified against its pin) and
 # `busybox-LICENSE`, beside the binary. A link to busybox.net would not do:
@@ -259,6 +263,39 @@ jobs:
           # it patches sources with inline python that no grep would catch.
           echo "GPL-2.0: source + licence present, source matches the pin"
 
+      # e2fsck checks /data before init mounts it read-write. Amazon's lives in
+      # /system/bin on biscuit and radar, but the Dot 3's FireOS 6 has NO ext4
+      # checker at all (41C8, 2026-11-15), so emOS carries its own. Same
+      # toolchain and reasons as busybox above; the qemu setup is shared.
+      - name: Build e2fsck (armv7, static)
+        run: |
+          mkdir -p emos/build/e2
+          docker run --rm --platform linux/arm/v7 \
+            -v "${{ github.workspace }}/emos":/emos \
+            -v "${{ github.workspace }}/emos/build/e2":/out -w /tmp \
+            alpine@${{ env.ALPINE_ARMV7_DIGEST }} \
+            sh /emos/tools/build-e2fsck.sh /out
+
+      - name: Verify e2fsck is static 32-bit ARM, with its GPL-2.0 source
+        run: |
+          file emos/build/e2/e2fsck
+          file emos/build/e2/e2fsck | grep -q "32-bit LSB executable, ARM" || {
+            echo "::error::e2fsck is not a 32-bit ARM executable"; exit 1; }
+          file emos/build/e2/e2fsck | grep -q "statically linked" || {
+            echo "::error::e2fsck is not statically linked"; exit 1; }
+          E2_VER=$(sed -n 's/^E2_VER=//p' emos/tools/build-e2fsck.sh)
+          E2_SHA512=$(sed -n 's/^E2_SHA512=//p' emos/tools/build-e2fsck.sh)
+          src=emos/build/e2/e2fsprogs-$E2_VER.tar.gz
+          for f in "$src" emos/build/e2/e2fsprogs-NOTICE; do
+            [ -s "$f" ] || {
+              echo "::error::$f is missing — e2fsck cannot be published"
+              echo "::error::without its corresponding source"
+              exit 1; }
+          done
+          echo "$E2_SHA512  $src" | sha512sum -c - || {
+            echo "::error::the published e2fsprogs source does not match the pin"
+            exit 1; }
+
       # ONE bundle, with a manifest of sha256s. Five assets fetched in sequence
       # could each fail on their own and hand a build a mismatched set; the
       # manifest is also the first digest in this path the RELEASE computed.
@@ -273,7 +310,8 @@ jobs:
             emos/build/emos-payload.zip \
             emos/build/init emos/build/init32 \
             emos/build/wpa/wpa_supplicant emos/build/wpa/wpa_cli \
-            emos/build/wpa/em-wifi emos/build/bb/busybox
+            emos/build/wpa/em-wifi emos/build/bb/busybox \
+            emos/build/e2/e2fsck
 
       # The off-target checks, against the exact source being published. All
       # of them: each drives a parser or an invariant whose failure is
@@ -325,9 +363,10 @@ jobs:
             emos/build/init
             emos/build/emos-payload.zip
             emos/build/bb/busybox-*.tar.bz2
+            emos/build/e2/e2fsprogs-*.tar.gz
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           name: emOS ${{ github.ref_name }}
           prerelease: ${{ steps.channel.outputs.prerelease }}
@@ -342,6 +381,8 @@ jobs:
             emos/build/emos-payload.zip
             emos/build/bb/busybox-*.tar.bz2
             emos/build/bb/busybox-LICENSE
+            emos/build/e2/e2fsprogs-*.tar.gz
+            emos/build/e2/e2fsprogs-NOTICE
           body_path: /tmp/emos-notes.md
           # No generated list. GitHub's is every PR merged anywhere in the repo
           # between two emos-v* tags — controller, docs, firmware — with "New

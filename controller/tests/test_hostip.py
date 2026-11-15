@@ -13,8 +13,8 @@ import em_hostip
 
 
 def test_configured_address_wins():
-    assert em_hostip.resolve("10.10.1.81", "192.168.0.5") == (
-        "10.10.1.81", "configured")
+    assert em_hostip.resolve("10.99.1.81", "192.168.0.5") == (
+        "10.99.1.81", "configured")
 
 
 def test_empty_configured_falls_back_to_detection():
@@ -43,7 +43,7 @@ def test_malformed_address_refuses_rather_than_being_repaired():
     # socket.inet_aton accepts this and yields 10.0.0.1 — an address the
     # operator never typed, advertised to the whole fleet.
     with pytest.raises(em_hostip.ServerIPError):
-        em_hostip.resolve("10.10.1", None)
+        em_hostip.resolve("10.99.1", None)
 
 
 def test_malformed_address_refuses_even_when_detection_would_work():
@@ -93,7 +93,7 @@ def test_docker_bridge_addresses_are_flagged():
 def test_ordinary_lan_addresses_are_not_flagged():
     # A false warning on a working install teaches people to ignore warnings,
     # which costs more than the one it would have caught.
-    for addr in ("10.10.1.81", "192.168.1.50", "172.16.4.2", "172.31.9.9",
+    for addr in ("10.99.1.81", "192.168.1.50", "172.16.4.2", "172.31.9.9",
                  "172.1.1.1"):
         assert not em_hostip.looks_containerised(addr), addr
 

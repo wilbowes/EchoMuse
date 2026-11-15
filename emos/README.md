@@ -513,6 +513,10 @@ Three layers, three different answers, and the design follows from them:
   licence to redistribute. Mounting it at runtime on a device that already has
   it is a different act from shipping it.
 - **Our code** — MIT, like the rest of the repo.
+- **e2fsck** — GPL-2.0, ours since the release after `emos-v0.11`: e2fsprogs
+  1.47.4 built by `tools/build-e2fsck.sh`, published with its upstream tarball
+  and NOTICE, the same obligation as busybox. The Dot 3's FireOS 6 has no ext4
+  checker at all, so without ours /data is never checked there.
 - **busybox** — GPL-2.0, and since `emos-v0.6` it is OURS: we build it and the
   release publishes the binary. That is the only licence here that obliges us
   to offer SOURCE, so the release notes carry the pinned upstream URL and point

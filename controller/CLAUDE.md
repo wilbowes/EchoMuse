@@ -131,6 +131,11 @@ registration/server order (`tests/test_capabilities.py`).
   (`em_button.decide`); mute is enforced by `cmd/server.go`'s `mic_start`
   rejection — keep it there. The evdev reader filters to `EV_KEY`.
 - **Ambient Light** (`ambient_light`): no sensor sends `missing_state`, not 0.
+- **CPU / Hottest Zone Temperature** (`thermal`, keys 5/6): off the stats
+  report's `cpuTempC`/`maxTempC`; diagnostic and disabled by default (the
+  chip, not the room). "Hottest Zone", never "Max": it is now, not a peak.
+  The push re-checks the capability, since older firmware sends the fields
+  with no entity to receive them; a missing reading is `missing_state`.
 
 ## Schema migrations
 
@@ -155,7 +160,8 @@ A backup `<db>.pre-v<N>.bak` is taken first and a failed backup refuses
    **Arbitration** (`em_arbiter`): hold `ARB_HOLD_S` 250ms from first heard,
    collect within `wakeArbitrationMs` (700), `pick()` the **loudest, no
    margin** (`em_wakelevel`); earliest-heard only when levels cannot be
-   compared (missing, heard over own playback, differing gains). Do not return
+   compared (missing, heard over own playback, differing gains). An Echo
+   ringing a timer wins before either (#862). Do not return
    to SNR or first-detector-wins. **An Echo with no HA behind it stands down
    BEFORE the claim** (`can_serve_turn` before `_claim_wake`, `test_deploy.py`)
    and still records the wake and plays the cue (`record_dropped_wake`);
@@ -373,6 +379,13 @@ system`/`Power down`; marker after a complete read; SSIDs dropped.
   sending.** `TransferResult` names the stage; a silent shell is a link
   fault. No `cut`; firmware `require_verify=True`. Free space via
   `parse_free_mb`; unreadable = carry on.
+- **Release assets must be signed** once `em_release_sig.KEYS` holds a key:
+  `em_releases.download` (all four install paths) verifies `<asset>.sig`
+  (Ed25519 over tag + name + sha256) on download AND cache hit, and refuses
+  otherwise (`why_failed` gives the reason). Empty KEYS = not enforced. User
+  uploads are exempt. Signing is `tools/sign_release.py`, off GitHub and off
+  this box; the key PR also turns release workflows to drafts (immutable
+  releases forbid adding a `.sig` after publishing).
 - **The running version is refused** on a single update (`already_running`),
   skipped in a fleet one (`extract_binary_version`); `force` must stay; the
   upload token is popped only on commit.
@@ -442,6 +455,13 @@ Recognised from `/system` (`_echoBoard`, `echo_board.test.mjs`), refused on
 FireOS, board sent with the build; **read off the device, never the page**.
 `donorVerdict` skips biscuit's bootloader fingerprint. Restoring to stock:
 finish on `_b`.
+
+### Donut (2026-11-10, not yet run on hardware)
+
+As radar: `AEODN`/`donut_puffin` from `/system`, emOS only, no LK fingerprint
+(kaeru). Its 32-bit FireOS 6 runs on a **64-bit** kernel, so the gate wants
+arm64 for it, and its WiFi files are the SDIO modules
+(`_emosSystemFiles().donut`), not MT6620's tools.
 
 ### The emOS flow, and what a run against real hardware found
 

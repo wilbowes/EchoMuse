@@ -79,12 +79,19 @@ cd oww_forge
 docker compose -f docker-compose.deploy.yml up -d forge-ui   # http://<host>:8769
 ```
 
-Two images, and picking the wrong one costs a night:
+Four images, and picking the wrong one costs a night:
 
-| tag | torch | platforms | for |
-|-----|-------|-----------|-----|
-| `:latest` | CUDA 12.8 | linux/amd64 | a machine with an NVIDIA GPU |
-| `:latest-cpu` | CPU | linux/amd64, linux/arm64 | everything else, including Apple Silicon |
+| tag | torch | platforms | for | service |
+|-----|-------|-----------|-----|---------|
+| `:latest` | CUDA 12.8 | linux/amd64 | an NVIDIA GPU | `forge-ui` |
+| `:latest-rocm` | ROCm 6.3 | linux/amd64 | an AMD GPU | `forge-ui-amd` |
+| `:latest-xpu` | XPU | linux/amd64 | an Intel Arc / Core Ultra GPU | `forge-ui-intel` |
+| `:latest-cpu` | CPU | linux/amd64, linux/arm64 | everything else, including Apple Silicon | `forge-ui-cpu` |
+
+**The AMD and Intel images are built in CI but have not yet trained a model
+on AMD or Intel hardware.** The forge's log names the GPU it found at the
+start of a build; if yours says CPU with one of these cards, please open an
+issue with the card and that line.
 
 On Apple Silicon use `-cpu` and the `forge-ui-cpu` / `forge-cpu` services. The
 arm64 image runs natively instead of under emulation, which is the difference
@@ -137,6 +144,14 @@ automatic: if no CUDA device is visible at runtime, torch runs on CPU and
 `forge.py build` logs which device it's using (the UI shows it at the foot
 of the rail).
 
+- **AMD** (`GPU=rocm`): ROCm torch answers as CUDA, so openWakeWord and
+  Piper run unchanged. The host needs the `amdgpu` kernel driver; the image
+  carries the ROCm runtime. A card ROCm does not list may run with
+  `HSA_OVERRIDE_GFX_VERSION` set to the nearest one it does.
+- **Intel** (`GPU=xpu`): the image carries Intel's user-space GPU driver, and
+  `patch_xpu.py` points upstream's CUDA-only device code at the XPU. Feature
+  extraction stays on the CPU, as it does on NVIDIA (ONNX Runtime here is the
+  CPU build). The host needs the `i915` or `xe` kernel driver.
 - Host **with** the nvidia container runtime: use `forge` / `forge-ui` as-is.
 - Host **without** it, web UI: `docker compose up -d forge-ui-cpu` (the same
   service minus the GPU reservation; naming it starts its `cpu` profile). CLI:

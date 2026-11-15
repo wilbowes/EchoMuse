@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 ADB="adb"; [ -n "$SERIAL" ] && ADB="adb -s $SERIAL"
-HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HERE=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 command -v adb >/dev/null || { echo "adb not found on PATH" >&2; exit 1; }
 $ADB get-state >/dev/null 2>&1 || { echo "no device (adb get-state failed)" >&2; exit 1; }
 

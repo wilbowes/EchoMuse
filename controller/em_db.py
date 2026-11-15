@@ -504,7 +504,7 @@ MIGRATIONS: list[str] = [
     # ── v5 — persistent activity stats ────────────────────────────────────────
     #
     # turns: one row per voice turn (wake/button/barge-in/continuation),
-    # written at turn completion from the TurnTrace in em_esphome. Survives
+    # written at turn completion from the TurnTrace in em_turn_record. Survives
     # controller and device restarts — the in-memory Device.turn_history is
     # hydrated from here on connect. trigger_type not "trigger": TRIGGER is
     # an SQLite keyword. underruns/playback_periods arrive asynchronously
@@ -903,8 +903,8 @@ MIGRATIONS: list[str] = [
     # collapsed to the same address and Home Assistant treated two Echoes as
     # one, overwriting the first (#212, found by @lennart24 in #217):
     #
-    #     G090LF1180440C9K -> 090F1180440C9 -> 90:F1:18:04:40:C9
-    #     G090LF1180440C9R -> 090F1180440C9 -> 90:F1:18:04:40:C9
+    #     G090LF9920110C9K -> 090F9920110C9 -> 90:F9:92:01:10:C9
+    #     G090LF9920110C9R -> 090F9920110C9 -> 90:F9:92:01:10:C9
     #
     # And because it was a function, changing it to fix that would have
     # changed EVERY device's identity, orphaning every HA device row and the

@@ -166,14 +166,14 @@ def follows(control_peer, peer, control_secure=False, secure=False):
 
 
 def test_the_same_address_is_admitted():
-    assert follows("10.10.1.77", "10.10.1.77") is None
+    assert follows("10.99.1.77", "10.99.1.77") is None
     assert follows("fe80::1", "fe80::1") is None
 
 
 def test_ipv4_mapped_ipv6_is_the_same_address():
     # A dual-stack listener reports the same peer both ways.
-    assert follows("10.10.1.77", "::ffff:10.10.1.77") is None
-    assert follows("::ffff:10.10.1.77", "10.10.1.77") is None
+    assert follows("10.99.1.77", "::ffff:10.99.1.77") is None
+    assert follows("::ffff:10.99.1.77", "10.99.1.77") is None
 
 
 def test_an_ipv6_zone_does_not_hide_the_address():
@@ -182,15 +182,15 @@ def test_an_ipv6_zone_does_not_hide_the_address():
 
 
 def test_another_address_is_refused():
-    why = follows("10.10.1.77", "10.10.1.200")
-    assert why and "10.10.1.200" in why
+    why = follows("10.99.1.77", "10.99.1.200")
+    assert why and "10.99.1.200" in why
 
 
 def test_plain_is_refused_when_control_is_tls():
-    assert follows("10.10.1.77", "10.10.1.77", control_secure=True, secure=False)
-    assert follows("10.10.1.77", "10.10.1.77", control_secure=True, secure=True) is None
+    assert follows("10.99.1.77", "10.99.1.77", control_secure=True, secure=False)
+    assert follows("10.99.1.77", "10.99.1.77", control_secure=True, secure=True) is None
     # The other way round is an upgrade, not an impersonation.
-    assert follows("10.10.1.77", "10.10.1.77", control_secure=False, secure=True) is None
+    assert follows("10.99.1.77", "10.99.1.77", control_secure=False, secure=True) is None
 
 
 def test_an_unreadable_address_admits():

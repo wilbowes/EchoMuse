@@ -454,13 +454,13 @@ with no known mechanism; do not call it the cause.
 - Scenes (`em_scenes.py`, `ledScene`). With `led_anim` the device **animates
   locally** (`internal/server/animator.go`). `meter` reads the **voice plane
   before the music mix**; `meter*` → `resolveMeter`, which clamps itself.
-  `ttlSec`: 30s listening, 135s spinner (**coupled to `_fetch_tts_audio`'s 60s
+  `ttlSec`: 30s listening, 135s spinner (**coupled to `em_tts_audio.fetch`'s 60s
   ×2 — move one, move the other**), `em_scenes.meter_ttl` per response; it is
   the dead-man. A newer spec or `leds` frame replaces atomically (generation
   counter). `listening: true` on listening frames drives the direction overlay.
   Mute red and volume cyan are device-local.
 - Outcomes by rhythm, not colour, from `device.last_turn_outcome` (set in
-  `_persist_turn` **and `_record_dropped_turn`**, consumed by
+  `em_turn_record.persist_turn` **and `em_turn_record.record_dropped_turn`**, consumed by
   `_leds_turn_end`); **`no_ha` alone uses colour** (orange), after a 600ms
   listening hold.
 - **Start a device-local pulse ONCE per state** (`pulseKind`); phase from

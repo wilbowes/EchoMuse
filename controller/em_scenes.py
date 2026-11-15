@@ -96,7 +96,7 @@ METER_TTL_PAD = 20
 # Dead-man TTL for the thinking spinner. It must outlast everything the
 # spinner spans — HA's think time AND the TTS fetch — because the ring is
 # showing "working on it" for the whole of both. That makes it coupled to
-# _fetch_tts_audio's timeout (60s, x2 attempts): a shorter TTL would clear
+# em_tts_audio.fetch's timeout (60s, x2 attempts): a shorter TTL would clear
 # the ring part-way through exactly the long responses that need it most,
 # which is the same class of bug as the playback estimate this release
 # replaces. Keep these two in step if either moves.

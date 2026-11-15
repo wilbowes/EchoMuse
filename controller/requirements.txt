@@ -5,7 +5,7 @@
 #
 # Tested with Python 3.12.
 # WebSocket server (device connections)
-websockets==17.3
+websockets==17.4
 # HTTP API + dashboard server
 aiohttp==3.14.5
 # Password hashing
@@ -29,7 +29,7 @@ cryptography==50.0.2
 # It sat at 0.149.17 rather than 0.150.0 for a while — the smallest jump that
 # cleared all three, on a dependency the whole fleet's discovery depends on.
 # 0.150.0 now that it has had time in the wild.
-zeroconf==0.151.5
+zeroconf==0.153.0
 # Wake word inference — openwakeword deps installed manually to avoid
 # tflite-runtime which has no Python 3.12 x86_64 build.
 # openwakeword itself is installed via --no-deps in the Dockerfile.

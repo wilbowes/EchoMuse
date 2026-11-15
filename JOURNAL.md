@@ -219,7 +219,7 @@ are **append-only and in ascending date order** — new work goes at the end.
   **The conf must be written while WiFi is down.** With the bounce actually working, the switch *still* failed — the supplicant rejoined the old network every time. On `svc wifi disable`, WifiStateMachine saves its in-memory network list back over `wpa_supplicant.conf`, clobbering anything written beforehand. The provisioning wizard's write-then-bounce order got away with it because a factory device has no framework-known networks to save; a provisioned device faithfully restores its current one. New order everywhere (change, revert, startup recovery): disable (verified) → write conf → enable. `associateTimeout` also raised 20s → 45s — only first-joins pay it; reverts re-associate to a known network well inside 20s.
   **Result delivery is now at-least-once.** The first genuinely-successful switch reported "timed out" to the dashboard: the switch kept the same IP, so the control WebSocket's TCP connection survived as half-open — `IsConnected()` said true, the single `wifi_result` send vanished into the dead socket, and the old take-and-send semantics meant the queued result was already consumed. The device now keeps the result pending and re-sends it (on reconnect + a 10s ticker) until the controller acks with `wifi_commit`, which the controller now sends for **every** wifi_result — for failures the marker/backup are already gone, so the ack is a harmless no-op; duplicate results are recorded/logged once.
   **start_server.sh fleet drift closed (same day, follow-up).** The startup script is installed at provisioning and had no update path afterwards — audit found Lounge a revision behind Office (missing the amp_off/idle-hiss fix; canonical md5 531dc3f2, Lounge d26fce30). Two fixes: Lounge got a one-off push (heredoc transfer, md5-verified, rename into place — takes effect on next reboot since the running shell holds the old inode), and every firmware OTA now syncs the device's script against the canonical `controller/device_payloads/` copy (`_sync_start_script`: md5 compare → skip when current; push + verify + rename when stale; best-effort, never blocks the firmware update). The binary-transfer helper was generalised to `_stream_file_to_device` for this — future payloads (BLE proxy etc.) ride the same path.
-  All three safety paths validated on the Lounge device: rollback (garbage SSID — dropped, reverted, reported in 65s), startup recovery (marker found at boot → previous network restored + reported), and the happy path (Neptune-Secure → Neptune-Media in 30s, committed, no artifacts left). The WiFi tab's scan also works live (note: hidden SSIDs render as `\x00…` — cosmetic, unfiltered for now).
+  All three safety paths validated on the Lounge device: rollback (garbage SSID — dropped, reverted, reported in 65s), startup recovery (marker found at boot → previous network restored + reported), and the happy path (Harbour-Secure → Harbour-Media in 30s, committed, no artifacts left). The WiFi tab's scan also works live (note: hidden SSIDs render as `\x00…` — cosmetic, unfiltered for now).
 
 - 2026-07-11 (later session, untagged after v2.7.9): three quality-of-life fixes.
   **Barge-in now works during the thinking phase.** The watcher previously spawned only when TTS playback began, so a wake word spoken while the assistant was still thinking was buffered and then discarded — barge-in "only kicked in during the response" (user report). The watcher now starts at STT_VAD_END (thinking onset) and spans thinking → playback with a phase-dependent threshold: during playback it uses `bargeInThreshold` (speech-over-TTS scores are depressed ~25dB by the echo), during thinking — where nothing is playing and a 0.05 threshold would fire on random speech — it uses the device's normal wake threshold. Detection during thinking cancels the in-flight HA pipeline (`cancel_voice_turn`, same mechanism as mute/dot-button) instead of flushing a speaker that isn't playing; the turn loop's existing barge re-entry handles the rest. Watcher lifecycle moved to the turn loop's `finally` so every exit path stops it.
@@ -2907,7 +2907,7 @@ warning before their own output; and `console` has a `req`, so an unexecutable
 shell logs `svc console absent` once instead of respawning for ever — the failure
 mode that hid the FireOS 6 system-as-root layout for a day.
 
-**Still open from today**: `ntpd` runs and queries `10.10.1.1` — the router, from
+**Still open from today**: `ntpd` runs and queries `192.0.2.1` — the router, from
 DHCP — which does not serve NTP, so it backs off for ever and the clock stays at
 2010 until the controller's `ack` supplies it. Real, not a regression, and
 choosing an NTP source is a decision with a phone-home flavour rather than a bug
@@ -3760,8 +3760,8 @@ shell plane, not on the config push, so every v2.16.0 device takes it with no
 firmware change. Ordered list, mDNS fallback always on and not exposed (Wil),
 so a typo costs a slower reconnect and never a stranded Echo. On 15LE: the list
 written and md5-verified on save; the server restarted, and it dialled
-`Static endpoint 1/2 … 10.10.1.81:8767` and registered first time over wss;
-with a dead address (10.10.1.249) it timed out twice (10s each, 5s apart),
+`Static endpoint 1/2 … 192.0.2.81:8767` and registered first time over wss;
+with a dead address (192.0.2.249) it timed out twice (10s each, 5s apart),
 took its one mDNS attempt and registered 31s after the first dial — the 30–40s
 the firmware's constants predicted; cleared, the file was confirmed gone over
 serial.

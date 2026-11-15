@@ -165,16 +165,27 @@ def _start_job(kind: str, label: str, argv: list) -> None:
     _job = Job(kind, label, argv)
 
 
+# NVIDIA and AMD (ROCm) answer as torch.cuda, Intel as torch.xpu.
+_GPU_PROBE = """
+import json, torch
+xpu = getattr(torch, "xpu", None)
+if torch.cuda.is_available():
+    name = torch.cuda.get_device_name(0)
+elif xpu is not None and xpu.is_available():
+    name = xpu.get_device_name(0)
+else:
+    name = None
+print(json.dumps({"available": name is not None, "device": name, "torch": torch.__version__}))
+"""
+
+
 def _gpu() -> dict:
-    """Probe CUDA once, in a subprocess (importing torch here would pin ~1GB)."""
+    """Probe the GPU once, in a subprocess (importing torch here would pin ~1GB)."""
     global _gpu_info
     if _gpu_info is None:
         try:
             out = subprocess.run(
-                [sys.executable, "-c",
-                 "import torch,json;print(json.dumps({'available':torch.cuda.is_available(),"
-                 "'device':torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,"
-                 "'torch':torch.__version__}))"],
+                [sys.executable, "-c", _GPU_PROBE],
                 capture_output=True, text=True, timeout=60,
             )
             _gpu_info = json.loads(out.stdout.strip().splitlines()[-1])

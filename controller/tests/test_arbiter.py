@@ -416,3 +416,43 @@ def test_a_held_contest_without_levels_still_goes_to_the_first_to_hear():
         return await a, await b
     assert run(main()) == ("a", "a")
 
+
+
+def test_a_wake_over_a_ringing_timer_goes_to_the_ringing_echo():
+    """#862, the 2.26.0 acceptance run: …0C95 was ringing, the wake word went
+    to …15LE because it heard it first, and the wrong Echo lit."""
+    claims = [Claim(0.000, "15le", -50.0),
+              Claim(0.060, "c95", -48.0, over_playback=True, ringing=True)]
+    assert _who(claims) == ("c95", "ringing")
+    # Nor does a louder neighbour take it.
+    claims = [Claim(0.000, "near", -30.0),
+              Claim(0.090, "ringer", -70.0, over_playback=True, ringing=True)]
+    assert _who(claims)[0] == "ringer"
+
+
+def test_two_ringing_echoes_are_decided_between_them_as_usual():
+    claims = [Claim(0.000, "other", -40.0),
+              Claim(0.020, "a", -60.0, over_playback=True, ringing=True),
+              Claim(0.050, "b", -50.0, over_playback=True, ringing=True)]
+    who, why = _who(claims)
+    assert who == "a" and why.startswith("ringing; earliest heard")
+
+
+def test_a_ringing_echo_that_is_not_in_the_contest_changes_nothing():
+    claims = [Claim(0.000, "a", -60.0), Claim(0.050, "b", -50.0)]
+    assert _who(claims) == ("b", "loudest by 10.0dB")
+
+
+def test_a_ringing_claim_wins_the_held_contest():
+    async def main():
+        arb = WakeArbiter()
+        loop = asyncio.get_running_loop()
+        t = loop.time()
+        first = asyncio.create_task(arb.contest("15le", 0.7, heard_at=t, hold_s=0.1,
+                                                level=-50.0))
+        await asyncio.sleep(0.02)
+        second = asyncio.create_task(arb.contest("c95", 0.7, heard_at=t + 0.06, hold_s=0.1,
+                                                 level=-48.0, over_playback=True,
+                                                 ringing=True))
+        return await first, await second
+    assert run(main()) == ("c95", "c95")
