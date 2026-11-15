@@ -8738,7 +8738,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         setAdb(null);
         return;
       }
-      addLog(`Error: ${e.message}`, 'error');
+      // A device already on record is a choice for the operator, not a
+      // failure (Wil, 2026-11-15): amber, no "Error:". The step still stops
+      // so the choice below is made before anything runs.
+      if (e.matchedDeviceId) addLog(e.message, 'warn');
+      else addLog(`Error: ${e.message}`, 'error');
       setStepError(e.message || String(e));
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
