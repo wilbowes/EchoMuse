@@ -34,8 +34,8 @@ piper-sample-generator @ `v2.0.0` (the last release with the flat layout
 openWakeWord's `train.py` imports from — don't bump casually; its
 `torch.load` is patched for torch ≥ 2.6's `weights_only` default flip).
 `train.py` is also patched so that no adversarial negative contains one of
-your target phrases: unpatched, training "hey verona" beside "verona" makes
-"verona" a negative as well, and the bare name stops firing.
+your target phrases: unpatched, training "hey echomuse" beside "echomuse"
+makes "echomuse" a negative as well, and the bare name stops firing.
 
 ## Quickstart — web UI
 
