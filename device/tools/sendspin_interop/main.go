@@ -1,6 +1,6 @@
 // sendspin_interop runs the device's Sendspin player against a real server,
 // on a host, with a simulated DAC in place of the speaker. server.py is the
-// other half: aiosendspin 9.1.1, the library Music Assistant ships. run.sh
+// other half: aiosendspin, the library Music Assistant ships. run.sh
 // drives both.
 //
 // It exists because the spec and the shipped library disagree in several
@@ -22,6 +22,7 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -49,11 +50,15 @@ func main() {
 	ppm := flag.Float64("dacppm", -560, "simulated DAC clock error, ppm")
 	latency := flag.Duration("latency", 85*time.Millisecond, "simulated ALSA buffer")
 	noise := flag.Duration("noise", time.Millisecond, "± error in measuring the DAC position")
+	codecs := flag.String("codecs", "flac", "codecs to offer, best first; empty offers the device's own list")
 	flag.Parse()
 
 	cfg := sendspin.Config{
 		StorePath: *store, Name: "Interop Echo", Instance: "interop-echo",
 		Port: *port, Product: "interop", Version: "test", Unpaired: *unpaired,
+	}
+	if *codecs != "" {
+		cfg.Codecs = strings.Split(*codecs, ",")
 	}
 	c, err := sendspin.New(cfg)
 	if err != nil {

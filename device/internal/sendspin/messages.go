@@ -81,9 +81,13 @@ type clientHello struct {
 }
 
 type playerState struct {
-	Volume            int      `json:"volume"`
-	Muted             bool     `json:"muted"`
+	Volume int  `json:"volume"`
+	Muted  bool `json:"muted"`
+	// The same delay under both names: 9.1.1 reads static_delay_ms, 10.x
+	// output_delay_ms (it maps the old key, flags it, and plans to stop:
+	// aiosendspin #393). Neither handshake says which server this is.
 	StaticDelayMs     int      `json:"static_delay_ms"`
+	OutputDelayMs     int      `json:"output_delay_ms"`
 	RequiredLeadMs    int      `json:"required_lead_time_ms"`
 	MinBufferMs       int      `json:"min_buffer_ms"`
 	SupportedCommands []string `json:"supported_commands"`
