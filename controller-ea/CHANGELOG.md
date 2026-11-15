@@ -1,5 +1,44 @@
 # Changelog
 
+## 2.28.0-ea.1 (Early Access)
+
+The Echo Dot 3rd gen joins the setup wizard, and Home Assistant gets each Echo's CPU temperature. Pair with firmware v2.20.0-ea.1 and emOS emos-v0.12-ea.1, which this controller offers.
+
+**This release upgrades the controller's database to v33, and that cannot be undone in place.** A backup, `echomuse.db.pre-v33.bak`, is written beside the database first. To go back to 2.27.0-ea.6 or 2.27.0 you must restore that backup, losing anything recorded since; an older controller refuses to start on a v33 database.
+
+### New
+
+- **Set up an Echo Dot 3rd gen with the setup wizard.** It installs emOS, the only option for this model, and runs through to the Echo registering (#1160).
+- **Home Assistant shows each Echo's CPU temperature and its hottest thermal zone** as diagnostic sensors, disabled by default. They need firmware that reports them, and appear only on Echoes that can (#1138).
+
+### Improved
+
+- The setup wizard installs emOS only; the FireOS-native install is no longer offered on screen (#1183).
+- A timer ringing on one Echo now wins the wake word, so "stop" reaches the Echo that is ringing (#862).
+- With update checks turned off, opening the dashboard no longer contacts GitHub (#1150).
+
+### Fixed
+
+- The controller no longer asks a private Echo to start its microphone before that Echo has reported how it listens (#1185).
+- A clean restart is no longer reported as an unplanned boot (#1135).
+- Switching the wake word model in the dashboard now updates Home Assistant's wake word select (#1151).
+- A reconnecting Echo's old audio connection is closed instead of left half-open (#751).
+- An Echo's start script stops only its own LED controller rather than every process of that name (#1002).
+
+### Known issues
+
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A Sendspin stream that Music Assistant starts within a moment of the Echo connecting can lose its first two seconds.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+
+### Thanks
+
+@kargeor (#1138), @GreatBizarro (#1151), @DaSonOfPoseidon (#1002).
+
 ## 2.27.0-ea.6 (Early Access)
 
 Wake word scoring on the controller uses less CPU. Controller only: pair with firmware v2.19.0-ea.4 and emOS emos-v0.11-ea.2, which this controller offers.
