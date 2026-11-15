@@ -104,6 +104,9 @@
 #ifndef SSH_SH
 #define SSH_SH     "/system/bin/sh"
 #endif
+#ifndef FW_MARK
+#define FW_MARK    "/run/fw-up"
+#endif
 #define SSH_POLL_S   2
 #define SSH_MAX_CONN 4
 
@@ -2679,8 +2682,10 @@ static void net_main(void)
         sleep(1);
     firewall();                 /* before the interface is ever up */
     /* ssh waits for this: firewall() flushes INPUT, which would drop the
-     * port 22 rule if ssh_main had opened it first. */
-    close(open("/run/fw-up", O_WRONLY | O_CREAT, 0644));
+     * port 22 rule if ssh_main had opened it first. A new inode each time,
+     * so a respawned net's flush tells ssh_main to admit port 22 again. */
+    unlink(FW_MARK);
+    close(open(FW_MARK, O_WRONLY | O_CREAT, 0644));
     r = ifup("wlan0");
     netlog("wlan0 present=%d ifup=%d\n",
          access("/sys/class/net/wlan0", F_OK) == 0, r);
@@ -3342,7 +3347,7 @@ int main(int argc, char **argv)
     /* SSH, forked in-process like net. Independent of EchoMuse on purpose:
      * it is the way in when the server will not start. Absent on an image
      * with no tinysshd, said once. Off until the owner turns it on. */
-    svc_add("ssh", NULL, SSH_BIN, "/run/fw-up");
+    svc_add("ssh", NULL, SSH_BIN, FW_MARK);
 
     supervise();
     return 0;
@@ -4140,12 +4145,20 @@ static pid_t ssh_serve(int c)
     _exit(127);
 }
 
+/* FW_MARK's inode: net_main replaces it after every firewall() flush. */
+static ino_t ssh_fw_ino(void)
+{
+    struct stat st;
+    return stat(FW_MARK, &st) == 0 ? st.st_ino : 0;
+}
+
 /* The service: wait for the owner to want SSH, listen while they do, close
  * everything when they stop. Never returns; init respawns it if it dies. */
 static void ssh_main(void)
 {
     pid_t conn[SSH_MAX_CONN] = {0};
     int ls = -1;
+    ino_t fw = 0;
     for (;;) {
         int pid;
         while ((pid = waitpid(-1, NULL, WNOHANG)) > 0)
@@ -4159,6 +4172,7 @@ static void ssh_main(void)
         if (want && ls < 0) {
             if (ssh_passwd() == 0 && ssh_hostkey() == 0
                 && (ls = ssh_listen()) >= 0) {
+                fw = ssh_fw_ino();
                 ssh_firewall(1);
                 netlog("ssh: listening on %d\n", SSH_PORT);
             } else {
@@ -4179,6 +4193,14 @@ static void ssh_main(void)
             unlink(SSH_HOME "/.ssh/authorized_keys");
             sleep(SSH_POLL_S);
             continue;
+        }
+        /* net respawned and flushed INPUT: listening behind a dropped rule
+         * is SSH unreachable exactly when it is the way in. */
+        ino_t now = ssh_fw_ino();
+        if (now != fw) {
+            fw = now;
+            ssh_firewall(1);
+            netlog("ssh: filter flushed, port %d admitted again\n", SSH_PORT);
         }
 
         struct pollfd pf = { .fd = ls, .events = POLLIN };
