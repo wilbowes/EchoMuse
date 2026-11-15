@@ -2108,8 +2108,23 @@ finish on `_b`, the slot `boot-root.zip` patches for root.
   refused before any write. emOS now carries its own (#1182), so the donut
   list no longer asks for Amazon's. `/init recovery` from the emOS console
   reaches TWRP on the donut too.
-- **The latest emOS release (`emos-v0.11`, 2026-11-08) predates #1134**, so a
-  wizard-built donut has no Bluetooth until the next emOS release.
+- **First full donut run, 2026-11-15** (dev controller, `emos-v0.12-ea.1`,
+  which carries #1134 and #1182). Three attempts. (1) Step 1 hung silently on
+  the duplicate-serial path: `AdbClient.close()` was awaited before the choice
+  was shown and never returned on this TWRP; a retry got through. (2) The
+  Echo reset partway through step 5's wake word push (~18 MB into the
+  run's writes, official power brick, nothing logged) and booted stock
+  FireOS; nothing had been written but /data. (3) Clean: flash to boot_a,
+  slot set to A, `fsck_data status=0 by=/sbin/e2fsck`, /dev/stpbt, all ten
+  wake word files from the on-connect reconcile within seconds, listening
+  privately, HA connected. Deleting the old record made it a new device, so
+  strict approval asked once. TWRP's format of /data sets **max mount count
+  10** (biscuits read -1), so e2fsck runs a full check every tenth boot; a
+  read-only full check of its 1.5 GB /data took 0.07 s. TWRP's toybox `dd`
+  rejects `conv=fsync`. Led to: no picker, no asset step, bounded close.
+- **`test_a_signature_is_kept_beside_its_binary_and_pruned_with_it` is flaky**
+  (2026-11-15: pass, fail, pass on one checkout): `em_firmware.prune` orders by
+  mtime and the test's three writes share a tick. Not yet fixed.
 
 ### The emOS flow, and what a run against real hardware found
 
