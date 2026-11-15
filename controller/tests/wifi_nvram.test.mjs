@@ -120,7 +120,7 @@ check("it reads the symbol by name", fn.includes("'stWifiCfgDefault')"));
 check("it reads the record back before claiming success",
   fn.indexOf("await c.pull(REC)") > 0
   && fn.indexOf("await c.pull(REC)") < fn.indexOf("written from this device"));
-const emosSwitch = src.slice(src.indexOf("if (isEmos) switch (stepIdx)"),
+const emosSwitch = src.slice(src.indexOf("if (isEmos) switch (STEPS[stepIdx].id)"),
                              src.indexOf("else switch (stepIdx)"));
 const fireSwitch = src.slice(src.indexOf("else switch (stepIdx)"),
                              src.indexOf("else switch (stepIdx)") + 1500);
