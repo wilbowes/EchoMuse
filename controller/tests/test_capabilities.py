@@ -404,3 +404,17 @@ def test_private_listening_is_negotiated_in_both_directions():
     assert f'"{em_listen.CAPABILITY}" in (self.capabilities' in py
     assert em_listen.CAPABILITY in device_capabilities()
     assert re.search(r'FeatureListenSession\s*=\s*"listen_session"', CONTROL_GO.read_text())
+
+
+def test_identify_ring_capability_is_surfaced_to_the_dashboard():
+    """Identify (#860) has no fallback: old firmware gets the button disabled."""
+    caps = device_capabilities()
+    assert "identify_ring" in caps, "firmware no longer announces identify_ring"
+    assert "identify_ring_capable" in CONTROLLER.read_text(), \
+        "em_controller must expose the identify capability as a property"
+    assert "identifyRingCapable" in _device_record(), \
+        "/api/devices must surface the identify capability"
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    assert "!device.identifyRingCapable" in jsx, \
+        "the dashboard must disable Identify when the firmware lacks the capability"
+    assert "ledAnimCapable" not in jsx, "Identify must not depend on led_anim"

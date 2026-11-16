@@ -60,6 +60,10 @@ type Server struct {
 	flash   flashState
 	flashMu sync.Mutex
 
+	// identify is the ring's top layer (identify.go).
+	identify   identifyState
+	identifyMu sync.Mutex
+
 	// audioLevel holds the live speaker RMS as float64 bits — written by
 	// the speaker's ALSA pump via SetAudioLevel, read by the meter anim.
 	audioLevel atomic.Uint64
@@ -85,19 +89,12 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 		speaker:          speaker,
 	}
 
-	// Volume controller uses a getter so it handles the nil-during-boot window safely
-	server.volume = newVolumeController(func() led.Controller {
-		server.ledMu.Lock()
-		defer server.ledMu.Unlock()
-		return server.ledController
-	})
+	// Volume controller uses a getter so it handles the nil-during-boot window
+	// safely. Painters get the ring behind the identify gate (identify.go).
+	server.volume = newVolumeController(server.gatedLED)
 
 	// Mute controller — same LED getter pattern
-	server.mute = newMuteController(func() led.Controller {
-		server.ledMu.Lock()
-		defer server.ledMu.Unlock()
-		return server.ledController
-	}, nil)
+	server.mute = newMuteController(server.gatedLED, nil)
 
 	// Give volume controller access to mute state so it can restore the red ring
 	server.volume.isMuted = func() bool {
@@ -385,7 +382,7 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 	// Same paint suppressions as SetLEDs: the volume arc owns the ring for
 	// its display window, the mute ring is device-sovereign, and a flash
 	// holds it briefly.
-	if s.volume.DisplayActive() || s.mute.IsMuted() || s.flashActive() {
+	if s.volume.DisplayActive() || s.mute.IsMuted() || s.flashActive() || s.identifyActive() {
 		return
 	}
 
@@ -396,9 +393,7 @@ func (s *Server) SetDirectionLEDs(angleDeg float64) {
 		return
 	}
 
-	s.ledMu.Lock()
-	lc := s.ledController
-	s.ledMu.Unlock()
+	lc := s.gatedLED()
 	if lc == nil {
 		return
 	}
@@ -515,9 +510,7 @@ func suppressPaint(volumeActive, muted, linkDown bool) bool {
 
 // paintBaseLEDs paints the ring from the stored controller state.
 func (s *Server) paintBaseLEDs() {
-	s.ledMu.Lock()
-	lc := s.ledController
-	s.ledMu.Unlock()
+	lc := s.gatedLED()
 	if lc == nil {
 		return
 	}

@@ -130,6 +130,7 @@ type ControlClient struct {
 	refusedCallback       StateCallback
 	configAppliedCallback ConfigAppliedCallback
 	playCueCallback       func(string)
+	identifyCallback      StateCallback
 	sendspinTokenCallback func() map[string]any
 	volumeSetCallback     VolumeSetCallback
 	beamLockCallback      BeamLockCallback
@@ -200,6 +201,7 @@ func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCal
 func (c *ControlClient) OnRefused(cb StateCallback)               { c.refusedCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnPlayCue(cb func(string))                { c.playCueCallback = cb }
+func (c *ControlClient) OnIdentify(cb StateCallback)              { c.identifyCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
@@ -1013,6 +1015,14 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.playCueCallback(cueMsg.Cue)
 			}
 
+		case "identify":
+			// "Which Echo is this?" from the dashboard: the device takes the
+			// whole ring for a fixed time of its own (identify_ring). No payload
+			// and no duration, so a controller cannot hold the ring open.
+			if c.identifyCallback != nil {
+				c.identifyCallback()
+			}
+
 		case "sendspin_token_request":
 			var reply map[string]any
 			if c.sendspinTokenCallback != nil {
@@ -1330,6 +1340,12 @@ func capabilities() []string {
 	// a controller announcing the same feature, and only while
 	// bleProxyConnections is on.
 	//
+	// "identify_ring": this firmware handles the identify message (#860) by
+	// taking the whole ring for 30 s, above turns, replies, the mute ring and
+	// the volume arc. There is no fallback on a firmware without it: the
+	// dashboard shows the control disabled. The mute button's own LED is a
+	// separate GPIO and keeps showing mute.
+	//
 	// "sendspin": this firmware can be a Sendspin player (internal/sendspin),
 	// switched by sendspinEnabled. Whether it is running, and paired, is the
 	// sendspin status, for the aec_hw_ref reason.
@@ -1337,7 +1353,7 @@ func capabilities() []string {
 		"oww_shadow", "oww_trigger", "button_hold", "audio_mix",
 		"aec_hw_ref", "oww_local_only", "output_chain", "wake_cue", "volume_cue", "remote_volume_arc",
 		"response_level", "wake_mic", "pairing",
-		"wake_word_off", "sendspin", "ble_connect"}
+		"wake_word_off", "sendspin", "identify_ring", "ble_connect"}
 	if MicUnavailable() == "" {
 		caps = append(caps, "mic")
 	}

@@ -25,3 +25,25 @@ func TestStaticRetryDelay(t *testing.T) {
 		}
 	}
 }
+
+// Identify (#860) has no fallback: the controller offers it only to firmware
+// that announces this, so dropping the name silently disables the dashboard
+// control on every Echo.
+func TestIdentifyRingIsAnnounced(t *testing.T) {
+	for _, c := range capabilities() {
+		if c == "identify_ring" {
+			return
+		}
+	}
+	t.Fatal("capabilities() does not announce identify_ring")
+}
+
+func TestIdentifyMessageRunsTheCallback(t *testing.T) {
+	c := &ControlClient{}
+	called := 0
+	c.OnIdentify(func() { called++ })
+	c.identifyCallback()
+	if called != 1 {
+		t.Fatalf("callback ran %d times", called)
+	}
+}

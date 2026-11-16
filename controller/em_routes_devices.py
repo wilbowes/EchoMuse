@@ -26,6 +26,7 @@ import em_device_view
 import em_esphome
 import em_events
 import em_http
+import em_identify
 import em_labels
 import em_pairing
 import em_reconcile
@@ -46,6 +47,7 @@ def register(app: web.Application) -> None:
     app.router.add_patch("/api/devices/{id}",             _patch_device)
     app.router.add_delete("/api/devices/{id}",            _delete_device)
     app.router.add_post("/api/devices/{id}/approve",      _post_approve)
+    app.router.add_post("/api/devices/{id}/identify",     _post_identify)
     app.router.add_get("/api/devices/{id}/config",        _get_device_config)
     app.router.add_get("/api/devices/{id}/sendspin/token", _get_sendspin_token)
     app.router.add_get("/api/devices/{id}/ble_proxy/key", _get_ble_proxy_key)
@@ -263,6 +265,29 @@ async def _post_approve(request: web.Request) -> web.Response:
     await em_events.push({"type": "device_approved", "device_id": device_id,
                        "label": label})
     return em_http.ok({"device_id": device_id, "label": label})
+
+
+@auth.require_admin
+async def _post_identify(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/identify
+
+    Asks this Echo to take its whole ring for em_identify.DURATION_S so a
+    person can match the dashboard row to the device in front of them (#860).
+    The firmware owns the layer and the timer. Refused, with the reason, only
+    when the Echo is offline or its firmware lacks identify_ring.
+    """
+    device_id = request.match_info["id"]
+    live = em_state.devices.get(device_id)
+    verdict = em_identify.decide(
+        connected=live is not None,
+        identify_ring_capable=bool(live and live.identify_ring_capable),
+    )
+    if verdict != em_identify.OK:
+        return em_http.error(verdict, em_identify.MESSAGES[verdict],
+                             em_identify.STATUS[verdict])
+    await live.identify()
+    return em_http.ok({"device_id": device_id, "seconds": em_identify.DURATION_S})
 
 
 @auth.require_auth

@@ -121,6 +121,7 @@ below (`capabilities()` in `control.go`):
 | `remote_volume_arc` | always | Can show the cyan level arc for changed, non-zero remote volume commands when the opt-in `remoteVolumeArc` setting is on. Physical buttons remain unconditional; mute, boot restore, and duplicate state syncs remain silent |
 | `response_level` | always | Can boost the voice plane relative to device volume with `responseLevel` (`low` / `medium` / `high` = 0 / +6 / +12dB). The boost is applied before voice/music mixing and capped so it plus device volume never exceeds unity |
 | `stock_sound` | always | Voices its own speaker while it runs the output chain with no plug in the jack: its own volume law, driver correction and compressor bands, with no key to turn them off. Keeps the bass guard on while it does, whatever `bassGuardEnabled` says; the controller hides that switch for such a device |
+| `identify_ring` | always | Handles `identify` (#860) by taking the whole ring for 30s, above turns, replies, the mute ring and the volume arc, whatever the Echo is doing and whether or not it is muted. The mute button's own LED is a separate GPIO and keeps showing mute. No fallback: the controller offers Identify only to firmware that announces this |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
 | `thermal` | only if the kernel exposes a thermal zone | `cpuTempC` and `maxTempC` on the `stats` report become CPU Temperature and Hottest Zone Temperature in Home Assistant, diagnostic sensors disabled by default; a reading it could not take is `null` |
 | `sendspin` | always | Can be a Sendspin player (#89) for synchronised multi-room audio from Music Assistant, run when `sendspinEnabled` is on. Music Assistant connects to the device directly (port 8928, advertised as `_sendspin._tcp`); nothing of the session crosses the controller. Whether it is running, connected or paired is the `sendspin` status |
@@ -158,7 +159,7 @@ that only relays scoring announces `oww_shadow` alone.
 The controller reads capabilities via `@property` gates on the `Device` class
 (`controller/em_controller.py`): `led_anim_capable`, `audio_mix_capable`,
 `button_hold_capable`, `oww_shadow_capable`, `oww_trigger_capable`,
-`aec_hw_ref_capable`, plus direct
+`aec_hw_ref_capable`, `identify_ring_capable`, plus direct
 membership checks for the base four (`mic`/`speaker`/`leds`/`buttons`). Every
 string the controller checks must be one the device can send, and every string
 the device sends must be one the controller understands — both directions are
@@ -214,6 +215,7 @@ absent optional fields take prior/default behaviour.
 | `wifi_scan` | — | Scan for networks; answered with `wifi_scan_result` |
 | `wifi_change` / `wifi_commit` | `ssid`, `ssid_hex?`, `psk` / — | Switch WiFi with auto-rollback; commit finalises |
 | `shell_open` / `shell_close` | `pty?` | Ask the device to dial `/shell` (`pty:true` = interactive) / close it |
+| `identify` | — | Take the whole ring for 30s so a person can find this Echo; sent only if `identify_ring`. No payload and no duration: the device owns the 30s, and a second `identify` while one runs extends it. Overrides mute, the volume arc, the link pulse and every turn animation, which keep their state underneath and get the ring back afterwards |
 | `play_cue` | `cue` | Play a cue the device generates itself. Only `"wake"` today, sent when `wakeSound` is on and a wake outside a private-listening session has won arbitration; unknown names are ignored |
 | `music_flush` / `speaker_flush` | — | Flush the music / voice buffer (barge-in uses `speaker_flush`) |
 | `sendspin_token_request` | — | Ask for the Sendspin pairing token, for the dashboard to show on an admin's request; answered with `sendspin_token` |

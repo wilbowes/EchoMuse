@@ -1125,6 +1125,11 @@ class Device:
         return "wake_mic" in (self.capabilities or [])
 
     @property
+    def identify_ring_capable(self) -> bool:
+        """Whether firmware can take the whole ring on `identify` (#860)."""
+        return "identify_ring" in (self.capabilities or [])
+
+    @property
     def volume_cue_capable(self) -> bool:
         """Whether physical volume changes can play an idle preview tone."""
         return "volume_cue" in (self.capabilities or [])
@@ -1302,6 +1307,10 @@ class Device:
         message, never delayed by the prime gate or dropped by a flush.
         """
         await self.send_control({"type": "play_cue", "cue": name})
+
+    async def identify(self):
+        """Ask the Echo to take its whole ring for 30s (identify_ring, #860)."""
+        await self.send_control({"type": "identify"})
 
     async def push_config(self, **kwargs):
         await self.send_control({"type": "config", **kwargs})

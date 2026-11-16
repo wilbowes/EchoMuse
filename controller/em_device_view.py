@@ -234,6 +234,8 @@ def merge_device(row, boot: dict | None = None) -> dict:
         # without being able to act on it, and offering those "on" produces a
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
+        # Gates the dashboard's Identify button (#860); disabled with the reason, not silent.
+        "identifyRingCapable": getattr(live, "identify_ring_capable", False) if live else False,
         # Firmware that asks to pair itself (the owner holds the button); for
         # older firmware on a plain link the dashboard offers Pair instead.
         "pairingCapable":   getattr(live, "pairing_capable", False) if live else False,
