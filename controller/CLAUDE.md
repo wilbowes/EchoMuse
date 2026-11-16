@@ -28,6 +28,9 @@ default branch, so add-on files work only from `main`; test a branch with
   its reason in `test_deploy.FIXED_IN_THE_ADDON` (`DB_PATH`, `API_PORT`);
   `test_every_env_var_reaches_the_addon_or_states_why_not` checks both ways.
   `server_tls_port` cannot be 0 (an Echo holding a CA would be stranded).
+  **One accepted deviation: OIDC sign-in (`OIDC_*`, #868) is container-only**
+  (Wil, 2026-11-16): the add-on is ingress-only, so HA's login is its SSO.
+  Recorded as `OIDC_ISSUER` in `FIXED_IN_THE_ADDON`; any other is a new decision.
 - **`config.yaml`'s `version:` pins the pulled image**; `controller-release.yml`
   refuses a tag/pin mismatch.
 - **Ingress**: `em_start.py` maps `/data/options.json` to env vars (the

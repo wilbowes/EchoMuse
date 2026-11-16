@@ -236,6 +236,14 @@ record; they appear as pending and are approved onto fresh config.
 - 2026-11-03: the EA and dev add-ons cannot run at once: both take the
   device ports 8767/8770 on the host network, so whichever starts second
   errors. Satellite ports differ by channel; the device link does not.
+- 2026-11-16: OIDC sign-in (#868) merged as container-only, the one
+  accepted exception to "neither may gain or lose capability" (Wil: "a valid
+  deviation for a standalone container"). The add-on's dashboard is reachable
+  only through ingress (`_ingress_only_middleware`), so HA's own login already
+  plays the identity-provider role there, and OIDC was never run under
+  ingress. Enforced by `OIDC_ISSUER` in `test_deploy.FIXED_IN_THE_ADDON`. If
+  the add-on ever serves the dashboard outside ingress, this exception ends:
+  wire the `OIDC_*` options through `em_start.OPTION_ENV_VARS` instead.
 
 ### Voice backend
 
