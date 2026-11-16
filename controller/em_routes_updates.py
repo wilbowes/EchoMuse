@@ -1,6 +1,7 @@
 """
 The Updates tab's routes: firmware update and rollback, uploading a local
-firmware build or emOS payload, the emOS update, the latest firmware release
+firmware build or emOS payload, the emOS update, the migration from FireOS 5
+to emOS and its kept FireOS image, the latest firmware release
 and deploying it fleet-wide, and the controller release notice.
 """
 
@@ -32,6 +33,8 @@ log = logging.getLogger("echomuse.api")
 def register(app: web.Application) -> None:
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
     app.router.add_post("/api/devices/{id}/emos_update",  _post_device_emos_update)
+    app.router.add_post("/api/devices/{id}/emos_migrate", _post_device_emos_migrate)
+    app.router.add_get("/api/devices/{id}/fireos_image",  _get_device_fireos_image)
     app.router.add_post("/api/emos/upload",               _post_emos_upload)
     app.router.add_post("/api/devices/{id}/rollback",     _post_device_rollback)
     app.router.add_post("/api/releases/upload",           _post_upload_binary)
@@ -342,6 +345,67 @@ async def _post_device_emos_update(request: web.Request) -> web.Response:
         _pending_emos_uploads.pop(token, None)
     em_tasks.spawn(em_emos_ota.run_update(device_id, override))
     return em_http.ok({"status": "started", "version": version}, status=202)
+
+
+@auth.require_admin
+async def _post_device_emos_migrate(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/emos_migrate
+
+    Migrate a FireOS 5 Echo to the latest emOS release over the network
+    (em_emos_migrate). Everything about the Echo itself is checked on the Echo
+    by the migration's pre-flight; this refuses only what it can know here.
+
+    Returns 202 — the migration runs in the background.
+    """
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    row = await loop.run_in_executor(None, db.get_device, device_id)
+    if row is None:
+        return em_http.error("device_not_found", f"No device: {device_id}", 404)
+    live = em_state.devices.get(device_id)
+    if live is None:
+        return em_http.error("device_offline", "Device is not connected", 409)
+    # Positively FireOS: unknown is not FireOS (em_platform).
+    if getattr(live, "base_os", None) != "fireos":
+        return em_http.error("not_fireos", "This Echo is not running FireOS", 409)
+    if em_state.boards.get(device_id) not in em_emos_ota.MIGRATE_BOARDS:
+        return em_http.error(
+            "not_supported",
+            "Only an Echo Dot 2nd gen can be migrated over the network", 409)
+    if (em_emos_ota.busy(device_id) or device_id in em_ota.in_progress
+            or device_id in em_ota.queued):
+        return em_http.error("update_in_progress", "An update is already in progress", 409)
+    release = await em_releases.fetch_emos()
+    if release is None:
+        return em_http.error("no_release", "No emOS release information available", 409)
+    version = release["version"]
+    if not em_emos_update.can_target(version):
+        return em_http.error(
+            "release_too_old",
+            f"emOS {version} cannot roll a failed first boot back by itself, "
+            f"so it is not installed over the network.", 409)
+    em_tasks.spawn(em_emos_ota.run_migration(device_id))
+    return em_http.ok({"status": "started", "version": version}, status=202)
+
+
+@auth.require_admin
+async def _get_device_fireos_image(request: web.Request) -> web.StreamResponse:
+    """
+    GET /api/devices/{id}/fireos_image
+
+    The FireOS boot image a migration read off this Echo: the way back with
+    TWRP and a cable if emOS fails before init. Its own kernel, kept on the
+    owner's controller only.
+    """
+    device_id = request.match_info["id"]
+    path = em_emos_ota.escrow_path(device_id)
+    if path is None:
+        return em_http.error("not_found", "No FireOS image is kept for this Echo", 404)
+    return web.FileResponse(path, headers={
+        "Content-Type": "application/octet-stream",
+        "Content-Disposition": f'attachment; filename="fireos-boot-{device_id}.img"',
+    })
 
 
 @auth.require_auth

@@ -182,6 +182,14 @@ async def _reconcile_payloads(device_id: str, live) -> bool:
     # why absence keeps today's behaviour.
     if live.android_userspace:
         steps.append(("debloat", lambda: em_payloads.sync_debloat(live, device_id)))
+
+    # A migration to emOS that ended back on FireOS with nobody watching
+    # (em_emos_migrate.settle_on_fireos). Only on an Echo that POSITIVELY
+    # said FireOS, as the migrate route requires: an emOS Echo whose firmware
+    # reports no base_os would have its own trial state judged and cleared.
+    if getattr(live, "base_os", None) == "fireos":
+        steps.append(("emOS migration",
+                      lambda: em_emos_ota.settle_fireos(live, device_id)))
     finished = True
     for name, make in steps:
         # Re-read each time, and compare IDENTITY rather than presence: these

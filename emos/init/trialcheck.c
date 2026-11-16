@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define LEDDIR    "/tmp/emos-trialcheck"
@@ -26,11 +27,21 @@
 #define GOODIMG   "/tmp/emos-trialcheck.good"
 #define BOOTSTATE "/tmp/emos-trialcheck.state"
 #define ROLLBACKREC "/tmp/emos-trialcheck.rollback"
+#define CACHE     "/tmp/emos-trialcheck.cache"
 #define main   init_main_unused
+
+/* restore_good() ends in reboot(2). Run as root, the real call would restart
+ * the build host, so it is taken from init.c here: the system header is
+ * included first, and init.c's own include of it then adds nothing. */
+#include <sys/reboot.h>
+static int reboots;
+static int trialcheck_reboot(int how) { (void)how; reboots++; return -1; }
+#define reboot(how) trialcheck_reboot(how)
 
 #include "init.c"
 
 #undef main
+#undef reboot
 
 static int failures;
 
@@ -71,6 +82,114 @@ static void check(const char *label, const char *mark, int want, int kept)
                got, want, there ? "kept" : "removed", kept ? "kept" : "removed");
         failures++;
     }
+}
+
+
+/* A boot image of `len` bytes (a multiple of 2048) whose header id is `seed`
+ * repeated and whose body is a pattern from `seed`, so two images differ in
+ * every byte that matters. */
+static void write_image(const char *path, long len, unsigned char seed)
+{
+    unsigned char *img = calloc(1, len);
+    unsigned ps = 2048, ksz = (unsigned)(len - 2048);
+    memcpy(img, "ANDROID!", 8);
+    memcpy(img + 8, &ksz, 4);
+    memcpy(img + 36, &ps, 4);
+    for (int i = 0; i < 20; i++)
+        img[576 + i] = seed;
+    for (long i = 2048; i < len; i++)
+        img[i] = (unsigned char)(seed + i * 7);
+    FILE *f = fopen(path, "w");
+    fwrite(img, 1, len, f);
+    fclose(f);
+    free(img);
+}
+
+static long file_len(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (long)st.st_size : -1;
+}
+
+/* Does `path` begin with exactly the bytes of `ref`? */
+static int starts_with_file(const char *path, const char *ref)
+{
+    long n = file_len(ref);
+    if (n <= 0 || file_len(path) < n)
+        return 0;
+    unsigned char *a = malloc(n), *b = malloc(n);
+    FILE *fa = fopen(path, "r"), *fb = fopen(ref, "r");
+    int ok = fa && fb && fread(a, 1, n, fa) == (size_t)n
+             && fread(b, 1, n, fb) == (size_t)n && !memcmp(a, b, n);
+    if (fa) fclose(fa);
+    if (fb) fclose(fb);
+    free(a);
+    free(b);
+    return ok;
+}
+
+static void expect(int cond, const char *label)
+{
+    if (cond) printf("ok    %s\n", label);
+    else { printf("FAIL  %s\n", label); failures++; }
+}
+
+/* A migration from FireOS (controller/em_emos_update.py) leaves the FIRST emOS
+ * image on trial with the FireOS image as the known-good. Nothing in the
+ * rollback has seen a non-emOS image before, so drive the real restore with
+ * one: it is longer than the emOS image (a Magisk ramdisk is bigger than ours)
+ * and has its own id. Restored byte for byte, the mark gone, the counter
+ * reset, the record naming both, and the reboot asked for. */
+static void fireos_fallback(void)
+{
+    #define FIREOS "/tmp/emos-trialcheck.fireos"
+    const long emos_len = 4 * 2048, fireos_len = 7 * 2048;
+    char id_emos[41], id_fireos[41], mark[48], want[160], got[200] = {0};
+
+    write_image(BOOTDEV, emos_len, 0x11);
+    write_image(FIREOS, fireos_len, 0x22);
+    write_image(GOODIMG, fireos_len, 0x22);
+    image_id_hex(BOOTDEV, id_emos);
+    image_id_hex(GOODIMG, id_fireos);
+
+    snprintf(mark, sizeof mark, "%s\n", id_emos);
+    FILE *f = fopen(TRIALMARK, "w");
+    fwrite(mark, 1, strlen(mark), f);
+    fclose(f);
+    expect(trial_state() == TRIAL_ACTIVE,
+           "fireos fallback: the first emOS image is on trial");
+
+    write_state(MAX_TRIES);
+    unlink(ROLLBACKREC);
+    reboots = 0;
+    restore_good(MAX_TRIES);
+
+    expect(starts_with_file(BOOTDEV, FIREOS),
+           "fireos fallback: the FireOS image is restored byte for byte");
+    expect(file_len(BOOTDEV) == fireos_len,
+           "fireos fallback: a longer known-good is written whole");
+    expect(access(TRIALMARK, F_OK) != 0,
+           "fireos fallback: the trial mark is removed");
+    expect(read_state() == 0, "fireos fallback: the boot counter is reset");
+    expect(reboots == 1, "fireos fallback: the reboot is asked for");
+
+    snprintf(want, sizeof want, "from=%s\nto=%s\ntries=%d\n",
+             id_emos, id_fireos, MAX_TRIES);
+    f = fopen(ROLLBACKREC, "r");
+    if (f) { size_t n = fread(got, 1, sizeof got - 1, f); (void)n; fclose(f); }
+    expect(!strcmp(got, want),
+           "fireos fallback: the record names the emOS and FireOS images");
+
+    /* The known-good is left as it was: a second failure restores it again. */
+    expect(starts_with_file(GOODIMG, FIREOS),
+           "fireos fallback: the known-good copy is untouched");
+
+    unlink(FIREOS);
+    unlink(GOODIMG);
+    unlink(BOOTSTATE);
+    unlink(ROLLBACKREC);
+    unlink(CACHE);
+    #undef FIREOS
 }
 
 int main(void)
@@ -148,6 +267,8 @@ int main(void)
         unlink(GOODIMG);
         unlink(ROLLBACKREC);
     }
+
+    fireos_fallback();
 
     unlink(BOOTDEV);
     unlink(TRIALMARK);

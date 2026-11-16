@@ -25,6 +25,7 @@
  "em_diagnose.py": 99.0,
  "em_earlytts.py": 99.0,
  "em_emos_build.py": 92.0,
+ "em_emos_migrate.py": 98.0,
  "em_emos_ota.py": 22.0,
  "em_emos_update.py": 93.0,
  "em_endpoints.py": 96.0,

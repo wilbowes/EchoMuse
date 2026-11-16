@@ -44,7 +44,11 @@
 #include <time.h>
 #include <unistd.h>
 
+/* Overridable so an off-target check that reaches note() writes to a file,
+ * never to whatever block device the build host has at this path. */
+#ifndef CACHE
 #define CACHE     "/dev/block/mmcblk0p15"
+#endif
 #define USBDIR    "/sys/class/android_usb/android0"
 #define TTY       "/dev/ttyGS0"
 /* The raw trail fits in the 1024 bytes before ext4's superblock, the only
