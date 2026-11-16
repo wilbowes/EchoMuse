@@ -567,6 +567,32 @@ func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 	return d.listenGate.Open(crossAt, time.Now())
 }
 
+// routeWakeFrame decides what of one wake-stream frame leaves the device
+// (docs/listening.md): in ListenStream every frame is sent; in ListenLocal
+// only an open session's audio, through the gate; in ListenDegraded, or any
+// unknown state, nothing, though the gate still sees the frame so its noise
+// floor stays current. Only ListenStream sends unconditionally.
+// Split out of streamMic so the privacy rules are testable without a mic or
+// a socket (listen_routing_test.go): "nothing ever falls back to streaming"
+// was enforced by review alone until then.
+func (d *DataClient) routeWakeFrame(state string, chunk []byte, at time.Time,
+	send func([]byte), sendListen func(uint32, []byte)) {
+	switch state {
+	case ListenLocal:
+		out, session, end := d.listenGate.Push(chunk, at)
+		d.endListen(end)
+		for _, f := range out {
+			sendListen(session, f)
+		}
+	case ListenStream:
+		send(chunk)
+	default:
+		// ListenDegraded, or any state this build does not know: nothing
+		// leaves (fail closed). The gate still tracks the floor.
+		d.listenGate.Push(chunk, at)
+	}
+}
+
 // ListenOpen reports whether a private-listening session is streaming the
 // user's words to the controller.
 func (d *DataClient) ListenOpen() bool {
@@ -1461,19 +1487,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					if sc := d.ShadowScorer(); sc != nil {
 						sc.PushBytesAt(chunk, at)
 					}
-					switch state {
-					case ListenLocal:
-						out, session, end := d.listenGate.Push(chunk, at)
-						d.endListen(end)
-						for _, f := range out {
-							sendListenFrame(session, f)
-						}
-					case ListenDegraded:
-						// Nothing leaves. The gate still tracks the floor.
-						d.listenGate.Push(chunk, at)
-					default:
-						sendFrame(chunk)
-					}
+					d.routeWakeFrame(state, chunk, at, sendFrame, sendListenFrame)
 				}
 				continue
 			}
