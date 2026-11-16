@@ -350,3 +350,20 @@ at all, which is indistinguishable from a kernel that never started.
   under its heading; a finding that produced no commit (a measurement, a
   cause ruled out, a hardware fact) goes here too, as a dated bullet under the
   matching heading. Those are the "do not look there again" facts.
+- **2026-11-16, three scenario/unit flakes, one cause each.** (1)
+  "Home Assistant could not connect: Invalid preamble 48" (run 43827630784):
+  aioesphomeapi prints the preamble in hex, so 0x48 = `H` and HA had dialled
+  an HTTP listener. `free_port()` released its socket, and the satellite base
+  is not bound until an Echo registers, so the TtsServer's later pick could
+  take it. (2) `address already in use` at controller start (main,
+  run 43856923693): `free_port()` returned 52955 twice in a row and the
+  controller got it for both API and `/control`. Fix for both: one registry
+  of every port handed out, and the satellite range (base+0..8 and the BLE
+  range +1000..1008) picked below `ip_local_port_range`, where neither
+  `bind(0)` nor `connect()` lands. (3) `test_two_questions_in_a_row` timing
+  out (main, run 43677716749): the second wake came 70 ms after the reply's
+  EOS while the first turn was still writing its row (0.42 s on CI) and was
+  declined as busy, which is correct. Reproduced every time with a 0.5 s sleep
+  in `persist_turn`. The test now waits for the ring to go off first.
+  Separately, `em_firmware.prune` sorted by mtime alone, and three writes in
+  one timestamp tick tied (#1178); ties now go to the newer release.
