@@ -80,6 +80,8 @@ check("TWRP 3.6 is not v2", !v2({ twrp: "3.6.2_9-0" }));
 check("a bboe TWRP does not hide v2's LK",
   v2({ lk: LK_V2, twrp: "3.7.0_9-bboe2" }));
 check("FireOS 6 on /system (Android 7.1) is v2", v2({ release: "7.1.2" }));
+check("the line is Android 6, not 7: 6.0.1 is v2", v2({ release: "6.0.1" }));
+check("5.1.1 just below the line is not", !v2({ release: "5.1.1" }));
 
 // ── The refusal names what it found ──
 const both = _unlockVerdict({ release: "7.1.2", lk: LK_V2, twrp: "3.7.0_9-0" });
