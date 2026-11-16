@@ -179,3 +179,33 @@ def test_a_stored_wake_threshold_that_cannot_fire_is_lowered(tmp_path):
     assert json.loads(cfg["E"]) == {"owwThreshold": 0.9}
     assert cfg["F"] == "not json"
     assert fleet["owwThreshold"] == em_db.OWW_THRESHOLD_MAX
+
+
+def test_oidc_columns_from_a_pre_renumbering_build_migrate_cleanly(tmp_path):
+    """
+    v34 (OIDC identity) shipped in fork builds as v32 and v33, before upstream
+    took those numbers. Such a database, wound back to the last upstream version
+    it really has so upstream's migrations run, already has the columns: adding them again must be a no-op, not a failed
+    start, and an SSO account already in it must survive.
+    """
+    p = _legacy_db(tmp_path, upto=33)
+    c = sqlite3.connect(p)
+    c.executescript("""
+        ALTER TABLE users ADD COLUMN oidc_issuer TEXT;
+        ALTER TABLE users ADD COLUMN oidc_subject TEXT;
+        CREATE UNIQUE INDEX idx_users_oidc_identity
+            ON users(oidc_issuer, oidc_subject) WHERE oidc_subject IS NOT NULL;
+        INSERT INTO users (username, password_hash, role, created_at,
+                           oidc_issuer, oidc_subject)
+            VALUES ('sso-person', '', 'readonly', 0, 'https://idp/', 'sub-1');
+    """)
+    c.commit()
+    c.close()
+
+    em_db.init(p)
+
+    c = sqlite3.connect(p)
+    assert int(c.execute(VER).fetchone()[0]) == len(em_db.MIGRATIONS)
+    assert c.execute(
+        "SELECT oidc_subject FROM users WHERE username = 'sso-person'"
+    ).fetchone()[0] == "sub-1"

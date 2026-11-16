@@ -1308,6 +1308,11 @@ FIXED_IN_THE_ADDON = {
     # dashboard to that port, so any other value leaves ingress with nothing
     # to forward to.
     "API_PORT": "must equal config.yaml's ingress_port or ingress breaks",
+    # Home Assistant ingress is how the add-on signs people in: Supervisor has
+    # already authenticated them. OpenID Connect is for the standalone
+    # container, which has only local passwords otherwise, and it has not been
+    # exercised under the add-on.
+    "OIDC_ISSUER": "the add-on signs in through HA ingress; SSO is container-only",
 }
 
 
