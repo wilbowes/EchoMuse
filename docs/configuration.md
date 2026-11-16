@@ -960,7 +960,9 @@ What to know before turning it on:
   rename at the provider does not create a second account.
 - **Keep a local admin.** Leave `OIDC_PASSWORD_LOGIN` on, or at least keep one
   password account, until you have signed in by single sign-on and seen it
-  work. If the provider is down, that account is the way back in.
+  work. If the provider is down, that account is the way back in, but only
+  while `OIDC_PASSWORD_LOGIN` is on. With it `false`, the way back is to
+  unset it (or `OIDC_ISSUER`) and restart the controller.
 - **Start sign-in from the address in `OIDC_REDIRECT_URI`.** The browser is
   sent back to exactly that host, and the cookie that ties the return trip to
   the sign-in belongs to the host you started from. Starting from a different
