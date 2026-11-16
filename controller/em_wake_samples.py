@@ -15,6 +15,7 @@ import shutil
 import time
 import uuid
 import wave
+import zipfile
 from pathlib import Path
 
 SAMPLE_RATE = 16000
@@ -130,6 +131,36 @@ def remove(device_id: str, names, db_path: str | None = None) -> None:
     """Best-effort cleanup for files whose database insert did not succeed."""
     for name in names:
         unlink(device_id, name, db_path)
+
+
+ZIP_LABELS = ARCHIVE_LABELS + ("unreviewed",)
+
+
+def build_zip(device_id: str, rows, db_path: str | None = None) -> bytes | None:
+    """One ZIP of the device's retained sample WAVs, one directory per review
+    label — the label chosen in the dashboard, with unreviewed clips kept
+    under their own. Rows are db.get_wake_samples output (id DESC), so an
+    archive that hits KEEP_PER_DEVICE keeps the newest clips — the archive is
+    built whole in memory, so its bound is the retention constant itself;
+    a row whose file the retention window already pruned is skipped, and an
+    archive that ends up empty returns None so the endpoint can 404 instead
+    of sending nothing."""
+    out = io.BytesIO()
+    written = 0
+    try:
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+            for row in rows:
+                if written >= KEEP_PER_DEVICE:
+                    break
+                path = resolve(device_id, row["audio_file"], db_path)
+                if path is None:
+                    continue
+                label = row["label"] if row["label"] in ZIP_LABELS else "unreviewed"
+                zf.write(path, f"{label}/{row['audio_file']}")
+                written += 1
+    except OSError:
+        return None
+    return out.getvalue() if written else None
 
 
 class WakeCapture:

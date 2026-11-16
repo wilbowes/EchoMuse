@@ -540,42 +540,49 @@ def test_every_db_call_exists():
     assert not missing, f"db.{{{', '.join(missing)}}} is called but em_db.py does not define it"
 
 
-def test_the_wake_word_asset_wizard_step_is_mandatory():
+def test_wake_word_assets_reach_every_new_echo():
     """
-    Wil's call, overriding my "make it skippable": every provisioned device
-    carries the runtime.
+    Every provisioned Echo carries the wake word runtime and models (Wil,
+    2026-07-31): without them it advertises on-device wake word and cannot
+    use it, the "I enabled it and nothing happened" the feature exists to
+    remove.
 
-    The assets are not in the firmware, so a device without them advertises
-    the oww_shadow capability while being unable to use it — the exact "I
-    enabled it and nothing happened" this feature exists to remove. It also
-    auto-runs: a button someone can leave unpressed is not mandatory.
+    The emOS flow delivers them over WiFi, not through TWRP (Wil, 2026-11-15):
+    em_reconcile.on_connect runs em_oww_sync.reconcile the first time the Echo
+    connects, and until the files land it reports `degraded` with the reason.
+    So the emOS wizard has no asset step, and the reconcile must keep one.
+
+    The FireOS flow, reachable only by ?flow=fireos until it is removed, still
+    pushes them itself and must auto-run that step: a button someone can leave
+    unpressed is not mandatory.
     """
     from pathlib import Path
-    jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
+    root = Path(__file__).resolve().parent.parent
+    jsx = (root / "static" / "dashboard.jsx").read_text()
 
-    # Checked for BOTH flows. The wizard gained an emOS path whose steps are
-    # numbered differently, and an invariant that only held for the flow that
-    # happens to be second in the file is not an invariant.
-    auto_line = jsx[jsx.index("const autoSteps ="):]
-    auto_line = auto_line[:auto_line.index("\n")]
-    sets = re.findall(r"new Set\(\[([^\]]*)\]\)", auto_line)
-    assert len(sets) == 2, (
-        f"expected an autoSteps set per flow, found {len(sets)} in {auto_line!r}")
-    emos_auto, fireos_auto = [
-        {int(n) for n in re.findall(r"\d+", s)} for s in sets
-    ]
+    emos = jsx[jsx.index("const _EMOS_STEPS = ["):]
+    emos = emos[:emos.index("\n];")]
+    assert "'install_oww'" not in emos, (
+        "the emOS wizard pushes no wake word assets; the on-connect reconcile does")
 
-    for table, auto, flow in (("_WIZARD_STEPS", fireos_auto, "FireOS"),
-                              ("_EMOS_STEPS", emos_auto, "emOS")):
-        steps = jsx[jsx.index(f"const {table} = ["):]
+    rec = (root / "em_reconcile.py").read_text()
+    assert "em_oww_sync.reconcile(device_id, live)" in rec, (
+        "with no wizard step, the on-connect reconcile is what delivers the "
+        "wake word assets to a new Echo")
+
+    if "const _WIZARD_STEPS = [" in jsx:
+        auto_line = jsx[jsx.index("const autoSteps ="):]
+        auto_line = auto_line[:auto_line.index("\n")]
+        sets = re.findall(r"new Set\(\[([^\]]*)\]\)", auto_line)
+        fireos_auto = {int(n) for n in re.findall(r"\b\d+\b", sets[-1])}
+        steps = jsx[jsx.index("const _WIZARD_STEPS = ["):]
         steps = steps[:steps.index("\n];")]
         assert "'install_oww'" in steps, \
-            f"the wake word asset step is missing from the {flow} wizard"
+            "the wake word asset step is missing from the FireOS wizard"
         idx = steps.count("{ id:", 0, steps.index("'install_oww'")) - 1
-        assert idx in auto, (
-            f"{flow} step {idx} (install_oww) must auto-run — a step that "
-            f"needs a click is one a user can skip"
-        )
+        assert idx in fireos_auto, (
+            f"FireOS step {idx} (install_oww) must auto-run — a step that "
+            f"needs a click is one a user can skip")
 
     runner = jsx[jsx.index("async function runInstallOwwAssets"):]
     runner = runner[:runner.index("\n  async function ", 1)]
@@ -1301,6 +1308,11 @@ FIXED_IN_THE_ADDON = {
     # dashboard to that port, so any other value leaves ingress with nothing
     # to forward to.
     "API_PORT": "must equal config.yaml's ingress_port or ingress breaks",
+    # Home Assistant ingress is how the add-on signs people in: Supervisor has
+    # already authenticated them. OpenID Connect is for the standalone
+    # container, which has only local passwords otherwise, and it has not been
+    # exercised under the add-on.
+    "OIDC_ISSUER": "the add-on signs in through HA ingress; SSO is container-only",
 }
 
 
@@ -2516,7 +2528,7 @@ def test_the_emos_flow_drops_every_android_only_step():
                  "disable_alexa", "debloat"):
         assert gone not in ids, (
             f"'{gone}' is an Android-only step and must not be in the emOS flow")
-    assert len(ids) == 9, f"the emOS flow is nine steps, found {len(ids)}: {ids}"
+    assert len(ids) == 8, f"the emOS flow is eight steps, found {len(ids)}: {ids}"
 
 
 def test_the_emos_flow_escrows_before_it_flashes():
@@ -2531,7 +2543,6 @@ def test_the_emos_flow_escrows_before_it_flashes():
     # And the install lands on /data before the partition write, which is what
     # lets it survive the flash.
     assert ids.index("install_em") < ids.index("flash_emos")
-    assert ids.index("install_oww") < ids.index("flash_emos")
 
 
 def test_the_fireos_flow_escrows_before_it_patches():
@@ -2555,7 +2566,7 @@ def test_the_fireos_flow_escrows_before_it_patches():
         assert at < writes[0], f"{marker} must come before the partition write"
 
     # And the restore is offered on the TWRP steps that follow the escrow.
-    assert "(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))" in src, (
+    assert "(isEmos ? (step === _E.flash_emos || step === _E.reboot_watch) : (step >= 2 && step <= 4))" in src, (
         "the FireOS flow must offer the restore on a failed TWRP step")
 
 
@@ -2910,7 +2921,7 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # that skipped building it would publish an empty-handed payload.
     assert "make-payload-bundle.py" in wf, \
         "the release must build the payload bundle"
-    for f in ("init32", "wpa_supplicant", "wpa_cli", "em-wifi"):
+    for f in ("init32", "wpa_supplicant", "wpa_cli", "em-wifi", "e2/e2fsck"):
         assert f in wf, f"{f} must go into the bundle"
 
     published = set()
@@ -2931,19 +2942,23 @@ def test_the_emos_release_workflow_asserts_what_it_publishes():
     # tarball and the licence text are published beside it — a link to busybox.net
     # would leave compliance depending on a third party's server. Dropping either
     # ships GPL-2.0 object code with no source, which is why they are pinned here
-    # rather than left to the release step.
+    # rather than left to the release step. The two e2fsprogs-* assets are the
+    # same obligation for e2fsck (GPL-2.0; NOTICE is e2fsprogs' licence text).
     #
     # A BOOT IMAGE MUST NEVER APPEAR. It carries the device's own kernel and
     # DTBs, so publishing one would redistribute Amazon's code — the image is
     # assembled on the user's side from the partition they read off their device.
     assert published == {"emos/build/init", "emos/build/emos-payload.zip",
                          "emos/build/bb/busybox-*.tar.bz2",
-                         "emos/build/bb/busybox-LICENSE"}, (
+                         "emos/build/bb/busybox-LICENSE",
+                         "emos/build/e2/e2fsprogs-*.tar.gz",
+                         "emos/build/e2/e2fsprogs-NOTICE"}, (
         f"the published set changed — got {sorted(published)}. Everything here "
         f"must be redistributable by us, and a boot image must never be among "
         f"it. The loose `init` is not redundant: _fetch_latest_emos_release "
         f"matches it by exact name, so dropping it strands every fielded "
-        f"controller. The busybox source and licence are a GPL-2.0 obligation.")
+        f"controller. The busybox and e2fsprogs sources and licences are a "
+        f"GPL-2.0 obligation.")
     assert not any(".img" in f or "boot" in f.rsplit("/", 1)[-1]
                    for f in published), (
         "an image or boot partition must never be a release asset — it carries "
@@ -3255,3 +3270,28 @@ def test_the_image_keeps_its_data_on_the_mounted_directory():
         assert ":/app/data" in (root / compose).read_text(), compose
     # The add-on keeps its own path, which has to win over the image's.
     assert 'DB_PATH: "/data/echomuse.db"' in (root / "config.yaml").read_text()
+
+
+def test_every_emos_panel_button_runs_its_own_step_by_id():
+    """
+    #1183 dropped the wake word step and moved the emOS runner and panel
+    conditions to ids, but left the panel BUTTONS on their old numbers. On
+    41C8 (2026-11-15) "Flash emOS" ran Reboot and Watch, so nothing was
+    flashed, and Configure WiFi's Connect named a step that no longer existed
+    and hung. Each emOS panel's buttons must run that panel's step, by id.
+    """
+    from pathlib import Path
+    jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
+    marks = list(re.finditer(
+        r"\{(?:!isEmos && step === \d+|isEmos && step === _E\.(\w+)|\(isEmos \?)", jsx))
+    assert marks, "no wizard panels found; update this test"
+    emos = [(m, marks[i + 1].start() if i + 1 < len(marks) else len(jsx))
+            for i, m in enumerate(marks) if m.group(1)]
+    assert len(emos) >= 5, f"expected the emOS panels, found {[m.group(1) for m, _ in emos]}"
+    for m, end in emos:
+        region = jsx[m.start():end]
+        args = re.findall(r"runStep\(([^,)]*)", region)
+        for a in args:
+            assert a.strip() == f"_E.{m.group(1)}", (
+                f"a button in the {m.group(1)} panel runs runStep({a}); it must "
+                f"run its own step, by id")

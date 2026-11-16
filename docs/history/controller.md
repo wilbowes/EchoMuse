@@ -236,6 +236,14 @@ record; they appear as pending and are approved onto fresh config.
 - 2026-11-03: the EA and dev add-ons cannot run at once: both take the
   device ports 8767/8770 on the host network, so whichever starts second
   errors. Satellite ports differ by channel; the device link does not.
+- 2026-11-16: OIDC sign-in (#868) merged as container-only, the one
+  accepted exception to "neither may gain or lose capability" (Wil: "a valid
+  deviation for a standalone container"). The add-on's dashboard is reachable
+  only through ingress (`_ingress_only_middleware`), so HA's own login already
+  plays the identity-provider role there, and OIDC was never run under
+  ingress. Enforced by `OIDC_ISSUER` in `test_deploy.FIXED_IN_THE_ADDON`. If
+  the add-on ever serves the dashboard outside ingress, this exception ends:
+  wire the `OIDC_*` options through `em_start.OPTION_ENV_VARS` instead.
 
 ### Voice backend
 
@@ -2084,6 +2092,59 @@ on 07MU 2026-10-23, end to end, then a network update to `emos-v0.11-ea.1` in
 this TWRP marks the slot it installed to as active, so the post's flip makes
 the second install hit B again: install until slot A has been written, and
 finish on `_b`, the slot `boot-root.zip` patches for root.
+
+### Donut (2026-11-10, first run on hardware 2026-11-15)
+
+- **2026-11-10, walked the emOS flow for a donut, code only.** Before this a
+  donut was refused at Connect (`_echoBoard` knew biscuit and radar), and past
+  that `donorVerdict` would have refused it three ways: no amonet LK (it is
+  unlocked with kaeru), a 64-bit kernel where FireOS 6 meant 32-bit, and
+  `/system` lacking biscuit's MT6620 WiFi tools (its MT7668 is SDIO, brought
+  up from `wlan_mt76x8_sdio*.ko`). All three are now board-aware. The
+  controller side already knew the donut (`em_emos_build` cmdline recipe,
+  `skip_initramfs`, `FIREOS6_BOARDS`; `em_boards` model; init's ttyGS0 major).
+- **Bench run on 41C8, 2026-11-15** (back to stock first: boot_a d57017aa,
+  boot_b 5e10fa26, cache and data wiped in TWRP). TWRP reports **3.7.0_9-0**
+  (omni_donut); by-name is the same under `platform/bootdevice` and
+  `platform/mtk-msdc.0`: boot_a p10, boot_b p11, swdl p12 (`recovery` →
+  swdl), system_a p13, system_b p14, cache p15, userdata p16. `lk_a`, `lk_b`,
+  `tee1`, `tee2` and `preloader` point at `/tmp/ota-decoy/*`, the real ones at
+  `*_real`: the unlock's guard against an OTA, and names the wizard never
+  writes. Both slots hold FireOS 6 but different builds (system_a 6.5.5.5,
+  system_b 6.5.7.5); slot B was active, and the gate read it right. **No
+  `bin/e2fsck` in either slot**, only `vendor/bin/fsck_msdos_mtk`: the gate
+  refused before any write. emOS now carries its own (#1182), so the donut
+  list no longer asks for Amazon's. `/init recovery` from the emOS console
+  reaches TWRP on the donut too.
+- **First full donut run, 2026-11-15** (dev controller, `emos-v0.12-ea.1`,
+  which carries #1134 and #1182). Three attempts. (1) Step 1 hung silently on
+  the duplicate-serial path: `AdbClient.close()` was awaited before the choice
+  was shown and never returned on this TWRP; a retry got through. (2) The
+  Echo reset partway through step 5's wake word push (~18 MB into the
+  run's writes, official power brick, nothing logged) and booted stock
+  FireOS; nothing had been written but /data. (3) Clean: flash to boot_a,
+  slot set to A, `fsck_data status=0 by=/sbin/e2fsck`, /dev/stpbt, all ten
+  wake word files from the on-connect reconcile within seconds, listening
+  privately, HA connected. Deleting the old record made it a new device, so
+  strict approval asked once. TWRP's format of /data sets **max mount count
+  10** (biscuits read -1), so e2fsck runs a full check every tenth boot; a
+  read-only full check of its 1.5 GB /data took 0.07 s. TWRP's toybox `dd`
+  rejects `conv=fsync`. Led to: no picker, no asset step, bounded close.
+- **An Echo reports `stream` from boot until its first config, and the
+  controller could start a stream into it** (41C8, 2026-11-15). After a
+  reboot the Echo registered with `stream` (firmware default before config),
+  the controller logged "listening: unknown (streams continuously)" and began
+  `_stream_listen`, which loads its model and THEN sends `mic_start`. The
+  Echo reported `local` 0.9s after connecting; the load took 2.9s (no other
+  Echo had the model cached), so `mic_start` reached a private Echo and sent
+  nothing. With a cached model it would have landed in the window. Fixed by
+  `em_listen.awaiting_report`: an `unknown` Echo is waited on, and
+  `_stream_listen` re-checks before `mic_start`. The firmware's boot default
+  (stream until config) is the other half: **Wil 2026-11-15, the Echo is
+  inert until its first config** (device side owed, spec first).
+- **`test_a_signature_is_kept_beside_its_binary_and_pruned_with_it` is flaky**
+  (2026-11-15: pass, fail, pass on one checkout): `em_firmware.prune` orders by
+  mtime and the test's three writes share a tick. Not yet fixed.
 
 ### The emOS flow, and what a run against real hardware found
 

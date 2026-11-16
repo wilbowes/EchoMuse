@@ -463,3 +463,41 @@ def test_skipping_is_reported_at_most_every_thirty_seconds():
     assert log.add(10, 101.0) is None
     assert log.add(2, 129.9) is None
     assert "skipped 14 stale frames" in log.add(2, 130.0)
+
+
+# ── awaiting_report: nothing starts before a private Echo says it is private ──
+#
+# 41C8, 2026-11-15: after a reboot the Echo reported `stream` (its boot state)
+# for 0.9s, and the controller's streaming path sent mic_start once its model
+# had loaded. Only a 2.9s load kept that mic_start out of the window.
+
+def test_a_private_echo_that_has_not_reported_is_waited_on():
+    for reported in (None, "stream"):
+        assert L.awaiting_report(L.resolve("on", NEW, reported)), reported
+
+
+def test_an_echo_that_reported_is_not_waited_on():
+    assert not L.awaiting_report(L.resolve("on", NEW, "local"))
+    assert not L.awaiting_report(L.resolve("on", NEW, "degraded"))
+
+
+def test_streaming_modes_are_not_held_back():
+    # Configured to stream, shadow, or old firmware that cannot listen
+    # privately: those stream by design and are labelled so.
+    assert not L.awaiting_report(L.resolve("off", NEW, None))
+    assert not L.awaiting_report(L.resolve("shadow", NEW, None))
+    assert not L.awaiting_report(L.resolve("on", OLD, "stream"))
+
+
+def test_the_listener_waits_before_either_path_and_stream_rechecks():
+    from _sources import def_source, code_only
+    listener = code_only(def_source("wake_word_listener"))
+    assert listener.index("awaiting_report") < listener.index("_private_listen"), \
+        "wake_word_listener must wait on an unreported Echo before choosing a path"
+    stream = code_only(def_source("_stream_listen"))
+    first_mic = stream.index("mic_start()")
+    assert "awaiting_report" in stream[:first_mic] and "private_listening" in stream[:first_mic], (
+        "_stream_listen must re-check after loading its model and before its first "
+        "mic_start: the Echo can go private, or still be unreported, meanwhile")
+    waiter = code_only(def_source("_await_listen_report"))
+    assert "mic_start" not in waiter, "waiting must start nothing"

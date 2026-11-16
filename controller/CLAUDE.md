@@ -28,6 +28,9 @@ default branch, so add-on files work only from `main`; test a branch with
   its reason in `test_deploy.FIXED_IN_THE_ADDON` (`DB_PATH`, `API_PORT`);
   `test_every_env_var_reaches_the_addon_or_states_why_not` checks both ways.
   `server_tls_port` cannot be 0 (an Echo holding a CA would be stranded).
+  **One accepted deviation: OIDC sign-in (`OIDC_*`, #868) is container-only**
+  (Wil, 2026-11-16): the add-on is ingress-only, so HA's login is its SSO.
+  Recorded as `OIDC_ISSUER` in `FIXED_IN_THE_ADDON`; any other is a new decision.
 - **`config.yaml`'s `version:` pins the pulled image**; `controller-release.yml`
   refuses a tag/pin mismatch.
 - **Ingress**: `em_start.py` maps `/data/options.json` to env vars (the
@@ -143,7 +146,7 @@ registration/server order (`tests/test_capabilities.py`).
 `em_db.MIGRATIONS` is **append-only and forward-only** (`schema_version`
 indexes it). v3 is an f-string over `DEFAULT_DEVICE_CONFIG`; leave it so.
 Each migration is one transaction with its fixup; failure refuses startup.
-A backup `<db>.pre-v<N>.bak` is taken first and a failed backup refuses
+A backup `<db>.pre-v<N>.bak` is taken first, **N being the version left** (v32 → v33 writes `pre-v32.bak`) and a failed backup refuses
 (`EM_SKIP_DB_BACKUP=1`). **A newer database refuses to start.** The image sets
 `DB_PATH=/app/data/echomuse.db`. mDNS binds SERVER_IP's interface only
 (`em_hostip.bind_mdns`).
@@ -160,7 +163,8 @@ A backup `<db>.pre-v<N>.bak` is taken first and a failed backup refuses
    **Arbitration** (`em_arbiter`): hold `ARB_HOLD_S` 250ms from first heard,
    collect within `wakeArbitrationMs` (700), `pick()` the **loudest, no
    margin** (`em_wakelevel`); earliest-heard only when levels cannot be
-   compared (missing, heard over own playback, differing gains). Do not return
+   compared (missing, heard over own playback, differing gains). An Echo
+   ringing a timer wins before either (#862). Do not return
    to SNR or first-detector-wins. **An Echo with no HA behind it stands down
    BEFORE the claim** (`can_serve_turn` before `_claim_wake`, `test_deploy.py`)
    and still records the wake and plays the cue (`record_dropped_wake`);
@@ -378,6 +382,13 @@ system`/`Power down`; marker after a complete read; SSIDs dropped.
   sending.** `TransferResult` names the stage; a silent shell is a link
   fault. No `cut`; firmware `require_verify=True`. Free space via
   `parse_free_mb`; unreadable = carry on.
+- **Release assets must be signed** once `em_release_sig.KEYS` holds a key:
+  `em_releases.download` (all four install paths) verifies `<asset>.sig`
+  (Ed25519 over tag + name + sha256) on download AND cache hit, and refuses
+  otherwise (`why_failed` gives the reason). Empty KEYS = not enforced. User
+  uploads are exempt. Signing is `tools/sign_release.py`, off GitHub and off
+  this box; the key PR also turns release workflows to drafts (immutable
+  releases forbid adding a `.sig` after publishing).
 - **The running version is refused** on a single update (`already_running`),
   skipped in a fleet one (`extract_binary_version`); `force` must stay; the
   upload token is popped only on commit.
@@ -447,6 +458,20 @@ Recognised from `/system` (`_echoBoard`, `echo_board.test.mjs`), refused on
 FireOS, board sent with the build; **read off the device, never the page**.
 `donorVerdict` skips biscuit's bootloader fingerprint. Restoring to stock:
 finish on `_b`.
+
+### Donut (2026-11-10, first run on hardware 2026-11-15)
+
+As radar: `AEODN`/`donut_puffin` from `/system`, emOS only, no LK fingerprint
+(kaeru). Its 32-bit FireOS 6 runs on a **64-bit** kernel, so the gate wants
+arm64 for it, and its WiFi files are the SDIO modules
+(`_emosSystemFiles().donut`), not MT6620's tools. Its FireOS has **no
+`e2fsck`**: emOS carries its own (#1182). TWRP's format of /data sets max
+mount count 10, so e2fsck runs a full check every tenth boot (0.07 s).
+
+**The emOS flow has no wake word asset step** (#1183): the on-connect
+reconcile delivers them and the Echo reports `degraded` until they land.
+Steps are addressed by id (`_E`), never position. `AdbClient.close()` is
+bounded (3 s); an unbounded close hung step 1 on the donut's TWRP.
 
 ### The emOS flow, and what a run against real hardware found
 

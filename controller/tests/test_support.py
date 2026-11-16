@@ -33,7 +33,7 @@ SECRETS = {
     "label": "Bedroom - Sam",
     "ssid": "Bowes-Family-5G",
     "bssid": "d6:9b:22:11:aa:bb",
-    "ip": "10.10.1.104",
+    "ip": "10.99.1.104",
     # Dashboard account name. Reported against a REAL bundle on 2026-08-02:
     # "Shell session opened by wil" is ordinary prose with no quotes, no URL
     # and no identifier shape, so every other rule here passed it through.
@@ -45,7 +45,7 @@ ACCOUNTS = {SECRETS["username"]: "admin", "wil": "admin", "sam": "readonly"}
 
 def _bundle():
     device = Row({
-        "device_id": "G090LF1180130NJG",
+        "device_id": "G090LF9920230NJG",
         "label": SECRETS["label"],
         "approved": 1,
         "firmware_ver": "v2.9.13",
@@ -54,12 +54,12 @@ def _bundle():
         "esphome_noise_psk": SECRETS["psk"],
     })
     turn = Row({
-        "id": 1, "device_id": "G090LF1180130NJG", "outcome": "ok",
+        "id": 1, "device_id": "G090LF9920230NJG", "outcome": "ok",
         "wake_score": 0.98, "total_ms": 1200,
         "stt_text": SECRETS["speech"],
     })
     metric = Row({
-        "device_id": "G090LF1180130NJG", "hour_ts": 0, "rtt_samples": 100,
+        "device_id": "G090LF9920230NJG", "hour_ts": 0, "rtt_samples": 100,
         "rtt_excursions": 20, "wifi_bssid_last": SECRETS["bssid"],
         "wifi_ssid": SECRETS["ssid"],
     })
@@ -71,9 +71,9 @@ def _bundle():
         turns=[turn],
         metrics=[metric],
         counters=[],
-        device_configs={"G090LF1180130NJG": {"owwModel": "hey_mycroft_v0.1",
+        device_configs={"G090LF9920230NJG": {"owwModel": "hey_mycroft_v0.1",
                                              "some_token": SECRETS["token"]}},
-        live_state={"G090LF1180130NJG": {
+        live_state={"G090LF9920230NJG": {
             "connected": True,
             "capabilities": ["mic", "ambient_light"],
             # A whole stats dict — the path that actually leaked in a REAL
@@ -90,14 +90,14 @@ def _bundle():
         ],
         device_log=[
             f"[TURN] trigger=wakeword outcome=ok text='{SECRETS['speech']}'",
-            "play_media: 'http://10.10.1.81:8097/flow/abc/media.flac'",
+            "play_media: 'http://10.99.1.81:8097/flow/abc/media.flac'",
             "Playback chain: decoder spawned 3ms, first audio 194ms",
             "RTT excursion: 1450ms (idle)",
             # Bare identifiers in prose: neither quoted nor a URL, so the
             # quote and URL rules both miss them. Found by auditing a real
             # bundle against the live database — the synthetic fixture had
             # no such line, which is exactly why it passed.
-            f"Device connected: G090LF1180130NJG v=v2.9.13 at {SECRETS['ip']} caps=[mic]",
+            f"Device connected: G090LF9920230NJG v=v2.9.13 at {SECRETS['ip']} caps=[mic]",
             f"associated bssid {SECRETS['bssid']} freq 5805",
             f"Shell session opened by {SECRETS['username']}",
             "Shell session closed by wil",
@@ -153,7 +153,7 @@ def test_the_useful_diagnostics_survive():
     """
     b = _bundle()
     d = b["devices"][0]
-    assert d["device_id"] == "G090LF1180130NJG", "serials correlate everything"
+    assert d["device_id"] == "G090LF9920230NJG", "serials correlate everything"
     assert d["firmware_ver"] == "v2.9.13"
     assert d["live"]["capabilities"] == ["mic", "ambient_light"], \
         "capabilities decide which HA entities exist — the #62 question"
@@ -188,7 +188,7 @@ def test_announce_request_lines_survive_with_the_text_redacted():
     ever received, which is not a state the code can reach.
     """
     out = "\n".join(S.sanitise_log([
-        "[Kitchen] AnnounceRequest: media_id='http://10.10.1.81:8123/api/tts_proxy/a.mp3' "
+        "[Kitchen] AnnounceRequest: media_id='http://10.99.1.81:8123/api/tts_proxy/a.mp3' "
         "text='Dinner is ready' start_conversation=True",
         # The turn trace is the transcript-bearing line the marker existed
         # for; it must still go whole, apostrophes and all.
@@ -245,14 +245,14 @@ def test_live_stats_are_allowlisted_not_passed_through():
 
 def test_bare_identifiers_in_log_prose_are_stripped():
     """
-    "Device connected: ... at 10.10.1.60" is neither quoted nor a URL, so the
+    "Device connected: ... at 10.99.1.60" is neither quoted nor a URL, so the
     first two rules both miss it. Real logs are full of these.
     """
     out = "\n".join(S.sanitise_log([
-        "Device connected: ABC v=v2.9.13 at 10.10.1.60 caps=[mic]",
+        "Device connected: ABC v=v2.9.13 at 10.99.1.60 caps=[mic]",
         "associated bssid 24:5a:4c:83:7b:e5 freq 5805",
     ]))
-    assert "10.10.1.60" not in out and "<ip>" in out
+    assert "10.99.1.60" not in out and "<ip>" in out
     assert "24:5a:4c:83:7b:e5" not in out and "<mac>" in out
     assert "v=v2.9.13" in out, "the diagnostic content must survive"
 
@@ -581,32 +581,32 @@ def test_the_ring_ignores_the_dashboards_own_http_chatter():
 _RAW_PROPS = """
 [ro.product.model]: [AEOBC]
 [ro.build.version.incremental]: [272.6.8.0_user_680767620]
-[ro.serialno]: [G090LF1180570SPJ]
+[ro.serialno]: [G090LF9920670SPJ]
 [persist.sys.usb.config]: [mtp,adb]
 [net.hostname]: [SamsPhone-Bedroom]
 [wifi.interface]: [wlan0]
-[dhcp.wlan0.ipaddress]: [10.10.1.188]
+[dhcp.wlan0.ipaddress]: [10.99.1.188]
 """.strip()
 
 _RAW_STATUS = """
-bssid=74:ac:b9:d6:9b:21
+bssid=02:00:00:5a:9b:21
 freq=5180
-ssid=Neptune-Media
+ssid=Harbour-Media
 id=0
 mode=station
 pairwise_cipher=CCMP
 group_cipher=CCMP
 key_mgmt=WPA2-PSK
 wpa_state=COMPLETED
-ip_address=10.10.1.188
+ip_address=10.99.1.188
 address=ac:63:be:11:22:33
 uuid=6f1c2b3a-0000-1111-2222-333344445555
 """.strip()
 
 _RAW_SCAN = (
     "bssid / frequency / signal level / flags / ssid\n"
-    "74:ac:b9:d6:9b:21\t5180\t-52\t[WPA2-PSK-CCMP][ESS]\tNeptune-Media\n"
-    "24:5a:4c:83:7b:e4\t2437\t-71\t[SAE-CCMP][ESS]\tPixel_7793\n"
+    "02:00:00:5a:9b:21\t5180\t-52\t[WPA2-PSK-CCMP][ESS]\tHarbour-Media\n"
+    "24:5a:4c:83:7b:e4\t2437\t-71\t[SAE-CCMP][ESS]\tPixel_0042\n"
     "aa:bb:cc:dd:ee:ff\t2412\t-80\t[ESS]\tSams Room 2.4\n"
 )
 
@@ -631,13 +631,13 @@ def test_provision_diagnostics_leak_nothing_identifying():
             "wpa_scan":   _RAW_SCAN,
             "storage":    "/dev/block/mmcblk0p23 5.0G 3.1G 1.9G 62% /data",
         },
-        transcript=["Writing config for \"Neptune-Media\"…",
-                    "Connected! IP: 10.10.1.188"],
-        selected_ssid="Neptune-Media",
+        transcript=["Writing config for \"Harbour-Media\"…",
+                    "Connected! IP: 10.99.1.188"],
+        selected_ssid="Harbour-Media",
     ))
-    for secret in ("Neptune-Media", "Pixel_7793", "Sams Room",
-                   "SamsPhone-Bedroom", "10.10.1.188",
-                   "74:ac:b9:d6:9b:21", "ac:63:be:11:22:33",
+    for secret in ("Harbour-Media", "Pixel_0042", "Sams Room",
+                   "SamsPhone-Bedroom", "10.99.1.188",
+                   "02:00:00:5a:9b:21", "ac:63:be:11:22:33",
                    "6f1c2b3a"):
         assert secret not in out, f"{secret!r} reached the diagnostics file"
 
@@ -648,7 +648,7 @@ def test_the_radio_facts_survive_the_scan_redaction():
     reason scan results are included at all, so a redaction that took the
     flags with the SSID would leave the probe pointless.
     """
-    d = _diag(probes={"wpa_scan": _RAW_SCAN}, selected_ssid="Neptune-Media")
+    d = _diag(probes={"wpa_scan": _RAW_SCAN}, selected_ssid="Harbour-Media")
     rows = d["probes"]["wpa_scan"]
     assert len(rows) == 3, rows
     assert [r["flags"] for r in rows] == [
@@ -664,7 +664,7 @@ def test_props_are_allowlisted_not_filtered():
     d = _diag(probes={"props": _RAW_PROPS})
     props = d["probes"]["props"]
     assert props["ro.build.version.incremental"] == "272.6.8.0_user_680767620"
-    assert props["ro.serialno"] == "G090LF1180570SPJ"
+    assert props["ro.serialno"] == "G090LF9920670SPJ"
     assert "net.hostname" not in props
     assert "dhcp.wlan0.ipaddress" not in props
 
@@ -674,7 +674,7 @@ def test_serials_are_kept():
     Same call as the support bundle: nothing correlates without them, and
     they identify the reporter's own hardware to them.
     """
-    assert "G090LF1180570SPJ" in json.dumps(_diag(probes={"props": _RAW_PROPS}))
+    assert "G090LF9920670SPJ" in json.dumps(_diag(probes={"props": _RAW_PROPS}))
 
 
 def test_an_unlisted_probe_is_dropped_whole():
@@ -703,8 +703,8 @@ def test_a_probe_with_an_unexpected_shape_still_gets_scrubbed():
     seen, and these are by definition the devices behaving unusually. So the
     generic scrub runs regardless of whether a parser matched anything.
     """
-    d = _diag(probes={"wpa_status": "garbage 10.10.1.188 aa:bb:cc:dd:ee:ff"})
-    assert "10.10.1.188" not in json.dumps(d)
+    d = _diag(probes={"wpa_status": "garbage 10.99.1.188 aa:bb:cc:dd:ee:ff"})
+    assert "10.99.1.188" not in json.dumps(d)
     assert "aa:bb:cc:dd:ee:ff" not in json.dumps(d)
 
 
@@ -726,7 +726,7 @@ def _wpa_ssid_txt(ssid: bytes) -> str:
 # An SSID is 0-32 arbitrary bytes (IEEE 802.11). Each of these is a name the
 # quote-matching scrub gets wrong or a form the cut has to survive.
 _NET_LOG_SSIDS = [
-    b"Neptune-Media",
+    b"Harbour-Media",
     b"Bob's WiFi",                       # an apostrophe is NOT escaped
     b'Say "hi"',
     b"back\\slash",
@@ -735,7 +735,7 @@ _NET_LOG_SSIDS = [
     b'x" auth_failures=1 duration=10 reason=FAKE',
     b"ssid",
     b" lead and trail ",
-    b"10.10.1.188 aa:bb:cc:dd:ee:ff",
+    b"10.99.1.188 aa:bb:cc:dd:ee:ff",
     b"W" * 32,
     b"",
 ]
@@ -751,14 +751,14 @@ def test_the_network_log_keeps_the_diagnosis_and_loses_every_name():
         log = "\n".join([
             "[   7365] stage 11 reached",
             f"wlan0: Trying to associate with SSID '{name}'",
-            f"wlan0: SME: Trying to authenticate with 76:ac:b9:a6:9b:22 (SSID='{name}' freq=5785 MHz)",
-            f"wlan0: Trying to associate with 76:ac:b9:a6:9b:22 (SSID='{name}' freq=5785 MHz)",
+            f"wlan0: SME: Trying to authenticate with 02:00:00:5a:9b:22 (SSID='{name}' freq=5785 MHz)",
+            f"wlan0: Trying to associate with 02:00:00:5a:9b:22 (SSID='{name}' freq=5785 MHz)",
             f'wlan0: CTRL-EVENT-SSID-TEMP-DISABLED id=0 ssid="{name}" auth_failures=2 duration=20 reason=WRONG_KEY',
             f'wlan0: CTRL-EVENT-SSID-REENABLED id=0 ssid="{name}"',
             f"wlan0: connected to Access Point `{name}'",
-            "wlan0: CTRL-EVENT-CONNECTED - Connection to 76:ac:b9:a6:9b:22 completed [id=0 id_str=]",
+            "wlan0: CTRL-EVENT-CONNECTED - Connection to 02:00:00:5a:9b:22 completed [id=0 id_str=]",
             "udhcpc: broadcasting discover",
-            "udhcpc: lease of 10.10.1.91 obtained from 10.10.1.1, lease time 86400",
+            "udhcpc: lease of 10.99.1.91 obtained from 10.99.1.1, lease time 86400",
         ])
         got = _diag(probes={"net_log": log})["probes"]["net_log"]
         # The same nine lines whatever the name was: nothing of it survives,
@@ -790,11 +790,11 @@ def test_the_error_and_transcript_are_scrubbed_not_trusted():
     Both are ours, but our error strings interpolate device output often
     enough that the distinction is not worth relying on.
     """
-    d = _diag(error='Staged config does not contain ssid="Neptune-Media"',
-              transcript=["Connected! IP: 10.10.1.188"])
+    d = _diag(error='Staged config does not contain ssid="Harbour-Media"',
+              transcript=["Connected! IP: 10.99.1.188"])
     blob = json.dumps(d)
-    assert "Neptune-Media" not in blob
-    assert "10.10.1.188" not in blob
+    assert "Harbour-Media" not in blob
+    assert "10.99.1.188" not in blob
 
 
 def test_no_transcripts_parameter_exists():
@@ -864,11 +864,11 @@ def test_devices_carry_their_userspace_and_kernel():
     #566's bundle could not say which kernel the device booted. A device that
     never reported them (old firmware) simply has no such key."""
     reported = Row({
-        "device_id": "G090LF1180130NJG", "approved": 1,
+        "device_id": "G090LF9920230NJG", "approved": 1,
         "base_os": "emos", "kernel_arch": "armv7l",
         "kernel_release": "3.18.19-gecb8cb46060-dirty",
     })
-    old = Row({"device_id": "G090LF1180440EFF", "approved": 1})
+    old = Row({"device_id": "G090LF9920110EFF", "approved": 1})
     bundle = S.build(
         controller_version="v2.24.1", devices=[reported, old],
         fleet_config={}, schema_version=26, turns=[], metrics=[], counters=[],

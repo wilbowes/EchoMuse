@@ -15,7 +15,7 @@ import pytest
 import em_pairing as P
 
 CONTROLLER = Path(__file__).resolve().parents[1]
-DEV = "G090LF1180571VVV"
+DEV = "G090LF9920671VVV"
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +58,7 @@ def test_done_closes_both():
 
 def test_devices_are_separate():
     P.approve(DEV, now=100)
-    assert not P.approved("G090LF11752215LE", now=100)
+    assert not P.approved("G090LF99305515LE", now=100)
 
 
 # ── wiring ──────────────────────────────────────────────────────────────────

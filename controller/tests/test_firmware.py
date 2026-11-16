@@ -227,3 +227,30 @@ def test_a_download_follows_a_redirect_with_a_long_header(cache):
 
     assert asyncio.run(run()) == b"server-binary"
     assert em_firmware.read("v9.9.9") == b"server-binary"
+
+
+def test_a_signature_is_kept_beside_its_binary_and_pruned_with_it(cache):
+    em_firmware.write("v1.0.0", b"one", sig=b"sig-one\n")
+    assert em_firmware.read_sig("v1.0.0") == b"sig-one\n"
+    em_firmware.write_sig("v1.0.0", b"sig-two\n")
+    assert em_firmware.read_sig("v1.0.0") == b"sig-two\n"
+    for v in ("v1.0.1", "v1.0.2"):
+        em_firmware.write(v, v.encode())
+    em_firmware.prune(keep=1)
+    assert em_firmware.read_sig("v1.0.0") is None
+
+
+def test_a_signature_needs_a_cached_binary_and_a_usable_tag(cache):
+    em_firmware.write_sig("v9.0.0", b"orphan")          # nothing cached: ignored
+    assert em_firmware.read_sig("v9.0.0") is None
+    assert em_firmware.read_sig("../etc") is None
+    em_firmware.write_sig("../etc", b"x")                # unusable tag: ignored
+
+
+def test_an_unwritable_signature_is_not_an_error(cache, monkeypatch):
+    em_firmware.write("v1.0.0", b"one")
+    def boom(self, data):
+        raise OSError("read-only")
+    monkeypatch.setattr(type(em_firmware.cache_path("v1.0.0")), "write_bytes", boom)
+    em_firmware.write_sig("v1.0.0", b"sig")
+    assert em_firmware.read_sig("v1.0.0") is None

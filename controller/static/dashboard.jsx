@@ -1133,6 +1133,7 @@ function turnSegments(t) {
 function WakeSampleReview({ deviceId, isAdmin }) {
   const [samples, setSamples] = useState([]);
   const [playing, setPlaying] = useState(null);
+  const [zipError, setZipError] = useState('');
   const audioRef = useRef(null);
   const urlsRef = useRef({});
   const mono = "var(--font-mono)";
@@ -1194,10 +1195,29 @@ function WakeSampleReview({ deviceId, isAdmin }) {
     const a = document.createElement('a'); a.href = url;
     a.download = `wake-sample-${sample.id}.wav`; a.click();
   };
+  // One archive of every retained sample, grouped one folder per label —
+  // API.blob for the Bearer header, and a late revoke because the zip is too
+  // big to cache in urlsRef for a button pressed once in a while.
+  const downloadZip = async () => {
+    setZipError('');
+    try {
+      const url = URL.createObjectURL(await API.blob(
+        `/api/devices/${deviceId}/wake-samples/zip`));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `wake-samples-${deviceId}.zip`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) { setZipError(e.error || e.message || 'Could not download the samples'); }
+  };
 
   if (!isAdmin || !samples.length) return null;
   return <div style={{ marginTop: 'var(--space-8)', borderTop: '1px solid var(--track)', paddingTop: 'var(--space-6)' }}>
-    <div className="em-label" style={{ marginBottom: 'var(--space-4)' }}>Wake-word samples · newest 50</div>
+    <div className="em-label" style={{ marginBottom: 'var(--space-4)', display: 'flex', alignItems: 'center' }}>
+      <span style={{ flex: 1 }}>Wake-word samples</span>
+      {zipError && <span role="alert" style={{ color: 'var(--error)', marginRight: 'var(--space-4)' }}>{zipError}</span>}
+      <button onClick={downloadZip} title="Download every retained sample as one ZIP, grouped by label" style={{ background: 'none', border: 0, color: 'var(--text2)', cursor: 'pointer' }}>⤓ all (.zip)</button>
+    </div>
     <div style={{ maxHeight: 220, overflowY: 'auto' }}>
       {samples.map(sample => <div key={sample.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: 'var(--space-2) var(--space-1)', borderBottom: '1px solid var(--hairline)', fontFamily: mono, fontSize: 'var(--fs-sm)' }}>
         <span style={{ color: 'var(--muted)', minWidth: '16ch', flexShrink: 0, whiteSpace: 'nowrap' }}>{new Date(sample.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
@@ -3125,8 +3145,19 @@ const _ADB = (() => {
       return out;
     }
 
+    // Bounded: the transport's close can wait forever. On a donut in TWRP
+    // 3.7.0_9-0 (41C8, 2026-11-15) step 1's duplicate-serial path awaited it
+    // before showing its choice, and the step hung with nothing in the log.
+    // Every caller is closing in order to throw or to move on, so giving up
+    // after a few seconds costs nothing: the next requestDevice() resets the
+    // WebUSB interface either way.
     async close() {
-      try { await this._transport.close(); } catch {}
+      let t;
+      await Promise.race([
+        this._transport.close().catch(() => {}),
+        new Promise(r => { t = setTimeout(r, 3000); }),
+      ]);
+      clearTimeout(t);
     }
 
     // ── Static factory ──────────────────────────────────────────────────────
@@ -3261,8 +3292,6 @@ const _ALEXA_PKGS = [
 // without a live handle.
 const CONNECT_STEPS = new Set([0, 1, 6]);
 
-// The emOS flow reconnects only once, at TWRP, and never returns to Android.
-const _EMOS_CONNECT_STEPS = new Set([0, 1]);
 
 // Steps that carry operator-fixable input: a file picker or a field. Keep
 // stable IDs here rather than flow-local positions so emOS and FireOS cannot
@@ -3291,23 +3320,6 @@ const _STEP_MODE = {
   10: 'android', 11: 'android', 12: 'android',
 };
 
-// emOS: ONE mode switch in the whole flow, at step 1, and everything after it
-// happens in TWRP. That is most of what makes this flow shorter than the
-// FireOS one — Magisk, the boot-image patch and the root checks all exist to
-// get root INSIDE Android, and root in TWRP is inherent.
-//
-// Steps 7 and 8 are marked 'serial' rather than a USB mode: by then the device
-// is running emOS, adbd is gone, and the console is a USB CDC-ACM port reached
-// through the Web Serial API. The mode check below does not apply to them, and
-// they are not ADB steps at all.
-const _EMOS_STEP_MODE = {
-  0: 'android',
-  1: 'twrp', 2: 'twrp', 3: 'twrp', 4: 'twrp', 5: 'twrp', 6: 'twrp',
-  7: 'serial', 8: 'serial',
-};
-
-// Steps driven over the serial console rather than ADB.
-const _EMOS_SERIAL_STEPS = new Set([7, 8]);
 
 // TWRP is checked first: its banner is "omni_biscuit", which also contains
 // "biscuit", so an Android-first test would call every TWRP device Android.
@@ -3521,6 +3533,9 @@ const _unlockVerdict = ({ release = '', lk = '', twrp = '' }) => {
 const _echoBoard = (model = '', name = '') => {
   const m = model.trim(), n = name.trim().toLowerCase();
   if (m.toUpperCase() === 'AEORD' || n === 'radar_puffin') return 'radar';
+  // Read off 41C8 (stock FireOS 6), 2026-11-01. TWRP's own strings are not
+  // trusted here: in recovery the identity is read off /system.
+  if (m.toUpperCase() === 'AEODN' || n === 'donut_puffin') return 'donut';
   if (n.includes('biscuit')) return 'biscuit';
   if (!n && m.toLowerCase().includes('amazon')) return 'biscuit';
   return '';
@@ -3937,17 +3952,38 @@ function _wizardLogClass(msg, type) {
 // WiFi moves to the END and is done over the console against emOS's own
 // wpa_supplicant — the real radio, so a network this hardware cannot join is
 // refused at pick time rather than after a flash.
+//
+// No wake word step (removed 2026-11-15): the controller pushes the runtime
+// and models over WiFi as soon as the Echo first connects (em_reconcile ->
+// em_oww_sync), and until they land the Echo reports `degraded` with the
+// reason, so nothing claims to listen that cannot. Pushing ~15MB through TWRP
+// first only lengthened the one part of the run with no way back.
+//
+// `mode` is what the device must be in for the step: ONE switch in the whole
+// flow, at Connect to TWRP. The last two are 'serial': by then the device runs
+// emOS, adbd is gone, and the console is a USB CDC-ACM port reached through
+// Web Serial, so the ADB mode check does not apply to them.
+//
+// Code addresses these steps by id (_E below), never by position, so a step
+// can come or go without renumbering the runner and the panels.
 const _EMOS_STEPS = [
-  { id: 'connect_android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. It can be booted into Android or already in TWRP. Appears as "AEOBC" (Android) or "Echo" (TWRP) in the USB picker.' },
-  { id: 'connect_twrp',    label: 'Connect to TWRP',   desc: 'Wait for the device to reach TWRP, then reconnect — it appears as "Echo" in the USB picker. Everything after this happens there.' },
-  { id: 'escrow_boot',     label: 'Escrow Boot Image', desc: 'Read the stock boot partition off the device and keep a copy. This one file is both the build input and your backup if we need to roll back.' },
-  { id: 'install_em',      label: 'Install EchoMuse',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
-  { id: 'install_oww',     label: 'Wake Word Assets',  desc: 'Push the ONNX runtime and wake models (~15MB) used for on-device wake word detection.' },
-  { id: 'build_emos',      label: 'Build emOS',        desc: 'The controller repacks your own escrowed image with the emOS init, reusing your kernel and device trees.' },
-  { id: 'flash_emos',      label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.' },
-  { id: 'reboot_watch',    label: 'Reboot and Watch',  desc: 'Reboot into emOS and follow the first boot over the USB serial console while the ring fills.' },
-  { id: 'wifi_register',   label: 'Configure WiFi',    desc: 'Scan and join a network using the device’s own radio, then wait for it to register with the controller.' },
+  { id: 'connect_android', mode: 'android', label: 'Connect Device',    desc: 'Connect the Echo Dot via USB. It can be booted into Android or already in TWRP. Appears as "AEOBC" (Android) or "Echo" (TWRP) in the USB picker.' },
+  { id: 'connect_twrp',    mode: 'twrp',    label: 'Connect to TWRP',   desc: 'Wait for the device to reach TWRP, then reconnect — it appears as "Echo" in the USB picker. Everything after this happens there.' },
+  { id: 'escrow_boot',     mode: 'twrp',    label: 'Escrow Boot Image', desc: 'Read the stock boot partition off the device and keep a copy. This one file is both the build input and your backup if we need to roll back.' },
+  { id: 'install_em',      mode: 'twrp',    label: 'Install EchoMuse',  desc: 'Push the server binary, startup script and TLS credentials to /data, which survives the boot-partition write.' },
+  { id: 'build_emos',      mode: 'twrp',    label: 'Build emOS',        desc: 'The controller repacks your own escrowed image with the emOS init, reusing your kernel and device trees.' },
+  { id: 'flash_emos',      mode: 'twrp',    label: 'Flash and Verify',  desc: 'Write the built image to the boot partition and read it back to confirm it landed.' },
+  { id: 'reboot_watch',    mode: 'serial',  label: 'Reboot and Watch',  desc: 'Reboot into emOS and follow the first boot over the USB serial console while the ring fills.' },
+  { id: 'wifi_register',   mode: 'serial',  label: 'Configure WiFi',    desc: 'Scan and join a network using the device’s own radio, then wait for it to register with the controller.' },
 ];
+
+// Position of each emOS step by id.
+const _E = Object.fromEntries(_EMOS_STEPS.map((s, i) => [s.id, i]));
+const _EMOS_STEP_MODE = Object.fromEntries(_EMOS_STEPS.map((s, i) => [i, s.mode]));
+// Steps driven over the serial console rather than ADB.
+const _EMOS_SERIAL_STEPS = new Set(_EMOS_STEPS.flatMap((s, i) => s.mode === 'serial' ? [i] : []));
+// The emOS flow reconnects only once, at TWRP, and never returns to Android.
+const _EMOS_CONNECT_STEPS = new Set([_E.connect_android, _E.connect_twrp]);
 
 // ── WifiPanel ──
 
@@ -4120,7 +4156,7 @@ function _md5Hex(bytes) {
 // busybox at all, while a device with a root component added may well have
 // both. So neither form can be assumed and both have to be tried.
 //
-// Measured 2026-09-13 on G090LF11752215LE, TWRP 3.7.0_9-0, stock FireOS 6:
+// Measured 2026-09-13 on G090LF99305515LE, TWRP 3.7.0_9-0, stock FireOS 6:
 // `busybox md5sum` exits 127 and produces an empty string, which surfaced as
 // "start_server.sh reads unreadable" on a device whose script was installed
 // perfectly. The transfer was fine; the CHECK could not run.
@@ -4154,7 +4190,7 @@ async function deviceTools(c) {
   // FireOS 6 recovery has it compiled OUT: the command exits with
   // "dd: conv option disabled" having written nothing at all, which on a
   // partition write reads as 180MB/s and a read-back that still holds the old
-  // image. Measured 2026-09-13 on G090LF11752215LE; the device was never
+  // image. Measured 2026-09-13 on G090LF99305515LE; the device was never
   // modified, because a dd that refuses its arguments does nothing.
   //
   // Asked with a one-byte write to a temp file rather than by parsing a
@@ -4333,8 +4369,12 @@ class _EmosConsole {
 
 // Which flow the wizard runs.
 //
-// emOS is the default and FireOS is offered beside it, on the wizard's first
-// step only (Wil's call, 2026-09-07). The earlier version hid FireOS behind
+// emOS only, from 2026-11-15: the picker is gone and `?flow=fireos` is the one
+// way into the FireOS flow, for support, until its code is removed. The
+// history below is why there was a picker at all.
+//
+// Until then emOS was the default and FireOS was offered beside it, on the
+// wizard's first step only (Wil's call, 2026-09-07). The earlier version hid FireOS behind
 // `?flow=fireos` on the grounds that offering a choice would ask the user to
 // decide something they had no basis for. The answer to that is to GIVE them
 // the basis rather than to withhold the choice, so both options carry the
@@ -4362,7 +4402,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // `flowLocked` below. The two flows have different step COUNTS, so switching
   // one mid-run would renumber the steps under a wizard that has already done
   // some of them, which is what the ref was protecting against.
-  const [flow, setFlow] = useState(_wizardFlow);
+  const [flow] = useState(_wizardFlow);
   // Factory reset at Connect to TWRP (runWipeData), emOS flow only. Off unless
   // ticked, never remembered between runs, and locked with the flow once
   // anything has run.
@@ -4465,23 +4505,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   }
   function markStep(i, st) { setStepState(s => { const n = [...s]; n[i] = st; return n; }); }
 
-  // The flow can only be chosen while the wizard has done nothing: on step 0,
-  // not running, with no step yet in any state but pending, and no device
-  // attached. Anything else and the choice is locked — switching would
-  // renumber the steps under work already done.
+  // Pre-run options (the wipe toggle) can be set only while the wizard has
+  // done nothing: on step 0, not running, every step still pending, and no
+  // device attached.
   const flowLocked = running || step !== 0 || !!adb
                   || stepState.some(s => s !== 'pending');
-
-  function chooseFlow(next) {
-    if (next === flow || flowLocked) return;
-    // Step count differs between the flows, so the per-step state has to be
-    // rebuilt rather than carried across.
-    setFlow(next);
-    if (next !== 'emos') setWipeData(false);
-    setStepState((next === 'emos' ? _EMOS_STEPS : _WIZARD_STEPS).map(() => 'pending'));
-    setStep(0);
-    setLog([]);
-  }
 
   // Abandon whatever step is in flight.
   //
@@ -4846,14 +4874,17 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // Radar runs emOS only: FireOS 6 on it is Amazon's headless build, which
     // EchoMuse does not drive. Its one unlock (amonet-radar) has none of
     // amonet-biscuit's generations, so _unlockVerdict is biscuit's alone.
-    if (board === 'radar' && !isEmos) {
+    // The donut likewise: its FireOS 6 is the same headless build, and its
+    // unlock (kaeru) leaves no amonet LK to read.
+    const emosOnly = { radar: 'an Echo 2nd gen (radar)', donut: 'an Echo Dot 3rd gen (donut)' };
+    if (emosOnly[board] && !isEmos) {
       expectDisconnect.current = true;
       try { await c.close(); } catch {}
       setAdb(null);
-      throw new Error('This is an Echo 2nd gen (radar), which EchoMuse supports on emOS only. '
+      throw new Error(`This is ${emosOnly[board]}, which EchoMuse supports on emOS only. `
         + 'Nothing has been written. Use the emOS flow.');
     }
-    const unlock = board === 'radar' ? { v2: false, evidence: [] }
+    const unlock = emosOnly[board] ? { v2: false, evidence: [] }
                                      : _unlockVerdict({ release: effRelease, lk, twrp });
     if (unlock.v2 && !isEmos) {
       expectDisconnect.current = true;
@@ -4898,6 +4929,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // written. The FireOS flow used to warn and carry on, and its release
     // check is skipped when TWRP cannot read /system, so a Dot 3 in recovery
     // reached the patch.
+    if (board === 'donut') {
+      addLog('Echo Dot 3rd gen (donut): expecting FireOS 6 in both slots. The Escrow Boot Image '
+           + 'step checks that before anything is written, and is the way back — keep that file.', 'warn');
+    }
     if (board === 'radar') {
       addLog('Echo 2nd gen (radar): expecting FireOS 6 in both slots. The Escrow Boot Image '
            + 'step checks that before anything is written, and is the way back — keep that file.', 'warn');
@@ -4907,10 +4942,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       try { await c.close(); } catch {}
       setAdb(null);
       throw new Error(
-        `This does not look like an Echo Dot 2nd gen or an Echo 2nd gen (model `
-        + `"${model || 'unknown'}", codename "${name || 'unknown'}"). Nothing has been `
-        + `written. The wizard sets up only those two, because it reuses the board's `
-        + `own kernel and boot image.`);
+        `This does not look like an Echo Dot 2nd gen, an Echo 2nd gen or an Echo Dot `
+        + `3rd gen (model "${model || 'unknown'}", codename "${name || 'unknown'}"). `
+        + `Nothing has been written. The wizard sets up only those three, because it `
+        + `reuses the board's own kernel and boot image.`);
     }
     // The untested-build case stays a WARNING in both flows, deliberately, and
     // it is the one place the two agree to be lenient: emOS mounts this
@@ -5347,6 +5382,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           'etc/firmware/WIFI_RAM_CODE_8163', 'etc/firmware/WMT_SOC.cfg'],
       6: ['bin/sh', 'bin/linker', 'bin/e2fsck', 'vendor/bin/wmt_loader', 'vendor/bin/wmt_launcher',
           'vendor/firmware/WIFI_RAM_CODE_8163', 'vendor/firmware/WMT_SOC.cfg'],
+      // The Dot 3's WiFi is an MT7668 on SDIO, which init brings up from these
+      // two modules (sdio_wifi_bringup) rather than biscuit's MT6620 tools. Its
+      // firmware is loaded by the kernel from /system/vendor/firmware, by name
+      // the driver chooses, so it is not listed. Bluetooth's btmtksdio.ko is
+      // not required: emOS without it still serves voice. No e2fsck: the
+      // donut's FireOS 6 has none (only vendor/bin/fsck_msdos_mtk, 41C8
+      // 2026-11-15), so emOS carries its own and the controller refuses a
+      // donut payload without it (em_emos_ota.NEEDS_OWN_E2FSCK, #1182).
+      donut: ['bin/sh', 'bin/linker',
+              'lib/modules/wlan_mt76x8_sdio_prealloc.ko', 'lib/modules/wlan_mt76x8_sdio.ko'],
     };
   }
 
@@ -5363,7 +5408,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // (2026-09-25), and the kernel publishes the GPT names whatever a recovery
   // does with its links.
   function _donorProbeScript(files) {
-    const all = [...new Set([...files[5], ...files[6]])].join(' ');
+    const all = [...new Set(Object.values(files).flat())].join(' ');
     return (
       'part() { for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
       + 'if grep -qx "PARTNAME=$1" "$u" 2>/dev/null; then d=${u%/uevent}; echo "/dev/block/${d##*/}"; return; fi; done; '
@@ -5465,21 +5510,25 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         'The check of this Echo\'s partitions did not finish, so nothing about it can be '
         + 'trusted yet. Nothing has been written. Check the cable and try this step again.' };
     }
-    const radar = board === 'radar';
+    // Radar and donut each have one unlock of their own (amonet-radar, kaeru),
+    // neither of which leaves amonet-biscuit's LK, so the LK is not read as
+    // evidence for them. Being in TWRP with an A/B layout is the unlock.
+    const radar = board === 'radar', donut = board === 'donut', own = radar || donut;
+    const ownName = radar ? 'Echo 2nd gen (radar)' : 'Echo Dot 3rd gen (donut)';
     const amonet = _amonetLk(probe.lk);
     const lkSays = amonet ? `lk_a holds amonet ${amonet}'s LK` : 'lk_a holds neither amonet\'s LK';
     const tw = probe.twrp;
     let gen = 0, unreadable = false;
-    if (!radar && !probe.lk) {
+    if (!own && !probe.lk) {
       unreadable = true;
       why.push('the wizard could not read the lk_a partition, so it cannot tell amonet 1 from amonet 2');
     } else if (!tw) {
       unreadable = true;
       why.push('the wizard could not read the TWRP version');
-    } else if (radar) {
+    } else if (own) {
       if (layout === 'v2') gen = 6;
       else why.push('the boot partitions carry amonet-biscuit\'s renamed (_x) entries, '
-        + 'which an Echo 2nd gen should never have');
+        + `which an ${ownName} should never have`);
     } else if (amonet === 2 && /^3\.7\.0(?![0-9])(?!_9-bboe)/.test(tw) && layout === 'v2') {
       gen = 6;
     } else if (amonet === 1 && /^3\.2\.3(?![0-9])|^3\.7\.0_9-bboe\d+$/.test(tw) && layout === 'v1') {
@@ -5490,11 +5539,15 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         + 'amonet 2 means TWRP 3.7.0 and FireOS 6)');
     }
     if (gen) {
-      seen.push(radar ? `Echo 2nd gen (radar) unlock, TWRP ${tw}`
+      seen.push(own ? `${ownName} unlock, TWRP ${tw}`
                       : `amonet ${gen === 6 ? 2 : 1}: ${lkSays}, TWRP ${tw}`);
+      // The donut runs its 32-bit FireOS 6 on a 64-bit kernel
+      // (em_emos_build.FIREOS6_BOARDS), so its kernel says nothing about the
+      // generation; on biscuit and radar it decides it.
       const want = gen === 6
-        ? { layout: 'nested', release: '7.', arch: 'arm', label: 'FireOS 6' }
+        ? { layout: 'nested', release: '7.', arch: donut ? 'arm64' : 'arm', label: 'FireOS 6' }
         : { layout: 'root', release: '5.', arch: 'arm64', label: 'FireOS 5' };
+      const need = files[donut ? 'donut' : gen];
       const other = gen === 6 ? 'FireOS 5' : 'FireOS 6';
       const needed = gen === 6 ? ['a', 'b'] : ['a'];
       for (const x of ['a', 'b']) {
@@ -5507,7 +5560,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         else if (s.layout !== want.layout || !s.release.startsWith(want.release)) {
           problem = `system_${x} holds ${what}, which is ${other}, not ${want.label}`;
         } else {
-          const missing = files[gen].filter(f => s.files[f] !== 'yes');
+          const missing = need.filter(f => s.files[f] !== 'yes');
           if (missing.length) problem = `system_${x} (${what}) is missing ${missing.join(', ')}`;
         }
         if (!problem && gen === 5 && x === 'a' && s.node !== '/dev/block/mmcblk0p13') {
@@ -5521,21 +5574,22 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
           why.push(problem);
         } else {
           seen.push(`system_${x}: ${what}${s.build ? ` (${s.build})` : ''}, `
-                  + `all ${files[gen].length} files emOS uses present`);
+                  + `all ${need.length} files emOS uses present`);
         }
       }
       if (!heads || !heads.length) why.push('there is no stock boot image to build from');
       for (const h of heads || []) {
         if (!h.arch) why.push(`the kernel in ${h.name} could not be identified as 32- or 64-bit`);
         else if (h.arch !== want.arch) {
-          why.push(`${h.name} holds a ${h.arch === 'arm' ? '32-bit (FireOS 6)' : '64-bit (FireOS 5)'} `
+          why.push(donut ? `${h.name} holds a 32-bit kernel, not the 64-bit kernel an ${ownName} runs`
+                         : `${h.name} holds a ${h.arch === 'arm' ? '32-bit (FireOS 6)' : '64-bit (FireOS 5)'} `
                  + `kernel, not ${want.label}'s`);
         } else seen.push(`${h.name}: ${want.label} kernel (${h.arch === 'arm' ? '32' : '64'}-bit)`);
       }
     }
     if (!why.length) return { ok: true, gen, confirmed: seen, notes };
     const fix = gen === 6
-      ? ` ${radar ? 'An Echo 2nd gen' : 'amonet 2'} needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock `
+      ? ` ${own ? `An ${ownName}` : 'amonet 2'} needs FireOS 6 in BOTH slots. If the FireOS 6 flash from the unlock `
         + 'instructions did not complete for both, finish it, then run this step again.'
       : gen === 5
         ? ' amonet 1 needs FireOS 5 in system_a (mmcblk0p13) and a FireOS 5 kernel to build from.'
@@ -7277,7 +7331,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // whether the binary or its interpreter is the thing missing. That made a
     // failed first attempt hand the retry a broken shim, which then SKIPPED
     // this whole block and reported the environment ready (measured on
-    // G090LF11803611NF, 2026-09-06: step 3 green, every su in step 4 dead).
+    // G090LF99207711NF, 2026-09-06: step 3 green, every su in step 4 dead).
     let suUid = (await c.shell('su -c "id -u" 2>&1')).trim();
     if (suUid !== '0') {
       addLog('  no working su in recovery — installing a shim (everything here is already root)');
@@ -7576,7 +7630,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
   // reached the add-on at all (measured 2026-09-06).
   //
   // Four little-endian u32s at fixed offsets, verified against real headers off
-  // G090LF1180440C95 and G090LF11803611NF. This is NOT a second copy of
+  // G090LF9920110C95 and G090LF99207711NF. This is NOT a second copy of
   // split_reference(): that goes on to parse the MTK wrapper and split the DTBs,
   // and everything it reads lives inside the region computed here. It also
   // validates what it is given, so a wrong answer here fails loudly on the next
@@ -8631,6 +8685,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const epoch = stepEpoch.current;
     const abandoned = () => epoch !== stepEpoch.current;
 
+    // Every button runs the step it is drawn on. One that names another step,
+    // or none, is a wizard bug: #1183 dropped a step and left the emOS
+    // buttons on their old numbers, so "Flash emOS" ran Reboot and Watch with
+    // nothing flashed, and Configure WiFi's Connect named a step that no longer
+    // existed and hung on "Working on this step" (41C8, 2026-11-15). Refused
+    // here, before anything runs or the step is marked.
+    if (!STEPS[stepIdx] || stepIdx !== step) {
+      addLog(`Error: wizard bug — asked to run step ${stepIdx + 1} from step `
+           + `${step + 1}. Nothing has been run. Please report this.`, 'error');
+      return;
+    }
+
     setRunning(true);
     setStepError('');
     markStep(stepIdx, 'running');
@@ -8678,26 +8744,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 + 'your amonet version — R0rt1z2\'s XDA thread has it.'
               : 'Reboot the device to Android and Reconnect.'));
       }
-      if (isEmos) switch (stepIdx) {
-        case 0: c = await runConnectAndroid(); break;
-        case 1: c = await runConnectTwrp();
-                if (wipeData) await runWipeData(c); break;
-        case 2: await runEscrowBoot(c); break;
+      if (isEmos) switch (STEPS[stepIdx].id) {
+        case 'connect_android': c = await runConnectAndroid(); break;
+        case 'connect_twrp':    c = await runConnectTwrp();
+                                if (wipeData) await runWipeData(c); break;
+        case 'escrow_boot':     await runEscrowBoot(c); break;
         // Every TWRP step prepares its own environment rather than inheriting
         // step 2's. The su shim and the /sdcard symlink both live in the
         // recovery ramdisk, so a Reconnect between steps — which the operator
         // is invited to do on any failure — silently takes them away, and the
         // steps below are the shared FireOS ones that assume both. It is
         // idempotent and costs three shell round trips.
-        case 3: await prepareTwrpForInstall(c);
-                await ensureWifiNvram(c);
-                await runInstallEchoMuse(c, binaryFile, useLatest); break;
-        case 4: await prepareTwrpForInstall(c);
-                await runInstallOwwAssets(c); break;
-        case 5: await runBuildEmos(useLatest); break;
-        case 6: await runFlashEmos(c); break;
-        case 7: await runRebootAndWatch(c); break;
-        case 8: await runEmosWifi(useLatest); break;
+        case 'install_em':      await prepareTwrpForInstall(c);
+                                await ensureWifiNvram(c);
+                                await runInstallEchoMuse(c, binaryFile, useLatest); break;
+        case 'build_emos':      await runBuildEmos(useLatest); break;
+        case 'flash_emos':      await runFlashEmos(c); break;
+        case 'reboot_watch':    await runRebootAndWatch(c); break;
+        case 'wifi_register':   await runEmosWifi(useLatest); break;
       }
       else switch (stepIdx) {
         case  0: c = await runConnectAndroid(); break;
@@ -8733,7 +8797,11 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         setAdb(null);
         return;
       }
-      addLog(`Error: ${e.message}`, 'error');
+      // A device already on record is a choice for the operator, not a
+      // failure (Wil, 2026-11-15): amber, no "Error:". The step still stops
+      // so the choice below is made before anything runs.
+      if (e.matchedDeviceId) addLog(e.message, 'warn');
+      else addLog(`Error: ${e.message}`, 'error');
       setStepError(e.message || String(e));
       markStep(stepIdx, 'error');
       if (e.matchedDeviceId) setDuplicateDeviceId(e.matchedDeviceId);
@@ -8764,16 +8832,16 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // a button people can leave unpressed defeats the point of it being
     // mandatory.
     //
-    // emOS: escrow (2), assets (4) and build (5) auto-run. The build writes
+    // emOS: escrow and build auto-run. The build writes
     // nothing to the device — it is the controller repacking the escrowed
     // image — and it takes the init from the latest emOS release, so there is
     // nothing to ask for. If no release is published it fails with something
     // to act on and the picker below is still there.
     //
-    // The flash (6) and the two serial steps stay manual, deliberately: each
+    // The flash and the two serial steps stay manual, deliberately: each
     // is a partition write or a reboot, and neither should begin while nobody
     // is looking.
-    const autoSteps = isEmos ? new Set([2, 4, 5]) : new Set([2, 4, 7, 8, 9, 12]);
+    const autoSteps = isEmos ? new Set([_E.escrow_boot, _E.build_emos]) : new Set([2, 4, 7, 8, 9, 12]);
     // Connect to TWRP runs itself when the device is ALREADY in TWRP.
     //
     // Step 1 keeps its handle when it finds the device in recovery, so step 2
@@ -8781,14 +8849,14 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     // for a click to be told "still connected" is a button whose only possible
     // outcome is yes. It stays manual in every other case, because then it
     // genuinely means "I have got the device into TWRP, go and look".
-    const alreadyThere = isEmos && step === 1 && adb
+    const alreadyThere = isEmos && step === _E.connect_twrp && adb
                       && _bannerMode(adb.banner) === 'twrp';
     if ((!autoSteps.has(step) && !alreadyThere)
         || running || restored || stepState[step] !== 'pending') return;
     // The emOS build's default source is the release, so the auto path has to
     // say so — `useLatest` is undefined otherwise and it would ask for a file
     // nobody has chosen.
-    if (adb) { runStep(step, isEmos && step === 5); return; }
+    if (adb) { runStep(step, isEmos && step === _E.build_emos); return; }
     // An auto step with no connection used to be a no-op, so the wizard sat on
     // it looking busy forever — which is exactly how the wake word asset step
     // failed on 2026-07-31, reached only after the previous step had rebooted
@@ -8952,45 +9020,18 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
               </div>
             )}
 
-            {/* Which OS to install. Step 0 only, and gone once anything has
-                run — see flowLocked. Both options state the thing that
-                actually decides it, because a choice offered without one is
-                the objection this control was held back for. Above "Up next",
-                which previews the flow being chosen. */}
-            {step === 0 && !flowLocked && (
+            {/* emOS is the only install offered (Wil, 2026-11-15; decided
+                2026-11-10). The FireOS flow is still reachable by
+                `?flow=fireos` for support until its code is removed, and that
+                URL is the only way in, so no picker is drawn. The wipe toggle
+                stays: step 0 only, and gone once anything has run. */}
+            {step === 0 && !flowLocked && isEmos && (
               <div style={{ marginBottom: 12 }}>
-                <div className="em-label" style={{ marginBottom: 6 }}>What to install</div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {[
-                    { id: 'emos', name: 'emOS',
-                      sub: 'No Amazon software. The 3.5mm jack works.',
-                      warn: 'Newer, and going back to FireOS wipes the device.' },
-                    { id: 'fireos', name: 'FireOS + root',
-                      sub: 'Keeps Android. Every device in the field runs this.',
-                      warn: 'The 3.5mm jack is unreliable on this path.' },
-                  ].map(o => (
-                    <div key={o.id} onClick={() => chooseFlow(o.id)}
-                      style={{
-                        flex: 1, cursor: 'pointer', padding: '9px 11px', borderRadius: 8,
-                        border: `1px solid ${flow === o.id ? 'var(--accent)' : 'var(--border-soft)'}`,
-                        background: flow === o.id ? 'var(--hairline)' : 'transparent',
-                      }}>
-                      <div style={{ fontFamily: "'DM Sans',sans-serif", fontSize: 12, fontWeight: 600,
-                                    color: flow === o.id ? 'var(--text)' : 'var(--text2)' }}>
-                        {o.name}{o.id === 'emos' && <span style={{ fontWeight: 400, color: 'var(--muted)' }}> · default</span>}
-                      </div>
-                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', marginTop: 3, lineHeight: 1.5 }}>{o.sub}</div>
-                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--warn)', marginTop: 2, lineHeight: 1.5 }}>{o.warn}</div>
-                    </div>
-                  ))}
-                </div>
-                {isEmos && <div style={{ marginTop: 10 }}>
-                  <Toggle label="Wipe data and cache first"
-                    sub={wipeData
-                      ? 'Erases /data and /cache in TWRP: WiFi, settings and anything installed. Cannot be undone.'
-                      : 'Off: the device keeps its data.'}
-                    value={wipeData} onChange={setWipeData}/>
-                </div>}
+                <Toggle label="Wipe data and cache first"
+                  sub={wipeData
+                    ? 'Erases /data and /cache in TWRP: WiFi, settings and anything installed. Cannot be undone.'
+                    : 'Off: the device keeps its data.'}
+                  value={wipeData} onChange={setWipeData}/>
               </div>
             )}
 
@@ -9082,10 +9123,10 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
 
             {/* emOS step 3: the EchoMuse binary, same choice the FireOS flow
                 offers at its step 11. */}
-            {isEmos && step === 3 && stepState[3] !== 'done' && !running && (
+            {isEmos && step === _E.install_em && stepState[step] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-                  <Pill accent onClick={() => runStep(3, true)}>Install latest from GitHub</Pill>
+                  <Pill accent onClick={() => runStep(_E.install_em, true)}>Install latest from GitHub</Pill>
                   <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
                     {checkingRelease ? 'Checking…' : 'Check for newer release'}
                   </Pill>
@@ -9101,39 +9142,39 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   onChange={e => setBinaryFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!binaryFile && <Pill onClick={() => runStep(3, false)}>Install Custom Build</Pill>}
+                {!!binaryFile && <Pill onClick={() => runStep(_E.install_em, false)}>Install Custom Build</Pill>}
               </div>
             )}
 
             {/* emOS step 5: the init the image is built around. The release
                 is the ordinary path; the picker is for building against a
                 version that is not published yet. */}
-            {isEmos && step === 5 && stepState[5] !== 'done' && !running && (
+            {isEmos && step === _E.build_emos && stepState[step] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-                <Pill accent onClick={() => runStep(5, true)}>Build with the latest emOS release</Pill>
+                <Pill accent onClick={() => runStep(_E.build_emos, true)}>Build with the latest emOS release</Pill>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', letterSpacing: '0.04em' }}>— or —</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em' }}>
-                  {stepState[5] === 'error' ? 'SELECT A DIFFERENT INIT' : 'YOUR OWN INIT BINARY (AARCH64, STATIC)'}
+                  {stepState[step] === 'error' ? 'SELECT A DIFFERENT INIT' : 'YOUR OWN INIT BINARY (AARCH64, STATIC)'}
                 </div>
                 <input
                   type="file"
                   onChange={e => setInitFile(e.target.files[0])}
                   style={{ fontFamily: "'DM Mono',monospace", fontSize: 11 }}
                 />
-                {!!initFile && <Pill onClick={() => runStep(5, false)}>Build with this init</Pill>}
+                {!!initFile && <Pill onClick={() => runStep(_E.build_emos, false)}>Build with this init</Pill>}
               </div>
             )}
 
             {/* emOS step 6: the partition write. Deliberately a button — this
                 is the only irreversible-looking step in the flow, and it
                 should not begin while nobody is watching. */}
-            {isEmos && step === 6 && stepState[6] !== 'done' && !running && (
+            {isEmos && step === _E.flash_emos && stepState[step] !== 'done' && !running && (
               <div style={{ marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)' }}>
                   Writes the built image to {emosTarget || 'the boot partition'}.
                   Your escrowed image restores it in about ten seconds and leaves /data alone.
                 </div>
-                <Pill accent onClick={() => runStep(6)}>Flash emOS</Pill>
+                <Pill accent onClick={() => runStep(_E.flash_emos)}>Flash emOS</Pill>
               </div>
             )}
 
@@ -9147,7 +9188,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
             {/* FireOS: steps 2-4, the TWRP steps after its escrow (#468). Magisk
                 at step 3 rewrites the boot partition too, so the restore undoes
                 both. Not offered once Android is up — no TWRP, no restore. */}
-            {(isEmos ? (step === 6 || step === 7) : (step >= 2 && step <= 4))
+            {(isEmos ? (step === _E.flash_emos || step === _E.reboot_watch) : (step >= 2 && step <= 4))
               && stepState[step] === 'error' && !running
               // Only when there is something to put back: this session
               // escrowed an image, or it was resumed after a reload and the
@@ -9186,7 +9227,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 orbiting segment is the case that needs a human, because it
                 means PID 1 never ran and nothing on the device will recover
                 itself. */}
-            {isEmos && step === 7 && stepState[7] !== 'done' && !running && (
+            {isEmos && step === _E.reboot_watch && stepState[step] !== 'done' && !running && (
               <div className="em-panel" style={{ marginBottom: 12, borderColor: 'var(--warn)' }}>
                 <div className="em-label" style={{ marginBottom: 6 }}>What you do</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7, marginBottom: 10 }}>
@@ -9198,7 +9239,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   {/* After the reboot there is no ADB handle and
                       runRebootAndWatch skips it, so a second click only opens
                       the port picker, which times out if emOS is slow. */}
-                  <Pill accent onClick={() => runStep(7)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
+                  <Pill accent onClick={() => runStep(_E.reboot_watch)}>{adb ? 'Reboot and Connect Console' : 'Connect Console'}</Pill>
                 </div>
                 <div className="em-label" style={{ marginBottom: 6 }}>The ring</div>
                 <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
@@ -9226,7 +9267,7 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                 </p>
               </div>
             )}
-            {isEmos && step === 8 && stepState[8] !== 'done' && !running && (
+            {isEmos && step === _E.wifi_register && stepState[step] !== 'done' && !running && (
               <WifiPanel
                 ready={emosConsole}
                 wifiSsid={wifiSsid} setWifiSsid={setWifiSsid}
@@ -9235,8 +9276,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
                   .then(nets => setWifiNetworks(nets))
                   .catch(e => addLog(`Scan failed: ${e.message}`, 'error'))}
                 networks={wifiNetworks}
-                onConnect={() => { if (wifiSsid) runStep(8); }}
-                onSkip={() => runStep(8, true)}
+                onConnect={() => { if (wifiSsid) runStep(_E.wifi_register); }}
+                onSkip={() => runStep(_E.wifi_register, true)}
               />
             )}
             {/* Step 10: WiFi configuration (FireOS flow — emOS configures WiFi over the console at step 8) */}
@@ -11091,6 +11132,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 Admins approve devices, change config and can open a root shell to any device.
                 Read-only accounts see status only. An account with an HA badge gets its sign-in
                 from Home Assistant; its ROLE is still set here and never overwritten by a login.
+                An account marked SSO signs in through your identity provider and its role follows
+                its group membership there, so it is changed in the provider, not here.
                 The last admin cannot be demoted.
               </div>
               {(users || []).map(u => (
@@ -11099,12 +11142,14 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                   <div style={{ flex:1 }}>
                     <div style={{ fontFamily:"var(--font-sans)", fontSize:'var(--fs-lg)' }}>{u.username}</div>
                     <div style={{ fontFamily:"var(--font-mono)", fontSize:'var(--fs-sm)', color:'var(--muted)' }}>
-                      {u.role}{u.ha_linked ? ' · HA-linked' : ''}
+                      {u.role}{u.ha_linked ? ' · HA-linked' : ''}{u.oidc_linked ? ' · SSO · role from group' : ''}
                     </div>
                   </div>
-                  {u.role === 'admin'
-                    ? <Pill onClick={() => setUserRole(u.id, 'readonly')}>Demote to read-only</Pill>
-                    : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
+                  {u.oidc_linked
+                    ? null
+                    : u.role === 'admin'
+                      ? <Pill onClick={() => setUserRole(u.id, 'readonly')}>Demote to read-only</Pill>
+                      : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
                 </div>
               ))}
               {!users && !usersMsg && <div className="help">Loading…</div>}

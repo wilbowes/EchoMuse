@@ -62,7 +62,7 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
   in household noise; only noisy-room captures can rank beams, and until they
   do the selector stays.
 - **AEC** (`internal/aec/`, vendored SpeexDSP-1.2.1), whole mic path incl. the
-  wake stream; default off (`aecEnabled`).
+  wake stream; **on by default** (`aecEnabled`, since #144, 2026-08-13: barge-in needs it).
   - **Hardware reference (#385)**: ch8 is an in-frame loopback of our playback
     (+33 samples, inverted, pre-DAC); no ring, `aecDelayMs` or governor.
     Promoted only when BIT-EXACT ZERO while silent AND carrying audio while
@@ -148,7 +148,8 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
 | `internal/bindings/als/` | Ambient light by name, TSL2540 (i2c `als_lux`) or TSL2584 (IIO `illuminance0_input`) per batch, tried in order (`board.LightSensors`), never a loose `tsl` match. **Never read `calibrated_lux`** (kernel corruption; test-guarded); `illuminance0_input` only with an idme `alscal` `ams_0_0` baseline, else `unsafe`. Never `unbind` it (hangs). **Poll 5s, not 1s** (dark reads flood ram_console, the only crash log). `Lux()` is nil, never 0. `Report()` → `ambient_light_status`, whole bus enumerated before matching |
 | `internal/bindings/jack/` | `/sys/class/switch/h2w`, polled; `Watch` dispatches its STARTING state too (a boot has no edge) |
 | `internal/outchain/` | EQ → bass guard → limiter on the mix at the ALSA write, bit-exact to `testdata/gen_vectors.py`. Inactive until the ack carries `output_chain` (never runs twice). No `%` per sample: 32-bit ARM Go has no divide |
-| `internal/sendspin/` | Sendspin player (#89): pull scheduler (`SetMusicSource`), consulted only while `0x04` is empty. **Speaks aiosendspin 9.1.1's wire** (§6.4 of `docs/audio-states.md`); re-run `tools/sendspin_interop/run.sh` before trusting an MA upgrade. `internal/firewall` opens 8928 before `Start` and closes it on every stop (emOS drops inbound). `OutputClock` gates readings over 3ms off prediction |
+| `internal/opus/` | libopus 1.5.2 decoder, vendored byte-identical by `vendor.sh` (sha256-pinned); one wrapper `.c` per source, NEON files `_arm.c`. Fixed point |
+| `internal/sendspin/` | Sendspin player (#89): pull scheduler (`SetMusicSource`), consulted only while `0x04` is empty. **Speaks aiosendspin 10.2.1's and 9.1.1's wire** (§6.4 of `docs/audio-states.md`); re-run `tools/sendspin_interop/run.sh` (both versions) before trusting an MA upgrade. Asks for stereo Opus, then mono FLAC, and decodes to mono; the Opus decoder is reset on `stream/clear` and closed with its stream. `internal/firewall` opens 8928 before `Start` and closes it on every stop (emOS drops inbound). `OutputClock` gates readings over 3ms off prediction |
 | `internal/wifi/` | WiFi change with rollback; reload is `svc wifi disable/enable` ONLY. **SSIDs are 0–32 BYTES** (`ssid.go`): `ssid_hex`, byte compare, quoted or hex. Never in a shell command |
 | `internal/bluetooth/` | HCI passive scan over `/dev/stpbt` (Bluedroid `pm disable`d first, Android only); `emit.go` filters; the factory address is loaded every session (below) |
 | `internal/echoref/` | Aligns a loopback that is its own PCM with the mics (donut); `tools/echoref_replay` replays raw captures through it |
@@ -294,8 +295,9 @@ frames sent to the wire.
 
 ### Asset distribution (`em_oww_assets.py`)
 
-`em_oww_assets` plans (pure); `em_api` executes over the wizard (USB/ADB,
-**mandatory step**) or the shell plane.
+`em_oww_assets` plans (pure); `em_api` executes over the shell plane (the
+on-connect reconcile, the only delivery for emOS since #1183) or, in the
+FireOS flow while it exists, the wizard over USB/ADB.
 
 - ARM runtime **vendored in the controller image**, pinned by AAR sha256
   (`onnxruntime-android` 1.19.2); models from openwakeword or `oww_models/`.

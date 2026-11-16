@@ -14,9 +14,8 @@ down until it is power cycled. Inspect freely; do not stop the server.
 import asyncio, json, secrets, sqlite3, sys, time
 import websockets
 
-# Default when neither -d nor --all is given — kept so existing invocations
-# and the README's one-liner behave exactly as before.
-DEVICE = "G090LF11803611NF"
+# Default when neither -d nor --all is given: EM_DEVICE, a device id.
+DEVICE = __import__("os").environ.get("EM_DEVICE", "")
 
 def _resolve_db() -> str:
     # #270: the container keeps its database at /app/data, the HA add-on at
@@ -69,6 +68,8 @@ def parse_args(argv):
         else:
             cmds.append(a)
         i += 1
+    if not devices and not DEVICE:
+        sys.exit("devshell: give -d <device id>, --all, or set EM_DEVICE")
     return (devices or [DEVICE]), cmds
 
 def make_token():

@@ -36,6 +36,11 @@ type Config struct {
 	// approved the device. Off by default: anyone on the LAN can claim to
 	// be a server, and pairing is one paste of the device's token.
 	Unpaired bool
+	// Codecs, when set, offers only these of supportedFormats, in this
+	// order. For tools/sendspin_interop, whose sync check reads exact
+	// sample values back and so needs a lossless codec; the device leaves
+	// it nil.
+	Codecs []string
 }
 
 // Client is the device's Sendspin player. Servers connect to it (the spec's
@@ -391,7 +396,7 @@ func (c *Client) hello() clientHello {
 			SoftwareVersion: c.cfg.Version,
 		},
 		PlayerSupport: &playerSupport{
-			SupportedFormats:  []audioFormat{{Codec: "flac", Channels: outChannels, SampleRate: outRate, BitDepth: outBits}},
+			SupportedFormats:  offered(c.cfg.Codecs),
 			BufferCapacity:    bufferCapacity,
 			SupportedCommands: []string{"volume", "mute"},
 		},
@@ -401,8 +406,11 @@ func (c *Client) hello() clientHello {
 }
 
 // bufferCapacity caps the compressed bytes a server may have outstanding.
-// Sized as 6s of the same audio as PCM, so FLAC's ~2:1 buys more time rather
-// than more memory: roughly 12s of mono decoded, ~1.1MB.
+// Sized as 6s of mono PCM, so FLAC's ~2:1 buys more time rather than more
+// memory: roughly 12s of mono decoded, ~1.1MB. One value covers every format,
+// so at Opus rates it allows ~36s, but aiosendspin also holds a player to 30s
+// in flight (max_duration_us) and sends to its own lead, not to the cap: the
+// worst case decoded is 30s of mono, ~2.9MB.
 const bufferCapacity = 6 * outRate * outChannels * outBits / 8
 
 // ── admission ──────────────────────────────────────────────────────────────

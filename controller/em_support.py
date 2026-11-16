@@ -170,7 +170,7 @@ _QUOTED = re.compile(
 )
 _URL = re.compile(r"""https?://[^\s'"]+""")
 
-# Bare network identifiers in log prose — "Device connected: ... at 10.10.1.60"
+# Bare network identifiers in log prose — "Device connected: ... at 192.0.2.60"
 # is not quoted and is not a URL, so neither of the rules above catches it.
 # Found by auditing a REAL bundle against the live database; the synthetic
 # fixture had no such line.

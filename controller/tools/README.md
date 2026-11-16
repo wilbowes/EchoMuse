@@ -7,7 +7,7 @@ it as `Authorization: Bearer`, and delete it afterwards):
 
 ```bash
 docker cp controller/tools/devshell.py echomuse-controller:/tmp/
-docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<another>" ...]
+docker exec -e EM_DEVICE=<device id> echomuse-controller python /tmp/devshell.py "<shell command>" ["<another>" ...]
 ```
 
 - **devshell.py** — run commands on a device over the `/shell` proxy (PTY
@@ -28,7 +28,7 @@ docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<ano
   `server` symlink and `busybox killall server`.
 - **pull_so.py** — pull a file off the device (busybox base64 over the
   shell, echo disabled, split end-markers). Writes the decoded file to
-  stdout: `python /tmp/pull_so.py /system/lib64/libled_hal.so > out.so`.
+  stdout: `EM_DEVICE=<device id> python /tmp/pull_so.py /system/lib64/libled_hal.so > out.so`.
 - **push_file.py** — the other direction, for arbitrary paths (`ota.py`
   only writes the firmware slot): `python /tmp/push_file.py <device_id>
   /tmp/oww_probe /data/local/tmp/oww_probe --chmod 755`. Reconnects every

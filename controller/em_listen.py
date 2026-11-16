@@ -148,6 +148,23 @@ def resolve(configured: str, capabilities, reported: str | None,
     return ListenView(STATE_UNKNOWN, None, "waiting for the Echo to report")
 
 
+def awaiting_report(view: ListenView) -> bool:
+    """Whether the controller must start NOTHING for this Echo yet.
+
+    An Echo set to listen privately, on firmware that can, is `unknown` until
+    it reports `local` or `degraded` after the config push. Until then it is
+    still in its boot state, which streams (the firmware's default before any
+    config). The controller's streaming path would send `mic_start` into that
+    window: on 41C8 (2026-11-15) the Echo reported `stream` for 0.9s after a
+    reboot, and only a 2.9s model load kept the `mic_start` from landing in it.
+    "Nothing ever falls back to streaming" (docs/listening.md) must not depend
+    on a model being slow to load, so an unknown Echo is waited on: no stream,
+    no scorer, no `mic_start`. An Echo that never reports stays unanswered,
+    which is the button-only outcome, never a stream.
+    """
+    return view.state == STATE_UNKNOWN
+
+
 def detector(view: ListenView, trigger_capable: bool) -> str | None:
     """Where an Echo's wake word is detected, for arbitration; None if it
     cannot wake at all. Not knowing yet is its own answer, so a fleet with
