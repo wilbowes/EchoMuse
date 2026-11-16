@@ -1555,10 +1555,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         version = current + i + 1
         log.info(f"Applying migration v{version}")
         try:
-            conn.executescript(sql)
-            # Some migrations need data work that SQL cannot express (e.g.
-            # pruning JSON config against the section map). Runs inside the
-            # same transaction as its DDL so a failure rolls both back.
+            # One transaction for the SQL and its fixup (data work SQL cannot
+            # express). executescript() autocommits unless the script BEGINs:
+            # a failure kept half a migration, re-run into "duplicate column".
+            conn.executescript("BEGIN;\n" + sql)
             fixup = _MIGRATION_FIXUPS.get(version)
             if fixup is not None:
                 fixup(conn)
