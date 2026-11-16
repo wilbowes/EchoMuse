@@ -500,11 +500,31 @@ def test_a_full_data_partition_refuses_and_an_unreadable_df_does_not():
     assert up.space_problem("", six_mb) == ""
 
 
+def test_the_space_check_wants_three_images_and_a_margin():
+    """The image, its .part and a rewritten boot-good.img, plus 8 MB: 26 MB
+    for a 6 MB image. One short refuses; exactly enough passes."""
+    six_mb = 6 << 20
+    df = "/dev/block/mmcblk0p16  11000  900  {}  8% /data"
+    assert "needs ~26MB" in up.space_problem(df.format(25), six_mb)
+    assert up.space_problem(df.format(26), six_mb) == ""
+
+
 def test_a_stale_or_missing_known_good_is_noticed():
     img = installed()
     assert not up.good_matches(up.parse_preflight(
         preflight_reply(img, good=installed("emos-v0.8"))))
     assert not up.good_matches(up.parse_preflight(preflight_reply(img, good=b"")))
+
+
+def test_known_good_must_match_every_byte_of_the_header_id():
+    """The id is bytes 576-595; a copy differing only at either end is not
+    the running image."""
+    img = installed()
+    for at in (576, 595):
+        good = bytearray(img)
+        good[at] ^= 0xFF
+        assert not up.good_matches(up.parse_preflight(
+            preflight_reply(img, good=bytes(good)))), f"byte {at} ignored"
 
 
 def test_chunks_cover_the_image_exactly_once():

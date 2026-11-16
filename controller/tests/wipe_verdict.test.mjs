@@ -69,6 +69,10 @@ check("an unmounted /data is not a pass, even with nothing left",
   !_wipeVerdict(probe({ data: "0" })).ok);
 check("an unreadable mount count is not a pass", !_wipeVerdict(probe({ data: "" })).ok);
 
+const one = _wipeVerdict(probe({ left: " misc" }));
+check("one directory left in /data fails too", !one.ok);
+check("and is named", one.why.includes("/data/misc"), one.why);
+
 const left = _wipeVerdict(probe({ left: " system local" }));
 check("anything left in /data fails", !left.ok);
 check("the failure names what was left",
