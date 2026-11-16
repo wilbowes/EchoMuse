@@ -30,6 +30,7 @@ import contextlib
 import io
 import json
 import os
+import random
 import re
 import socket
 import sqlite3
@@ -51,16 +52,67 @@ FRAME_S = 0.08                      # one 80 ms mic frame, as the Echo sends
 FRAME_BYTES = int(MIC_RATE * FRAME_S) * 2
 
 
-def free_port(below: int = 65536) -> int:
-    """A port nothing holds now. `below`: the satellite base must be under
-    60000 (em_db._esphome_port_base), and the kernel may hand out more."""
+# Every port handed out in this process, and what for. bind(0) only promises
+# the port is free NOW, and nothing binds it until later: the satellite base
+# not until an Echo registers, so a later pick (the TTS server) could land on
+# it and HA dialled an HTTP server ("Invalid preamble 48": 0x48 is 'H',
+# 2026-11-16).
+_handed_out: dict[int, str] = {}
+
+# The satellite range a scenario can reach: one listener per Echo from the
+# base, BLE proxies BLE_PORT_OFFSET (1000) above (em_db).
+SATELLITE_SPAN = tuple(range(9)) + tuple(range(1000, 1009))
+
+
+def _bindable(port: int) -> bool:
+    with socket.socket() as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def free_port(what: str = "test") -> int:
+    """A port nothing holds now and nothing in this run has been given.
+    bind(0) can return the same port twice running: the controller was once
+    given one for both its API and /control (2026-11-16)."""
     for _ in range(200):
         with socket.socket() as s:
             s.bind(("127.0.0.1", 0))
             port = s.getsockname()[1]
-        if port < below:
+        if port not in _handed_out:
+            _handed_out[port] = what
             return port
-    raise RuntimeError(f"no free port below {below}")
+    raise RuntimeError("no free port")
+
+
+def satellite_base() -> int:
+    """A base for the controller's satellite listeners, with the whole
+    SATELLITE_SPAN free, below the kernel's ephemeral range. Inside it, an
+    outgoing connection made after the pick (the fake Echo's, the
+    controller's own) can take base+1 before the second Echo's listener
+    binds it; below it, the kernel never hands a port out unasked."""
+    try:
+        with open("/proc/sys/net/ipv4/ip_local_port_range") as f:
+            low = int(f.read().split()[0])
+    except (OSError, ValueError, IndexError):
+        low = 32768
+    top = min(low, 59000) - max(SATELLITE_SPAN) - 1
+    for _ in range(200):
+        base = random.randrange(10000, top)
+        ports = [base + o for o in SATELLITE_SPAN]
+        if any(p in _handed_out for p in ports) or not all(map(_bindable, ports)):
+            continue
+        for p in ports:
+            _handed_out[p] = "satellites"
+        return base
+    raise RuntimeError("no free satellite range")
+
+
+def port_owner(port: int) -> str:
+    """What this run handed `port` out for, for a failure message."""
+    return _handed_out.get(port, "nothing in this run")
 
 
 def tone(seconds: float, rate: int, hz: float = 440.0, level: float = 0.3) -> bytes:
@@ -97,9 +149,9 @@ class Controller:
     def __init__(self, workdir: Path, **env):
         self.workdir = workdir
         self.db_path = workdir / "echomuse.db"
-        self.port = free_port()
-        self.api_port = free_port()
-        self.esphome_base = free_port(below=59000)
+        self.port = free_port(what="controller /control")
+        self.api_port = free_port(what="controller API")
+        self.esphome_base = satellite_base()
         self.log_path = workdir / "controller.log"
         self.env = {
             **os.environ,
@@ -107,7 +159,7 @@ class Controller:
             "SERVER_IP": "127.0.0.1",
             "SERVER_HOST": "127.0.0.1",
             "SERVER_PORT": str(self.port),
-            "SERVER_TLS_PORT": str(free_port()),
+            "SERVER_TLS_PORT": str(free_port(what="controller TLS")),
             "API_PORT": str(self.api_port),
             "EM_ESPHOME_PORT_BASE": str(self.esphome_base),
             "EM_SKIP_DB_BACKUP": "1",
@@ -353,6 +405,13 @@ class FakeEcho:
     def sent(self, kind: str) -> list[dict]:
         return [m for m in self.control if m.get("type") == kind]
 
+    def rings_off(self) -> int:
+        """How many times the controller has turned the ring off: the end of
+        a turn as a person sees it, and the earliest a second wake is taken
+        (one sooner is declined as busy, correctly)."""
+        return sum(1 for m in self.sent("led_anim")
+                   if (m.get("anim") or {}).get("pattern") == "off")
+
     def closed(self, sid: int) -> bool:
         return any(m.get("session") == sid for m in self.sent("listen_close"))
 
@@ -411,7 +470,7 @@ class TtsServer:
         app.router.add_get("/tts/{name}", self._get)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        self.port = free_port()
+        self.port = free_port(what="TTS server")
         await web.TCPSite(self._runner, "127.0.0.1", self.port).start()
 
     async def stop(self) -> None:

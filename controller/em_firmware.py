@@ -33,6 +33,8 @@ import os
 import re
 from pathlib import Path
 
+from version import firmware_key
+
 log = logging.getLogger("echomuse.firmware")
 
 FIRMWARE_SUBDIR = "firmware"
@@ -183,6 +185,13 @@ def write_sig(version: str, sig: bytes, db_path: str | None = None) -> None:
         log.warning(f"[firmware] could not cache the signature for {version}: {e}")
 
 
+def _recency(p: Path) -> tuple:
+    """Newest first by mtime; two writes inside one timestamp tick tie, so
+    the newer release wins, then the name — never directory order."""
+    key = firmware_key(p.name[len("server-"):])
+    return (p.stat().st_mtime_ns, key is not None, key or (), p.name)
+
+
 def prune(db_path: str | None = None, keep: int = KEEP_RELEASES) -> list[str]:
     """
     Drop all but the `keep` most recently used binaries. Returns what went.
@@ -199,7 +208,7 @@ def prune(db_path: str | None = None, keep: int = KEEP_RELEASES) -> list[str]:
     except OSError:
         return []
 
-    entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    entries.sort(key=_recency, reverse=True)
     removed: list[str] = []
     for p in entries[keep:]:
         try:

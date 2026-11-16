@@ -46,7 +46,9 @@ async def _connect(ha: FakeHA) -> None:
         except Exception as e:
             last = e
             await asyncio.sleep(0.2)
-    raise AssertionError(f"Home Assistant could not connect: {last}")
+    raise AssertionError(
+        f"Home Assistant could not connect to 127.0.0.1:{ha.port} "
+        f"(handed out for: {harness.port_owner(ha.port)}): {last}")
 
 
 def _reply(tts, name="reply.wav", seconds=1.5):
@@ -107,8 +109,13 @@ def test_two_questions_in_a_row_are_both_answered(scenario):
             second, url2 = _reply(tts, "two.wav", 0.7)
 
             ha.pipeline = lambda h: h.answer("turn on the lights", "Done.", url1)
+            offs = echo.rings_off()
             await echo.wake(SPEECH)
             await wait_for(lambda: echo.voice_eos >= 1, 20, "the first reply")
+            # The reply ends before the turn does (the turn row is written
+            # after): a wake 70 ms later was declined as busy on CI.
+            await wait_for(lambda: echo.rings_off() > offs, 5,
+                           "the ring to go off after the first turn")
             ha.audio.clear()
 
             ha.pipeline = lambda h: h.answer("and the fan", "Done again.", url2)

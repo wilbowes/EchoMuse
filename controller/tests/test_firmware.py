@@ -155,6 +155,17 @@ def test_pruning_keeps_the_most_recent(cache):
     assert left == ["server-v3.0.0", "server-v4.0.0"]
 
 
+def test_an_mtime_tie_keeps_the_newer_release(cache):
+    """Writes inside one timestamp tick share an mtime; directory order must
+    not decide which survives (flaked in CI, #1178)."""
+    for v in ("v1.0.10", "v1.0.2", "v1.0.9"):
+        em_firmware.write(v, b"x" * 64)
+        os.utime(cache / f"server-{v}", (1000, 1000))
+    em_firmware.prune(keep=1)
+    left = [p.name for p in cache.glob("server-v*") if p.suffix != ".md5"]
+    assert left == ["server-v1.0.10"]
+
+
 def test_a_read_counts_as_use(cache):
     """
     mtime is the recency signal, and the read path touches it — so the release
@@ -234,8 +245,10 @@ def test_a_signature_is_kept_beside_its_binary_and_pruned_with_it(cache):
     assert em_firmware.read_sig("v1.0.0") == b"sig-one\n"
     em_firmware.write_sig("v1.0.0", b"sig-two\n")
     assert em_firmware.read_sig("v1.0.0") == b"sig-two\n"
-    for v in ("v1.0.1", "v1.0.2"):
+    for i, v in enumerate(("v1.0.1", "v1.0.2"), start=1):
         em_firmware.write(v, v.encode())
+        os.utime(cache / f"server-{v}", (1000 + i, 1000 + i))
+    os.utime(cache / "server-v1.0.0", (1000, 1000))
     em_firmware.prune(keep=1)
     assert em_firmware.read_sig("v1.0.0") is None
 
