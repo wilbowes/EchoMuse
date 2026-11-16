@@ -209,3 +209,62 @@ def test_oidc_columns_from_a_pre_renumbering_build_migrate_cleanly(tmp_path):
     assert c.execute(
         "SELECT oidc_subject FROM users WHERE username = 'sso-person'"
     ).fetchone()[0] == "sub-1"
+
+
+def _cols(c, table):
+    return {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+
+
+def test_a_migration_that_fails_part_way_leaves_nothing_behind(tmp_path, monkeypatch):
+    """
+    executescript() runs each statement in autocommit unless the script opens
+    a transaction, so a statement that failed after an ALTER kept the ALTER
+    and not the version bump: every later start re-ran it into "duplicate
+    column" and the controller could not start again (P25, 2026-11-16).
+    """
+    p = _legacy_db(tmp_path, upto=len(em_db.MIGRATIONS))
+    head = len(em_db.MIGRATIONS)
+    bump = f"UPDATE system_config SET value = '{head + 1}' WHERE key = 'schema_version';"
+    broken = "ALTER TABLE devices ADD COLUMN p25 TEXT;\nINSERT INTO no_such_table VALUES (1);\n" + bump
+    monkeypatch.setattr(em_db, "MIGRATIONS", em_db.MIGRATIONS + [broken])
+
+    with pytest.raises(RuntimeError, match=f"v{head + 1} failed"):
+        em_db.init(p)
+    c = sqlite3.connect(p)
+    assert int(c.execute(VER).fetchone()[0]) == head
+    assert "p25" not in _cols(c, "devices"), "half a migration was committed"
+    assert c.execute("SELECT label FROM devices").fetchone()[0] == "Kitchen"
+    c.close()
+
+    # The fixed release then migrates the same database.
+    fixed = "ALTER TABLE devices ADD COLUMN p25 TEXT;\n" + bump
+    monkeypatch.setattr(em_db, "MIGRATIONS", em_db.MIGRATIONS[:-1] + [fixed])
+    em_db.init(p)
+    c = sqlite3.connect(p)
+    assert int(c.execute(VER).fetchone()[0]) == head + 1
+    assert "p25" in _cols(c, "devices")
+
+
+def test_a_failed_fixup_undoes_its_migration(tmp_path, monkeypatch):
+    """
+    The fixup shares its migration's transaction. Committed SQL with a lost
+    fixup leaves the version advanced, and the next start runs without the
+    data work, saying nothing.
+    """
+    p = _legacy_db(tmp_path, upto=len(em_db.MIGRATIONS))
+    head = len(em_db.MIGRATIONS)
+    sql = (f"ALTER TABLE devices ADD COLUMN p25 TEXT;\n"
+           f"UPDATE system_config SET value = '{head + 1}' WHERE key = 'schema_version';")
+
+    def fixup(conn):
+        conn.execute("UPDATE devices SET label = 'rewritten'")
+        raise ValueError("fixup failed")
+
+    monkeypatch.setattr(em_db, "MIGRATIONS", em_db.MIGRATIONS + [sql])
+    monkeypatch.setitem(em_db._MIGRATION_FIXUPS, head + 1, fixup)
+    with pytest.raises(RuntimeError, match=f"v{head + 1} failed"):
+        em_db.init(p)
+    c = sqlite3.connect(p)
+    assert int(c.execute(VER).fetchone()[0]) == head
+    assert "p25" not in _cols(c, "devices")
+    assert c.execute("SELECT label FROM devices").fetchone()[0] == "Kitchen"
