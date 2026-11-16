@@ -1127,6 +1127,7 @@ function turnSegments(t) {
 function WakeSampleReview({ deviceId, isAdmin }) {
   const [samples, setSamples] = useState([]);
   const [playing, setPlaying] = useState(null);
+  const [zipError, setZipError] = useState('');
   const audioRef = useRef(null);
   const urlsRef = useRef({});
   const mono = "var(--font-mono)";
@@ -1188,10 +1189,29 @@ function WakeSampleReview({ deviceId, isAdmin }) {
     const a = document.createElement('a'); a.href = url;
     a.download = `wake-sample-${sample.id}.wav`; a.click();
   };
+  // One archive of every retained sample, grouped one folder per label —
+  // API.blob for the Bearer header, and a late revoke because the zip is too
+  // big to cache in urlsRef for a button pressed once in a while.
+  const downloadZip = async () => {
+    setZipError('');
+    try {
+      const url = URL.createObjectURL(await API.blob(
+        `/api/devices/${deviceId}/wake-samples/zip`));
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `wake-samples-${deviceId}.zip`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) { setZipError(e.error || e.message || 'Could not download the samples'); }
+  };
 
   if (!isAdmin || !samples.length) return null;
   return <div style={{ marginTop: 'var(--space-8)', borderTop: '1px solid var(--track)', paddingTop: 'var(--space-6)' }}>
-    <div className="em-label" style={{ marginBottom: 'var(--space-4)' }}>Wake-word samples · newest 50</div>
+    <div className="em-label" style={{ marginBottom: 'var(--space-4)', display: 'flex', alignItems: 'center' }}>
+      <span style={{ flex: 1 }}>Wake-word samples</span>
+      {zipError && <span role="alert" style={{ color: 'var(--error)', marginRight: 'var(--space-4)' }}>{zipError}</span>}
+      <button onClick={downloadZip} title="Download every retained sample as one ZIP, grouped by label" style={{ background: 'none', border: 0, color: 'var(--text2)', cursor: 'pointer' }}>⤓ all (.zip)</button>
+    </div>
     <div style={{ maxHeight: 220, overflowY: 'auto' }}>
       {samples.map(sample => <div key={sample.id} style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', padding: 'var(--space-2) var(--space-1)', borderBottom: '1px solid var(--hairline)', fontFamily: mono, fontSize: 'var(--fs-sm)' }}>
         <span style={{ color: 'var(--muted)', minWidth: '16ch', flexShrink: 0, whiteSpace: 'nowrap' }}>{new Date(sample.ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
