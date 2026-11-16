@@ -13,6 +13,8 @@ without hardware:
     docs/device-controller-interface.md: register, listen_state, oww_wake,
     session audio on /data, playback_stats when a reply has drained.
   - TTS audio is a WAV served over HTTP, as HA's tts_proxy serves it.
+  - Given an `fs_root`, the Echo also answers the shell plane with a real sh
+    on that scratch /data, so a firmware update runs end to end (test_ota.py).
 
 A scenario asserts on what a person would notice: what the Echo was told to
 show and play, and what was recorded about the turn.
@@ -28,6 +30,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import socket
 import sqlite3
 import struct
@@ -156,6 +159,19 @@ class Controller:
         finally:
             con.close()
 
+    def admin_token(self) -> str:
+        """A session for an admin, written straight into the database: the
+        API checks the token against `sessions`, and a scenario has no
+        browser to sign in with."""
+        token = "scenario-admin-" + os.urandom(8).hex()
+        now = int(time.time())
+        self.execute("INSERT OR IGNORE INTO users (username, password_hash, role, created_at) "
+                     "VALUES ('scenario-admin', '!', 'admin', ?)", now)
+        uid = self.query("SELECT id FROM users WHERE username = 'scenario-admin'")[0][0]
+        self.execute("INSERT INTO sessions (token, user_id, created_at, expires_at) "
+                     "VALUES (?, ?, ?, ?)", token, uid, now, now + 3600)
+        return token
+
     def esphome_port(self, device_id: str) -> int | None:
         rows = self.query("SELECT esphome_api_port FROM devices WHERE device_id = ?", device_id)
         return rows[0][0] if rows else None
@@ -188,13 +204,18 @@ class FakeEcho:
     features: list[str] = field(default_factory=list)
     _session: int = 0
     max_open_hit: bool = False
+    version: str = "v9.9.9-scenario"
+    # The Echo's /data, for scenarios that drive the shell plane (an OTA).
+    # None: shell_open is ignored, as before.
+    fs_root: Path | None = None
+    restarts: int = 0
 
     async def connect(self) -> None:
         url = f"ws://127.0.0.1:{self.controller.port}"
         self._ctl = await websockets.connect(f"{url}/control", max_size=None)
         await self._ctl.send(json.dumps({
             "type": "register", "device_id": self.device_id, "ip": "127.0.0.1",
-            "version": "v9.9.9-scenario", "capabilities": self.capabilities,
+            "version": self.version, "capabilities": self.capabilities,
             "board": "biscuit", "base_os": "emos"}))
         ack = json.loads(await asyncio.wait_for(self._ctl.recv(), 10))
         assert ack.get("type") == "ack", f"not admitted: {ack}"
@@ -222,11 +243,88 @@ class FakeEcho:
         async for raw in self._ctl:
             msg = json.loads(raw)
             self.control.append(msg)
+            if msg.get("type") == "shell_open" and self.fs_root is not None:
+                self._tasks.append(asyncio.create_task(self._shell_session()))
             if msg.get("type") == "ping":
                 reply = {"type": "pong"}
                 if "id" in msg:
                     reply.update(id=msg["id"], mono=int(time.monotonic() * 1000))
                 await self.send(reply)
+
+    # ── The shell plane ──────────────────────────────────────────────────
+    #
+    # As device/internal/client/control.go runShellSession in pipe mode: on
+    # shell_open the Echo dials /shell/{id} and pipes a fresh sh's stdin and
+    # merged stdout/stderr through it, binary frames out. Here the sh is real
+    # (`sh -c 'sh; true'`, so the inner sh's $PPID is a process standing in
+    # for the firmware: `kill $PPID` is the OTA's restart, and its death is
+    # this Echo restarting). Paths under /data are mapped onto fs_root both
+    # ways, and `busybox <tool>` runs the host's tool.
+
+    def _to_host(self, text: str) -> str:
+        return re.sub(r"(?<![\w/.])/data(?=[/\s;|&)\"']|$)", f"{self.fs_root}/data", text)
+
+    def _shims(self) -> Path:
+        d = self.fs_root / ".shims"
+        if not d.exists():
+            d.mkdir(parents=True)
+            bb = d / "busybox"
+            bb.write_text('#!/bin/sh\nexec "$@"\n')
+            bb.chmod(0o755)
+        return d
+
+    async def _shell_session(self) -> None:
+        ws = await websockets.connect(
+            f"ws://127.0.0.1:{self.controller.port}/shell/{self.device_id}", max_size=None)
+        env = {**os.environ, "PATH": f"{self._shims()}:{os.environ.get('PATH', '')}"}
+        proc = await asyncio.create_subprocess_exec(
+            "sh", "-c", "sh; true", stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            cwd=self.fs_root, env=env)
+        root = str(self.fs_root)
+
+        async def pump_out():
+            while True:
+                chunk = await proc.stdout.read(4096)
+                if not chunk:
+                    break
+                with contextlib.suppress(Exception):
+                    await ws.send(chunk.replace(root.encode(), b""))
+
+        async def pump_in():
+            with contextlib.suppress(Exception):
+                async for raw in ws:
+                    text = raw.decode() if isinstance(raw, bytes) else raw
+                    proc.stdin.write(self._to_host(text).encode())
+                    await proc.stdin.drain()
+            with contextlib.suppress(Exception):
+                proc.stdin.close()
+
+        out, inp = asyncio.create_task(pump_out()), asyncio.create_task(pump_in())
+        rc = await proc.wait()
+        await out
+        inp.cancel()
+        with contextlib.suppress(Exception):
+            await ws.close()
+        if rc < 0:  # the stand-in firmware was killed: restart
+            self._tasks.append(asyncio.create_task(self._restart()))
+
+    def running_binary(self) -> bytes:
+        return (self.fs_root / "data/local/bin/server").read_bytes()
+
+    async def _restart(self) -> None:
+        """The firmware restarted: drop every connection and register again
+        as whatever binary the server symlink now points at, as
+        start_server.sh does."""
+        self.restarts += 1
+        for ws in (getattr(self, "_data", None), getattr(self, "_ctl", None)):
+            with contextlib.suppress(Exception):
+                await ws.close()
+        await asyncio.sleep(0.5)
+        m = re.search(rb"v\d+\.\d+\.\d+-\d+-g[0-9a-f]{7,40}", self.running_binary())
+        if m:
+            self.version = m.group(0).decode()
+        await self.connect()
 
     async def redial_data(self):
         """Open a second /data connection, as an Echo that lost power mid-
