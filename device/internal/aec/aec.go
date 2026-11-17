@@ -50,7 +50,9 @@ static void em_aec_bypass(SpeexEchoState *st, const spx_int16_t *in, spx_int16_t
    for (i = 0; i < n; i++)
       out[i] = WORD2INT(st->input[i]);
    st->memD[0] = st->memE[0] = st->input[n - 1];
-   st->memX[0] = 0;
+   // One pre-emphasis memory per far-end channel (K > 1 with #1219's x²).
+   for (i = 0; i < st->K; i++)
+      st->memX[i] = 0;
 }
 */
 import "C"
