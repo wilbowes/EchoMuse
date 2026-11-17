@@ -149,6 +149,13 @@ def server_ssl_context(tls_dir: str) -> ssl.SSLContext:
     """SSLContext for the device-facing wss listener (server-auth only)."""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    # The client's cipher order wins. Python's default prefers the server's,
+    # which puts AES-256-GCM first; Go has no AES assembly on 32-bit ARM, so
+    # every Echo decrypted in generic Go at 5.7MB/s against ChaCha20's 19.4
+    # (C95, 2026-11-17): 3.4% of a core for a reply stream, not 1.0. Go's
+    # client lists ChaCha20 first exactly where AES is slow, so its order is
+    # the right one. Every suite on offer is still an AEAD one.
+    ctx.options &= ~ssl.OP_CIPHER_SERVER_PREFERENCE
     ctx.load_cert_chain(
         os.path.join(tls_dir, "server.pem"),
         os.path.join(tls_dir, "server.key"),
