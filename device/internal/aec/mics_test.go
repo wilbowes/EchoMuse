@@ -2,6 +2,7 @@ package aec
 
 import (
 	"bytes"
+	"encoding/binary"
 	"math"
 	"path/filepath"
 	"testing"
@@ -299,5 +300,80 @@ func TestPffftMatchesKissInSpeexsPacking(t *testing.T) {
 		if got := fftParity(n); got > 1e-5 {
 			t.Errorf("n=%d: pffft differs from kiss by %.2e of full scale", n, got)
 		}
+	}
+}
+
+// Past quietHold silent reference frames the canceller stops running speex
+// on the microphone in use too (em_aec_bypass). What it outputs must be what
+// speex would have: speex with a silent far end is its DC notch, and a
+// difference would put a step into the wake stream at every reply. Then the
+// next reply must be cancelled as well as if speex had run throughout.
+func TestIdleBypassIsWhatSpeexWouldHaveOutput(t *testing.T) {
+	const play, quiet, again = 150, 40, 30
+	signal := synth((play + quiet + again) * FrameSize)
+	echoes := sevenEchoes(signal)
+	room := synth((play + quiet + again) * FrameSize) // someone talking in the quiet
+	for i := range room {
+		room[i] = room[i]/8 + 300 // and a DC offset, which the notch must remove the same way
+	}
+	silent := make([]int16, len(signal))
+	copy(silent, signal[:play*FrameSize])
+
+	run := func(c *Canceller, single bool) [][]byte {
+		var out [][]byte
+		for f := 0; f < play+quiet+again; f++ {
+			lo, hi := f*FrameSize, (f+1)*FrameSize
+			ref := silent[lo:hi]
+			if f >= play+quiet {
+				ref = signal[lo:hi]
+			}
+			mics := make([][]byte, NumMics)
+			for ch := range mics {
+				m := make([]int16, FrameSize)
+				for i := range m {
+					m[i] = room[lo+i]
+					if f < play || f >= play+quiet {
+						m[i] += echoes[ch][lo+i]
+					}
+				}
+				mics[ch] = toBytes(m)
+			}
+			if single {
+				out = append(out, c.ProcessWithRef(mics[6], toBytes(ref)))
+			} else {
+				out = append(out, c.ProcessMicsWithRef(mics, 6, toBytes(ref)))
+			}
+		}
+		return out
+	}
+	for _, single := range []bool{false, true} {
+		by, sp := hwCanceller(hwTailMs), hwCanceller(hwTailMs)
+		sp.noIdleBypass = true
+		got, want := run(by, single), run(sp, single)
+		if by.bypassFrames == 0 {
+			t.Fatalf("single=%v: the bypass never ran", single)
+		}
+		worst := 0
+		for f := play; f < play+quiet; f++ {
+			for i := 0; i < FrameSize; i++ {
+				a := int(int16(binary.LittleEndian.Uint16(got[f][i*2:])))
+				b := int(int16(binary.LittleEndian.Uint16(want[f][i*2:])))
+				if d := a - b; d > worst || -d > worst {
+					worst = max(d, -d)
+				}
+			}
+		}
+		if worst > 1 {
+			t.Errorf("single=%v: bypass differs from speex by up to %d LSB in the quiet", single, worst)
+		}
+		var eb, es float64
+		for f := play + quiet + 5; f < play+quiet+again; f++ {
+			eb += rms(got[f])
+			es += rms(want[f])
+		}
+		if db := 20 * math.Log10(eb/es); db > 0.5 {
+			t.Errorf("single=%v: the reply after the quiet keeps %.2fdB more echo than speex throughout", single, db)
+		}
+		t.Logf("single=%v: %d frames bypassed, worst %d LSB, residual after %+.2fdB", single, by.bypassFrames, worst, 20*math.Log10(eb/es))
 	}
 }
