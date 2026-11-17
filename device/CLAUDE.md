@@ -63,6 +63,10 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
   do the selector stays.
 - **AEC** (`internal/aec/`, vendored SpeexDSP-1.2.1), whole mic path incl. the
   wake stream; **on by default** (`aecEnabled`, since #144, 2026-08-13: barge-in needs it).
+  - **Its FFT is pffft** (`src/pffft/`, byte-identical by `vendor.sh`,
+    sha256-pinned; NEON via `#cgo arm CFLAGS: -mfpu=neon`) behind speex's
+    interface in our `src/fftwrap_pffft.c`; speex's own files are unchanged.
+    `TestPffftMatchesKissInSpeexsPacking` holds it to kiss in speex's packing.
   - **Hardware reference (#385)**: ch8 is an in-frame loopback of our playback
     (+33 samples, inverted, pre-DAC); no ring, `aecDelayMs` or governor.
     Promoted only when BIT-EXACT ZERO while silent AND carrying audio while
@@ -521,4 +525,6 @@ in `controller/CLAUDE.md`.
 
 ## cgo dependency
 
-SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. `internal/bindings/mixer` links the device's own `libtinyalsa.so` (see the mixer section for the symbol rule). The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.
+SpeexDSP C source (AEC) is vendored in `device/internal/aec/`. **Go's build
+cache does not see C files `#include`d from a cgo preamble**: after editing
+one, test with `go test -a -count=1`, or a stale build passes. `internal/bindings/mixer` links the device's own `libtinyalsa.so` (see the mixer section for the symbol rule). The compiler Docker image provides the ARM cross-toolchain. If adding new cgo dependencies, they must compile cleanly with the `echomuse-compiler` image against the FireOS 5 sysroot.

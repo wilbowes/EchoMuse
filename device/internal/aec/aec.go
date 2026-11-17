@@ -22,14 +22,20 @@ package aec
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/include -I${SRCDIR}/src -DFLOATING_POINT -DUSE_KISS_FFT -DEXPORT= -O2
+#cgo arm CFLAGS: -mfpu=neon
 #cgo LDFLAGS: -lm
 
 #include <stdlib.h>
+#include <math.h>
 #include "speex/speex_echo.h"
-#include "src/fftwrap.c"
+#include "src/os_support.h"
+#include "src/pffft/pffft.c"
+#include "src/fftwrap_pffft.c"
 #include "src/kiss_fft.c"
 #include "src/kiss_fftr.c"
 #include "src/mdf.c"
+
+float em_fft_parity(int n);
 */
 import "C"
 
@@ -843,3 +849,8 @@ func (c *Canceller) loadIntoLocked(st *C.SpeexEchoState, b []byte) error {
 	}
 	return nil
 }
+
+// fftParity is the largest difference between the FFT speex runs on
+// (src/fftwrap_pffft.c) and the kiss_fft it replaced, relative to full
+// scale, over one forward and one inverse transform of n samples.
+func fftParity(n int) float64 { return float64(C.em_fft_parity(C.int(n))) }

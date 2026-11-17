@@ -288,3 +288,16 @@ func TestUnusedMicrophonesRestWhileNothingPlays(t *testing.T) {
 		t.Fatalf("a rested microphone cancelled %.1fdB in its first frames, want 12dB over the room noise", att)
 	}
 }
+
+// The echo canceller's FFT is pffft behind speex's interface
+// (src/fftwrap_pffft.c). It must give what fftwrap.c's kiss_fft gave, in
+// speex's packing and scaling, at every size speex asks for: twice the
+// frame. A wrong packing still "cancels" a little, which is why this is
+// checked against the transform it replaced rather than by ERLE alone.
+func TestPffftMatchesKissInSpeexsPacking(t *testing.T) {
+	for _, n := range []int{2 * FrameSize, 1024, 2560} {
+		if got := fftParity(n); got > 1e-5 {
+			t.Errorf("n=%d: pffft differs from kiss by %.2e of full scale", n, got)
+		}
+	}
+}
