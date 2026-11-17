@@ -192,8 +192,11 @@ func writeState(path string, b []byte, attDb float64) {
 // path saved before 2026-10-18 was learnt against the aliased ch8
 // (dealias.go) and with the mics 6dB hotter (no headroom before the
 // canceller), so loaded it starts worse than cold, and it is rewritten at
-// most once a day.
-const DefaultStatePath = "/data/local/etc/echomuse/aec_echo_path.v2.bin"
+// most once a day. v3 (2026-11-17) is the 1280-sample frame and 80ms tail,
+// which a v2 header refuses anyway; the new name leaves the v2 file where it
+// is, valid for the firmware in the other A/B slot, so a rollback keeps its
+// learnt path instead of starting cold. It is never loaded from here.
+const DefaultStatePath = "/data/local/etc/echomuse/aec_echo_path.v3.bin"
 
 // legacyStatePaths are earlier saved paths, never loaded and removed at start.
 var legacyStatePaths = []string{

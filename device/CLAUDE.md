@@ -70,8 +70,10 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
     a real mic. One-way. `EM_AEC_HW_REF=off|on` overrides (env var: a board
     property).
   - **One filter per microphone (#814)**: `aec.ProcessMicsWithRef` runs all
-    seven every period, idle ones resting after 256ms of silent reference
-    (`quietHold`); one saved file, `aec_echo_path.v2.bin`, all or nothing.
+    seven every period, idle ones resting after 320ms of silent reference
+    (`quietHold`); one saved file, `aec_echo_path.v3.bin`, all or nothing.
+    **Frame 1280 (80ms) / tail 80ms**: one block per filter, speex's cheapest
+    shape. v2 stays on /data for the other A/B slot; never delete it.
     Hardware reference only. `ProcessWithRef` is for `tools/aec_replay` and
     tests only.
   - **De-aliased (#975) — never "simplify" back to raw ch8**, which aliases
