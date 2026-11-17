@@ -229,43 +229,8 @@ func main() {
 			s.StopAnim()
 			s.SetLEDs(leds, listening)
 		},
-		func(lockMic bool) {
-			if s.IsMuted() {
-				// Mute is device-sovereign — the physical button cannot be
-				// overridden remotely. Refuse the controller's mic_start.
-				log.Println("[cmd] mic_start from controller rejected — device is muted")
-				return
-			}
-			// Under private listening the wake stream belongs to the device
-			// (see the mic_stop callback), so a button turn's lock_mic must
-			// REPLACE it rather than being refused as "already active".
-			if lockMic && dataClient.ListenState() != client.ListenStream &&
-				!dataClient.TurnStreamActive() {
-				dataClient.StopMic()
-			}
-			dataClient.StartMic(lockMic)
-		},
-		func() {
-			// Under private listening the wake stream sends nothing, and it
-			// is what hears a barge-in over the reply, so the controller's
-			// mic_stop ends a button or follow-up turn but never the local
-			// listening. A turn's end hands straight back to it.
-			//
-			// Nor does it touch a SESSION: those end only by id
-			// (listen_close). mic_stop carries none, so one crossing a
-			// barge-in's oww_wake on the wire would close the new session
-			// the controller is about to take.
-			if dataClient.ListenState() != client.ListenStream {
-				if dataClient.TurnStreamActive() {
-					dataClient.StopMic()
-					if !s.IsMuted() {
-						dataClient.StartMic(false)
-					}
-				}
-				return
-			}
-			dataClient.StopMic()
-		},
+		func(lockMic bool) { dataClient.ControllerMicStart(s.IsMuted(), lockMic) },
+		func() { dataClient.ControllerMicStop(s.IsMuted()) },
 	)
 
 	// Private-listening sessions (docs/listening.md). The gate ignores any id
@@ -418,8 +383,8 @@ func main() {
 		// hold bound to something unrelated to speech then stopped working
 		// whenever the mic was muted.
 		//
-		// This does not weaken mute. The mic_start rejection above is what
-		// makes mute sovereign — the controller cannot open the mic while
+		// This does not weaken mute. The mic_start rejection
+		// (client.ControllerMicStart) makes mute sovereign — the controller cannot open the mic while
 		// muted however it reads this event, and the ADC is muted in hardware
 		// regardless.
 		event.Muted = s.IsMuted()
@@ -751,7 +716,7 @@ func main() {
 	// and stop/restart the mic stream device-side so mute is authoritative
 	// regardless of controller state (C5 fix, 2026-07-05 review). Previously
 	// only the *controller-initiated* mic_start was refused while muted (see
-	// the mic_start callback above) — an already-running stream (e.g. the
+	// client.ControllerMicStart) — an already-running stream (e.g. the
 	// permanent OWW listening stream) kept running if mute was toggled
 	// mid-stream, so audio kept leaving the device while the ring showed
 	// red. Note this is a partial fix: it stops audio leaving the device
