@@ -302,6 +302,36 @@ numbers, and Go is held bit-exact to it by `outchain/testdata` vectors; regenera
 `gen_vectors.py` after any change to either. The model, captures and stock's
 own files that informed it stay off the repo (Amazon's).
 
+- **2026-11-17, the echo canceller is near its linear ceiling; the rest is
+  non-linear** (Fable, offline, 15LE's 11-06 captures;
+  `/root/em-diag/fable-2026-11-16-aec/REPORT.md`, local only). Speex settles
+  at 15.5dB against 17.5dB for the best per-bin least-squares filter; it
+  neither diverges nor freezes under real double talk; 98.6% of the echo's
+  energy arrives within 16ms, so tails of 32-256ms all give 15.4-15.9dB; a
+  saved path from another room still starts 4dB above cold. The residual is
+  12-33dB above the noise floor at 300Hz-2kHz and scales 1:1 with level:
+  non-linear (speaker or chassis), at a talker's level at 1-3m. Not measured:
+  the donut (the only loopback capture predates #1139 and is zeros), level
+  dependence (every capture is at volume 89), A53 timings.
+  - **Frame 1280 / tail 80 adopted.** The firmware's own `aec_replay`, same
+    captures: steady +1.3 to +2.3dB on replies, music unchanged; cold start
+    slower through second 4 (once per Echo, the v2 path does not carry over);
+    warm about even in the first second, ahead after (mix1 trails at second 4,
+    11.9 vs 14.0, level by 6).
+  - **Choosing the turn's microphone on cancelled energy is NOT a win**
+    (local branch `wip/lock-after-cancelling`, `tools/lock_replay` there). At
+    each real barge: talker at 1m, the best microphone 6/6 (+2 to +7dB
+    talker-to-residual); at 3m, worse 4/9, better 2/9, because the bursty
+    residual on ch3/ch4 wins the onset ratio after cancelling too. The premise
+    (raw onset favours the echo-hot microphones) skipped the per-microphone
+    baseline in the ratio. The beam bank is where this is decided.
+  - The bench post-filter moved real-barge recall +0.05/+0.08/-0.21 (n=17):
+    keep it off the single-microphone wake path. AEC3 and speex's preprocess
+    suppressor stay dropped: no new evidence.
+  - Lock()'s baseline smoother (`baselineAlpha` 0.995) advances once per
+    Process call, a 160ms batch, so its time constant is ~32s, not the ~10s
+    its comment says.
+
 ## Key Go packages
 
 | Package | Role |

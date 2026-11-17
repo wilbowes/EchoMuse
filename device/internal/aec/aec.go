@@ -53,8 +53,13 @@ import (
 
 const (
 	sampleRate = 16000
-	// FrameSize matches the mic pipeline period (512 samples = 32ms).
-	FrameSize = 512
+	// FrameSize is the speex frame: 1280 samples = 80ms, two per 160ms mic
+	// batch and one per 80ms wake chunk, so it adds no latency. With the
+	// 80ms hardware tail the filter is one block (M = 1), which is speex's
+	// cheapest shape: on the 11-06 captures 512/64 gave 15.5dB steady and
+	// 1280/80 16.7dB at 22% less CPU per canceller (2026-11-17, offline
+	// harness; the first cold second is 1dB slower, ahead from the fourth).
+	FrameSize = 1280
 
 	// Reference ring capacity: max bulk delay (1s) plus 2s of slack.
 	// 48k samples of int16 = 96KB.
@@ -65,22 +70,28 @@ const (
 	minTailMs  = 50
 	maxTailMs  = 500
 
+	// govSlack is the software tap's backlog allowance past its delay,
+	// 128ms in samples (see the governor in processLocked).
+	govSlack = 2048
+
 	// hwTailMs is the filter length on the hardware reference, where the
 	// tail covers only the acoustic path: the reference arrives in the same
 	// frame as the mics, so there is no delay error left to absorb. Measured
 	// on a bench Dot (2026-09-22): converged, a 16ms tail cancelled as
 	// deeply as 300ms (20.3dB vs 20.4dB), while 300ms took ~10s of playback
-	// to converge against ~4s for 64ms. 64 leaves 4x headroom for a livelier
-	// room. aecTailMs still sets the software tap's length, which must also
-	// cover the delay error between the speaker write and the mic batches.
-	hwTailMs = 64
+	// to converge against ~4s for 64ms. 98.6% of a Dot 2's echo energy
+	// arrives within 16ms (2026-11-16); 80 is one FrameSize, so the filter
+	// is a single block. aecTailMs still sets the software tap's length,
+	// which must also cover the delay error between the speaker write and
+	// the mic batches.
+	hwTailMs = 80
 
 	// quietHold is how many silent reference frames pass before the unused
-	// microphones rest. The filter sees two frames of far-end history at
-	// the 64ms tail, so by then every state's history is the silence the
+	// microphones rest. The filter sees one frame of far-end history at
+	// the 80ms tail, so by then every state's history is the silence the
 	// skipped frames would have added, and it resumes where it would have
-	// been. 8 frames is 256ms.
-	quietHold = 8
+	// been. 4 frames is 320ms.
+	quietHold = 4
 )
 
 // Canceller is a single AEC instance shared by the speaker goroutine
@@ -477,7 +488,7 @@ func (c *Canceller) WriteFar(period []byte) {
 // multiple of FrameSize samples. The mic ALSA reader does NOT deliver single
 // 512-sample periods — GoTinyAlsa's GetAudioStream reads pcm_get_buffer_size
 // per chunk (PeriodSize × PeriodCount = 2560 frames = 160ms), so the buffer
-// arriving here is 5 speex frames long. The pre-2026-07-08 version of this
+// arriving here is 2 speex frames long. The pre-2026-07-08 version of this
 // guard required exactly one frame and silently passed everything through —
 // AEC had therefore never processed a single sample on hardware (ring pegged
 // at ringCap, 0dB cancellation at every delay setting, zero underruns to give
@@ -604,7 +615,7 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 	// Runs AFTER the consume loop (the low-water point): the mic delivers
 	// bursty 160ms batches, so occupancy measured before consuming swings
 	// by a whole batch and would need slack so wide it re-opens the stale
-	// window. Slack of 4 speex frames (128ms) clears producer/consumer
+	// window. Slack of 128ms (govSlack) clears producer/consumer
 	// phase jitter (~±1 speaker period ≈ 43ms). The filter state is KEPT
 	// across the trim: trimming restores the nominal delaySamples alignment
 	// — the same alignment the filter converged against — and the physical
@@ -620,7 +631,7 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 		return out
 	}
 	delaySamples := c.delayMs * sampleRate / 1000
-	if c.count > delaySamples+4*FrameSize {
+	if c.count > delaySamples+govSlack {
 		drop := c.count - delaySamples
 		c.tail = (c.tail + drop) % ringCap
 		c.count = delaySamples

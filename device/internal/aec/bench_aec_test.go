@@ -18,7 +18,7 @@ func benchFrames(n int) ([]byte, []byte) {
 	return mic, ref
 }
 
-// One 512-sample (32ms) period through one canceller at the shipped tail.
+// One FrameSize period through one canceller at a 300ms software-tap tail.
 func BenchmarkCancelOnePeriod300ms(b *testing.B) {
 	c := New(NumMics)
 	c.SetParams(true, 0, 300)
