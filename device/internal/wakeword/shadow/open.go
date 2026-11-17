@@ -2,11 +2,14 @@ package shadow
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/wilbowes/EchoMuse/internal/wakeword"
+	"github.com/wilbowes/EchoMuse/internal/wakeword/melnative"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 )
 
@@ -95,10 +98,22 @@ func Open(owwModel string, threshold float32, onCross func(score, threshold floa
 		return nil, fmt.Errorf("shadow: %w", err)
 	}
 
-	s := NewScorer(inf, threshold, onCross)
-	s.closer = inf
-	s.info = fmt.Sprintf("onnxruntime %s, model %s, xnnpack=%v, streaming embedding: %s",
-		rt.Version(), stem, inf.XNNPACKActive(), inf.StreamStatus())
+	// The melspectrogram natively on pffft when it agrees with this model
+	// (melnative.Checked): it was half the wake word's CPU through ORT, 4.8ms
+	// per 80ms chunk on C95 against 0.17ms (2026-11-17). Otherwise ORT's.
+	var scoring wakeword.Inferer = inf
+	var closer io.Closer = inf
+	mel := "native"
+	if h, why := melnative.Checked(inf); h != nil {
+		scoring, closer = h, h
+	} else {
+		mel = "onnxruntime (" + why + ")"
+	}
+
+	s := NewScorer(scoring, threshold, onCross)
+	s.closer = closer
+	s.info = fmt.Sprintf("onnxruntime %s, model %s, xnnpack=%v, streaming embedding: %s, melspectrogram: %s",
+		rt.Version(), stem, inf.XNNPACKActive(), inf.StreamStatus(), mel)
 	return s, nil
 }
 
