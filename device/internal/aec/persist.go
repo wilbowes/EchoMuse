@@ -195,8 +195,10 @@ func writeState(path string, b []byte, attDb float64) {
 // most once a day. v3 (2026-11-17) is the 1280-sample frame and 80ms tail,
 // which a v2 header refuses anyway; the new name leaves the v2 file where it
 // is, valid for the firmware in the other A/B slot, so a rollback keeps its
-// learnt path instead of starting cold. It is never loaded from here.
-const DefaultStatePath = "/data/local/etc/echomuse/aec_echo_path.v3.bin"
+// learnt path instead of starting cold. It is never loaded from here. v4
+// (2026-11-17) adds the square reference's filter (hwFarChannels), twice
+// the size, so a v3 file is refused by size; v3 is kept for the same reason.
+const DefaultStatePath = "/data/local/etc/echomuse/aec_echo_path.v4.bin"
 
 // legacyStatePaths are earlier saved paths, never loaded and removed at start.
 var legacyStatePaths = []string{

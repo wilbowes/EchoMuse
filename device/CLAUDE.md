@@ -75,9 +75,14 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
     property).
   - **One filter per microphone (#814)**: `aec.ProcessMicsWithRef` runs all
     seven every period, idle ones resting after 320ms of silent reference
-    (`quietHold`); one saved file, `aec_echo_path.v3.bin`, all or nothing.
+    (`quietHold`); one saved file, `aec_echo_path.v4.bin`, all or nothing.
     **Frame 1280 (80ms) / tail 80ms**: one block per filter, speex's cheapest
-    shape. v2 stays on /data for the other A/B slot; never delete it.
+    shape. v2 and v3 stay on /data for the other A/B slot; never delete them.
+  - **Two far-end channels on the hardware reference: x and `squareRef(x)`**
+    (`hwFarChannels`, speex's multi-loudspeaker path). The Dot 2's speaker
+    distorts at even order and a linear filter on x cannot model it; odd
+    terms predict nothing. The software tap keeps one. x² is interleaved per
+    sample (`expandFarLocked`); `squareRef` is x²/32768 rounded half to even.
     Hardware reference only. `ProcessWithRef` is for `tools/aec_replay` and
     tests only.
   - **De-aliased (#975) — never "simplify" back to raw ch8**, which aliases

@@ -92,6 +92,17 @@ const (
 	// skipped frames would have added, and it resumes where it would have
 	// been. 4 frames is 320ms.
 	quietHold = 4
+
+	// hwFarChannels is how many far-end channels the hardware-reference
+	// states get: the reference x and squareRef(x). The Dot 2's speaker
+	// distorts at even order (37% second harmonic near full scale), which a
+	// linear filter on x cannot model and which was most of what it left:
+	// with x² as speex's second "loudspeaker" the canceller removes 5-7dB
+	// more (story reply 16.8 -> 23.5dB) and recall on 17 real barges goes
+	// 0.30 -> 0.44 (2026-11-17, offline on the 11-06 captures). Odd terms
+	// (x³, clipping) predicted nothing. +39% per canceller. The software tap
+	// keeps one channel: its alignment error is far larger than the gain.
+	hwFarChannels = 2
 )
 
 // Canceller is a single AEC instance shared by the speaker goroutine
@@ -136,10 +147,17 @@ type Canceller struct {
 	dsum  int32
 	dcnt  int
 
-	// C-side scratch buffers, allocated once per state init.
+	// C-side scratch buffers, allocated once per state init. refBuf holds
+	// farK interleaved far-end channels per sample (expandFar); far is the
+	// reference itself, one channel, for the quiet test and telemetry.
 	micBuf *C.spx_int16_t
 	refBuf *C.spx_int16_t
 	outBuf *C.spx_int16_t
+	far    []int16
+	farK   int
+	// linearOnly builds every state with one far-end channel. Tests only:
+	// the control the square reference is measured against.
+	linearOnly bool
 
 	underruns uint64 // ref ring empty while enabled (diagnostic)
 	resyncs   uint64 // stale-reference trims (see governor in Process)
@@ -369,20 +387,26 @@ func (c *Canceller) buildLocked() {
 	c.freeLocked()
 	c.stTailMs = c.effectiveTailLocked()
 	tailSamples := C.int(c.stTailMs * sampleRate / 1000)
-	c.st = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
+	c.farK = 1
+	if c.hwRef && !c.linearOnly {
+		c.farK = hwFarChannels
+	}
+	k := C.int(c.farK)
+	c.st = C.speex_echo_state_init_mc(C.int(FrameSize), tailSamples, 1, k)
 	rate := C.spx_int32_t(sampleRate)
 	C.speex_echo_ctl(c.st, C.SPEEX_ECHO_SET_SAMPLING_RATE, unsafe.Pointer(&rate))
 
 	c.micBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
-	c.refBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
+	c.refBuf = (*C.spx_int16_t)(C.malloc(C.size_t(FrameSize * 2 * c.farK)))
 	c.outBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
+	c.far = make([]int16, FrameSize)
 	if c.hwRef {
 		for i := range c.micStates {
-			c.micStates[i] = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
+			c.micStates[i] = C.speex_echo_state_init_mc(C.int(FrameSize), tailSamples, 1, k)
 			C.speex_echo_ctl(c.micStates[i], C.SPEEX_ECHO_SET_SAMPLING_RATE, unsafe.Pointer(&rate))
 		}
 	}
-	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", FrameSize, c.stTailMs, c.delayMs)
+	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms far channels=%d", FrameSize, c.stTailMs, c.delayMs, c.farK)
 }
 
 // seedRingLocked seeds the ring with the bulk delay as silence: the mic
@@ -556,7 +580,7 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 
 	out := make([]byte, len(mono))
 	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), FrameSize)
-	ref := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
+	ref := c.far
 	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), FrameSize)
 
 	for off := 0; off < len(mono); off += FrameSize * 2 {
@@ -595,6 +619,7 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 			}
 		}
 
+		c.expandFarLocked()
 		C.speex_echo_cancellation(c.st, c.micBuf, c.refBuf, c.outBuf)
 		for i := 0; i < FrameSize; i++ {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
@@ -713,7 +738,7 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 
 	out := make([]byte, len(mono))
 	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), FrameSize)
-	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
+	far := c.far
 	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), FrameSize)
 	for off := 0; off < len(mono); off += FrameSize * 2 {
 		quiet := true
@@ -726,6 +751,7 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 		} else {
 			c.farQuiet = 0
 		}
+		c.expandFarLocked()
 		c.hwFrames++
 		// The active microphone last, so mic and res still hold its frame
 		// for the telemetry below.
@@ -747,6 +773,35 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 		c.noteAttLocked(frameRMS(mic), frameRMS(res), frameRMS(far), true, active)
 	}
 	return out
+}
+
+// expandFarLocked writes c.far into refBuf as speex's interleaved far end:
+// [x] with one channel, [x, squareRef(x)] per sample with two.
+func (c *Canceller) expandFarLocked() {
+	buf := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize*c.farK)
+	if c.farK == 1 {
+		copy(buf, c.far)
+		return
+	}
+	for i, x := range c.far {
+		buf[2*i], buf[2*i+1] = x, squareRef(x)
+	}
+}
+
+// squareRef is x²/32768 rounded half to even and saturated: the scale keeps
+// it in the reference's range (a full-scale x gives a full-scale x²), and
+// the rounding is lrint's, which the offline harness the gain was measured
+// with uses. Only -32768 saturates.
+func squareRef(x int16) int16 {
+	p := int32(x) * int32(x)
+	q, r := p>>15, p&0x7fff
+	if r > 0x4000 || (r == 0x4000 && q&1 == 1) {
+		q++
+	}
+	if q > 32767 {
+		q = 32767
+	}
+	return int16(q)
 }
 
 func frameRMS(s []int16) float64 {
