@@ -560,11 +560,22 @@ func (d *DataClient) OnListenEnd(cb func(listen.End)) { d.onListenEnd = cb }
 // OpenListen opens a session for a wake whose crossing frame was captured at
 // crossAt. ok is false when not listening privately or a session is already
 // open — in the second case the wake is words inside an open session.
+//
+// The session owns the beam lock: locked at the wake, released when the
+// session closes, whoever closes it. The controller's beam_unlock came only
+// after the reply, so a barge-in was heard on the perimeter mic aimed at the
+// last command; on C95 (2026-11-17) the echo-hot ch3/ch4 took several tries
+// where ch6 cut in first time. A turn stream (button, follow-up) needs
+// nothing: stopping it resets the beam to ch6.
 func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 	if d.ListenState() != ListenLocal {
 		return 0, false
 	}
-	return d.listenGate.Open(crossAt, time.Now())
+	session, ok = d.listenGate.Open(crossAt, time.Now())
+	if ok {
+		d.RequestBeamLock()
+	}
+	return session, ok
 }
 
 // routeWakeFrame decides what of one wake-stream frame leaves the device
@@ -602,8 +613,14 @@ func (d *DataClient) ListenOpen() bool {
 
 // AckListen and CloseListen apply the controller's listen_ack / listen_close.
 // Both ignore a session that is not the open one.
-func (d *DataClient) AckListen(session uint32) bool   { return d.listenGate.Ack(session) }
-func (d *DataClient) CloseListen(session uint32) bool { return d.listenGate.Close(session) }
+func (d *DataClient) AckListen(session uint32) bool { return d.listenGate.Ack(session) }
+func (d *DataClient) CloseListen(session uint32) bool {
+	if !d.listenGate.Close(session) {
+		return false
+	}
+	d.RequestBeamUnlock()
+	return true
+}
 
 // CloseAnyListen ends whatever session is open, reporting it.
 func (d *DataClient) CloseAnyListen(r listen.Reason) {
@@ -623,6 +640,7 @@ func (d *DataClient) endListen(e *listen.End) {
 	if e == nil {
 		return
 	}
+	d.RequestBeamUnlock()
 	log.Printf("[listen] session %d closed on the device: %s", e.Session, e.Reason)
 	if d.onListenEnd != nil {
 		d.onListenEnd(*e)

@@ -331,6 +331,22 @@ own files that informed it stay off the repo (Amazon's).
   - Lock()'s baseline smoother (`baselineAlpha` 0.995) advances once per
     Process call, a 160ms batch, so its time constant is ~32s, not the ~10s
     its comment says.
+- **2026-11-17, barge-in over a reply was heard on the LAST command's
+  microphone.** The controller locked the beam at the wake and sent
+  `beam_unlock` only after the reply, so a barge-in during it was scored on
+  the perimeter mic aimed at the previous command (ch1/3/4/5 on C95); over
+  music and podcasts the lock had already gone and it was scored on ch6.
+  C95, x² bench build, same evening: barges over music and over a podcast
+  (pure speech, so not speech-on-speech) cut in near first time (0.52-0.92);
+  over TTS replies on the locked mic several tries each (0.54, 0.73); with
+  `beamformingEnabled` off, replies too cut in (0.47/0.66/0.76, "better, not
+  perfect"). Per-mic cancellation was 23-28dB on every mic, so the mic's
+  echo level, not the filter, was the difference. Fixed on the device: the
+  private-listening session owns the lock (locked at the wake, released at
+  any close). Also learnt: the `[aec] att=` window averages any frame with
+  mic RMS > 500, ref or not, so a reply's FIRST window includes the user's
+  command and reads as a cold start (3.5-4.6dB) when the filter is warm
+  (18-23dB per mic in the first second).
 
 ## Key Go packages
 
