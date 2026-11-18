@@ -506,7 +506,8 @@ func (s *Scorer) run() {
 		// At the barge-in bar a single frame is not enough: that bar sits ~10x
 		// below the wake threshold and scores the assistant's own voice, and
 		// one frame there cut long answers off mid-sentence. Two consecutive
-		// frames, the same rule as the controller's em_barge.decide.
+		// frames, or one at the normal wake bar: the controller's
+		// em_barge.decide.
 		if lowBar {
 			s.bargeFrames++
 			s.bargeBar = threshold
@@ -532,7 +533,12 @@ func (s *Scorer) run() {
 		} else {
 			s.runAts = s.runAts[:0]
 		}
-		crossed := above && (!lowBar || s.prevAbove) && (lowBar || len(s.runAts) >= need) &&
+		// One frame at the normal wake bar also crosses at the barge bar: under
+		// the echo a real wake word often holds that bar for a single frame
+		// (C95 at 3m, 2026-11-18), which the reply alone never reached.
+		// Not with minFrames > 1, where a wake needs that many frames anyway.
+		high := lowBar && s.minFrames <= 1 && score >= s.threshold
+		crossed := (high || above && (!lowBar || s.prevAbove) && (lowBar || len(s.runAts) >= need)) &&
 			now.Sub(s.lastCross) >= s.refract
 		// A crossing at the barge bar is dated from the first of its two
 		// frames (docs/listening.md). Dated from the second, the session
@@ -540,7 +546,7 @@ func (s *Scorer) run() {
 		// multi-frame wake is dated from the first frame of the run for the
 		// same reason.
 		at := q.at
-		if crossed && lowBar {
+		if crossed && lowBar && s.prevAbove {
 			at = s.prevAt
 		} else if crossed && need > 1 {
 			at = s.runAts[0]

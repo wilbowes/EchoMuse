@@ -371,7 +371,9 @@ short replies and it did not survive long ones: asking for a story, the
 assistant's own narration scored up to 0.18 and interrupted itself
 mid-sentence. Continuous speech simply offers more chances to briefly sound
 like a wake word. Two consecutive detections are now required as well, which
-is what makes a single stray frame harmless.
+is what makes a single stray frame harmless. One detection at the normal wake
+threshold still counts on its own: under the echo a real wake word often
+reaches it for a single frame, and the reply alone does not.
 
 If a response ever cuts itself off, raise this. If interrupting stops working,
 lower it — but check whether AEC is on first, since that is the more common

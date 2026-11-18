@@ -89,7 +89,8 @@ idempotent). Names `<label> Voice Assistant` / `<label> BT Proxy`;
 - **Barges**: both paths flush before the claim
   (`tests/test_barge_flush_order.py`), the turn loop waits on the claim
   (`BARGE_DECISION_TIMEOUT_S` 3s). `em_barge.decide` needs two consecutive
-  frames over `bargeInThreshold` (0.25) — the two move together. When a
+  frames over `bargeInThreshold` (0.25) — the two move together — or one
+  frame at the wake threshold (the reply alone peaked 0.30 in 20 min). When a
   default moves for safety, decide explicitly about stored fleet values.
 - **HA's VAD may never engage**, and its 15s cap looks like a real endpoint.
   `em_turnclock.ha_vad_stalled_verdict` ends such a turn keyed on the absence

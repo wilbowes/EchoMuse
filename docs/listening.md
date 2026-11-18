@@ -212,7 +212,10 @@ The Echo scores against:
   music, when barge-in is enabled — the same rule the controller applies;
 - and while that lower bar is in force, it needs **two consecutive frames**
   above it (`em_barge.decide`'s rule), because a single frame at a bar ten
-  times below the wake threshold fired on the assistant's own voice.
+  times below the wake threshold fired on the assistant's own voice, **or one
+  frame at `owwThreshold`**: under the echo a real wake word often holds the
+  bar for a single frame, and the reply alone never gets near the wake bar.
+  With `OWW_MIN_FRAMES` above 1 the single-frame case does not apply.
 
 At `owwThreshold` one frame is enough by default. `OWW_MIN_FRAMES` on the
 Echo (1–4, #294) asks for that many consecutive frames instead; the wake is
