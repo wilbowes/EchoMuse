@@ -36,6 +36,7 @@ package codec
 
 import (
 	"log"
+	"strconv"
 	"sync"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
@@ -43,6 +44,19 @@ import (
 )
 
 var once sync.Once
+
+// SetMicGains writes the controller's mic gains to the ADCs the board states
+// (board.Hardware.MicADCs): an unfitted one refuses the write.
+func SetMicGains(adcs []string, digital, pga *int) {
+	for _, adc := range adcs {
+		if digital != nil {
+			mixer.Set(adc+" Digital Volume Control", strconv.Itoa(*digital))
+		}
+		if pga != nil {
+			mixer.Set(adc+" MICPGA Volume Ctrl", strconv.Itoa(*pga))
+		}
+	}
+}
 
 // EnsureRoutes writes the board's routes, then its input gains, exactly once
 // per process.

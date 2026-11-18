@@ -52,6 +52,9 @@ type Hardware struct {
 	// MicMutes are the switches that silence the microphones in hardware,
 	// written "1" on mute and "0" on unmute beside stopping the stream.
 	MicMutes []string
+	// MicADCs are the fitted ADCs by control-name prefix. The controller's
+	// adcDigitalGain and adcMicpga are written to each of them.
+	MicADCs []string
 	// Routes are the codec switches that must be closed for audio to flow,
 	// and InputGains the mic input levels, written once before either PCM
 	// opens (internal/bindings/codec).
@@ -247,6 +250,12 @@ var biscuitMics = MicArray{
 	EchoRef: 8,
 }
 
+// tlvMicADCs: biscuit and radar fit all four TLV320AIC3101s.
+var tlvMicADCs = []string{"ADC_A", "ADC_B", "ADC_C", "ADC_D"}
+
+// donutMicADCs: the Dot 3 boards fit two; ADC_C and ADC_D refuse the write.
+var donutMicADCs = []string{"ADC_A", "ADC_B"}
+
 // BiscuitMics is biscuit's array, for tools that read biscuit's captures.
 func BiscuitMics() MicArray { return biscuitMics }
 
@@ -288,6 +297,7 @@ var biscuitHardware = &Hardware{
 	Playback:    PCM{Name: "TLV320AIC3204 Playback", Fallback: &PCMAddr{0, 23}},
 	Mics:        biscuitMics,
 	MicMutes:    tlvMicMutes,
+	MicADCs:     tlvMicADCs,
 	Routes:      tlvRoutes,
 	InputGains:  tlvInputGains,
 	// Which one is fitted differs by batch (#90). Never the 2584's
@@ -320,6 +330,7 @@ var radarHardware = &Hardware{
 	Playback:   PCM{Name: "TLV320AIC3204 Playback"},
 	Mics:       biscuitMics,
 	MicMutes:   tlvMicMutes,
+	MicADCs:    tlvMicADCs,
 	Routes:     tlvRoutes,
 	InputGains: tlvInputGains,
 	// Only the 2540 has been seen on radar (035T, 07MU).
@@ -375,6 +386,7 @@ var donutHardware = &Hardware{
 		"ADC_A Left Mute", "ADC_A Right Mute",
 		"ADC_B Left Mute", "ADC_B Right Mute",
 	},
+	MicADCs:    donutMicADCs,
 	Routes:     donutRoutes,
 	InputGains: donutInputGains,
 	// The i2c bus also lists an opt3001 at 0-0044 with no driver bound.
@@ -423,6 +435,7 @@ type Layout struct {
 	Loopback                  *PCMAddr
 	LoopbackRate, LoopbackChs int
 	MicMutes                  []string
+	MicADCs                   []string
 	// LightSensors and HCI are the board's own statements, not resolved here:
 	// the sensor is looked for by internal/bindings/als, which retries, and
 	// the HCI device is opened by internal/bluetooth only when the proxy is
@@ -501,6 +514,7 @@ func Resolve(root string, b *Board) *Layout {
 	l.Capture = pcm("capture", hw.Capture, true)
 	l.Mics = hw.Mics
 	l.MicMutes = hw.MicMutes
+	l.MicADCs = hw.MicADCs
 	if hw.Loopback.Name != "" {
 		l.Loopback = pcm("loopback", hw.Loopback, true)
 		l.LoopbackRate, l.LoopbackChs = hw.LoopbackRate, hw.LoopbackChs

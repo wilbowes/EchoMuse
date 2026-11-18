@@ -299,3 +299,31 @@ An MT8167 board with its own layout; no input device or PCM shares the Dot
   into the chip at the start of every Bluetooth session; without it every
   Dot 2 shares one default address. A new board gets this if its idme has
   the address.
+
+## The Echo Dot 3rd gen Refresh (`crumpet`)
+
+The Crumpet profile uses `TDM_Capture` (four channels of S32_LE at 16 kHz),
+`DL1_Playback` and `DL1_AWB_Record`. The measured channel order is plus,
+action, minus, mute. `gpio-keys` carries action and volume. The privacy
+driver supplies the hardware mute state, which the service reconciles on
+events and after restart.
+
+The Crumpet port runs on a FireOS 6-based image. Android init starts
+[`native-start.sh`](../porting/crumpet/native-start.sh) as `u:r:echomuse:s0`
+with `/data/echomuse:/system/bin` on `PATH`. The launcher waits for the mixer
+before starting the server. It runs the controller's OTA slot behind
+`/data/local/bin/server` when there is one, moves to the other slot after three
+starts under 15 seconds, and otherwise runs the image's `/data/echomuse/server`.
+An installed slot therefore outranks a newer binary in a reflashed image:
+delete `/data/local/bin/server` to return to the image's. The image's SELinux
+policy must let the service write and execute in `/data/local/bin` for an OTA
+to work; this has not been run on a device. The service uses the native FireOS
+Wi-Fi manager for network changes and sets `echomuse.boot_ready` after startup.
+The image provides the init and SELinux configuration and a BusyBox accessible
+to this service for the controller's wake-word asset inventory. Boot and
+system installation use the Crumpet TWRP bundle.
+
+While the kernel command line carries `maxcpus=1`, the native service leaves
+the HPS core floor alone (`applyCoreFloor`), so capture, echo cancellation,
+wake word and playback share one core until the native firmware/DVFS handoff
+is done. Every other platform raises the floor on every start.

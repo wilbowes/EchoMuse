@@ -7,6 +7,7 @@ import (
 	"time"
 
 	evdev "github.com/gvalkov/golang-evdev"
+	"github.com/wilbowes/EchoMuse/internal/platform"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 )
@@ -39,6 +40,10 @@ func (e *EvDevController) SetMuteCallback(cb func()) {
 // leaves Amazon acting on every press alongside us; it fails only if neither
 // stop could run.
 func (e *EvDevController) Init() error {
+	// The native EchoMuse init does not start either stock button daemon.
+	if platform.NativeInit() {
+		return nil
+	}
 	errA := exec.Command("stop", "acebutton").Run()
 	errB := exec.Command("stop", "acebuttond").Run()
 	if errA != nil && errB != nil {

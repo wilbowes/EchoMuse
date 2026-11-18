@@ -157,7 +157,11 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 			setMuteButtonLED(true)
 		}
 		// Amazon's privacy driver boots unmuted whatever we restored.
-		server.mute.reconcilePrivacySoon()
+		if internalLed.GPIOPrivacyDriver() {
+			go server.mute.monitorPrivacyLatch()
+		} else {
+			server.mute.reconcilePrivacySoon()
+		}
 	}()
 
 	return server
@@ -246,6 +250,10 @@ func (s *Server) SetVolumeChangeCallback(cb func(level int)) {
 
 // MuteToggle toggles mic mute state — called by button handler.
 func (s *Server) MuteToggle() {
+	if internalLed.GPIOPrivacyDriver() {
+		s.mute.syncPrivacyLatch()
+		return
+	}
 	s.mute.Toggle()
 }
 

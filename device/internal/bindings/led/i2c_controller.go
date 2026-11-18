@@ -66,7 +66,7 @@ func (i *I2CController) Init() error {
 
 	// Brightness of the mute button's LED, where the kernel has Amazon's
 	// privacy driver (privacy.go finds it by name). Best-effort.
-	if d := privacyDir(); d != "" {
+	if d := privacyDir(); d != "" && !GPIOPrivacyDriver() {
 		_ = os.WriteFile(filepath.Join(d, "privacy_brightness"), privacyBrightnessPacket, perm)
 	}
 
