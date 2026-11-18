@@ -250,6 +250,36 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
   per mic, form fixed directional beams and score the wake word per beam or
   best stream; none uses one raw mic or a plain sum. Tooling for the capture:
   `device/tools/capture_session` with the bench raw tap.
+- **2026-11-10, the barge bench was optimistic** (offline, em-diag
+  `fable-2026-11-10-barge-parity`). The real barge captures of 11-06
+  (run0/1/3, never replayed before) score centre mic + post-filter + the
+  echo-null beam at 0.25-0.50 recall, against 0.83-0.91 on the bench's mixes,
+  because `listen_bench` sums a silent-room voice into a reply capture. Also
+  found: `quiet_bench` scored one frame phase, not eight; `data.go` falls back
+  to `ProcessMicsWithRef` with no log when `ProcessMicsAllWithRef` returns nil;
+  the bench build reads `echonull.bin`/`postfilter` from
+  `/data/local/etc/echomuse/`, not `/data/local/tmp`.
+- **2026-11-11, why fixed beams cost quiet wakes** (offline,
+  `fable-2026-11-11-beams`). Every beam steered by a plane-wave model, at any
+  diagonal loading from 0.01 to 1.0 (near delay-and-sum), loses 10-14 dB of
+  the talker at 2-7 kHz against the centre mic: a talker at 1 m is not an
+  in-plane plane wave at a 36 mm ring, so seven mics sum with the wrong
+  phases. It is steering mismatch, not the echo null. Beams steered by a
+  transfer function learnt from the talker's own wakes hold 2-4 dB. Geometry:
+  `null_bench` azimuth = label angle - 90 deg, so `echonull-135` points at
+  7:30. Picking a beam by steered power is useless while the Echo plays
+  (0.04-0.21 recall).
+- **2026-11-11, a union of 2-3 fixed beams, one wake scorer each, fire on
+  any** (same runs, plus `fable-2026-11-11-frontend`). Barge recall with the
+  streams chosen on the other captures: 0.75/0.75/0.54 (run1/run3/run0)
+  against centre + post-filter 0.38/0.20/0.02 and the shipped echo-null beam
+  0.34/0.50/0.21; 32/32 quiet wakes kept, weakest peak 0.77 (centre 0.67),
+  where every one of 188 single beams has a quiet wake under 0.5. The beams
+  are what does it: a union of 3 plain cancelled mics scores 0.57/0.27/0.29.
+  The union's barge bar stays 0.25 (at 0.15-0.20 it fired on the reply 1-2
+  times in 7 min). One talker, one room, one Echo, 6-8 barges per capture,
+  talker position unlabelled; live A/B on 15LE not yet run. Cost: ~23% of a
+  core per scorer with the streaming embedding.
 
 ### The speaker's voicing (stock sound, #229, 2026-10)
 
