@@ -24,7 +24,7 @@ func TestNativeProfileFromConf(t *testing.T) {
 		"network={\nssid=zz\nkey_mgmt=NONE\n}\n",
 		"network={\nssid=\"x\"\nkey_mgmt=WPA-EAP\n}\n",
 		"network={\nssid=\"x\"\nssid=\"y\"\nkey_mgmt=NONE\n}\n",
-		"network={\nssid=\"x\"\nkey_mgmt=WPA-PSK\n}\n", "network={\nssid=\"x\"\n",	} {
+		"network={\nssid=\"x\"\nkey_mgmt=WPA-PSK\n}\n", "network={\nssid=\"x\"\n"} {
 		if _, err := nativeProfileFromConf(bad, nil); err == nil {
 			t.Fatalf("unsafe/ambiguous profile accepted: %q", bad)
 		}

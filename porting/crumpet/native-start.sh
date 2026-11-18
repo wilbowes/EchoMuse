@@ -3,7 +3,7 @@ set -eu
 # Cold boot: ueventd may still be preparing ALSA when the network service starts.
 # Bound this to ten probes; Init retries the service if the device stays unavailable.
 ready=
-for attempt in 1 2 3 4 5 6 7 8 9 10; do
+for _ in 1 2 3 4 5 6 7 8 9 10; do
     if /system/bin/tinymix -D 0 'PCM Playback Volume' >/dev/null 2>&1; then
         ready=1
         break
