@@ -595,6 +595,77 @@ func TestBargeBarNeedsTwoConsecutiveFrames(t *testing.T) {
 	})
 }
 
+// TestBargeBarFiresOnOneFrameAtTheWakeBar: one frame at the normal wake bar
+// is a wake word while the speaker plays too, and is dated from that frame.
+// Under the echo a real one often holds the bar for a single frame.
+func TestBargeBarFiresOnOneFrameAtTheWakeBar(t *testing.T) {
+	got := make(chan time.Time, 4)
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(_, _ float32, at time.Time) { got <- at })
+	defer s.Close()
+	s.SetBargeThreshold(0.25, func() bool { return true })
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	// The reply's worst single frame in a 20-minute soak: not a barge.
+	inf.set(0.302, 0)
+	pushAll(t, s, 1)
+	inf.set(0.0, 0)
+	pushAll(t, s, 1)
+	inf.set(0.6, 0)
+	at := time.Now().Add(-300 * time.Millisecond)
+	b := make([]byte, wakeword.ChunkSamples*2)
+	s.PushBytesAt(b, at)
+	select {
+	case c := <-got:
+		if !c.Equal(at) {
+			t.Fatalf("crossing dated %v off its frame", c.Sub(at))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("one frame at the wake bar did not cross during playback")
+	}
+	select {
+	case <-got:
+		t.Fatal("crossed twice: the 0.302 frame counted")
+	default:
+	}
+}
+
+// TestMinFramesKeepsTheBargeBarAtTwoFrames: with OWW_MIN_FRAMES above 1 a
+// wake needs that many frames, so one frame at the wake bar does not barge.
+func TestMinFramesKeepsTheBargeBarAtTwoFrames(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+		mu.Lock()
+		crosses++
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetMinFrames(2)
+	s.SetBargeThreshold(0.25, func() bool { return true })
+	inf.set(0.0, 0)
+	pushAll(t, s, wakeword.FeatWindow+1)
+	for i := 0; i < 4; i++ {
+		inf.set(0.9, 0)
+		pushAll(t, s, 1)
+		inf.set(0.0, 0)
+		pushAll(t, s, 1)
+	}
+	inf.set(0.3, 0)
+	pushAll(t, s, 2)
+	waitFor(t, "only the two-frame crossing", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return crosses == 1
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if crosses != 1 {
+		t.Fatalf("crossed %d times, want 1", crosses)
+	}
+}
+
 // TestNormalBarStillFiresOnOneFrame: the two-frame rule is for the barge bar
 // only. At the wake threshold one frame is a wake, as it always was.
 func TestNormalBarStillFiresOnOneFrame(t *testing.T) {

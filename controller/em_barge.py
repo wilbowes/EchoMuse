@@ -43,6 +43,15 @@ The cost is one frame of latency, 80ms, on a genuine barge. A real wake word
 holds a high score across several consecutive hops as the phrase completes,
 so it is not close.
 
+ONE FRAME AT THE WAKE BAR STILL COUNTS (2026-11-18)
+---------------------------------------------------
+"A real wake word holds a high score across several hops" stopped being true
+under the echo once barges were tried from 3m: on C95, 4 of 9 misses peaked
+0.53-0.73 on a single frame and cut nothing. The reply alone, over 20 minutes
+of stories, reached 0.302 once and otherwise stayed at or under 0.006. So one
+frame at the normal wake threshold fires during playback too; the pair rule
+still guards everything between the two bars.
+
 TWO REASONS TO GIVE UP THE TURN, AND ONLY ONE OF THEM IS A TRACEABLE EVENT
 -----------------------------------------------------------------------
 `barge_ceded` covers two different things: another Echo won the utterance, or
@@ -102,7 +111,8 @@ def decide(*,
     Two phases, because they are not the same problem:
 
     * **playback** — the response is audible, so the microphone is dominated
-      by the device's own speech. Low bar, two consecutive frames.
+      by the device's own speech. Low bar, two consecutive frames, or one
+      frame at the normal wake threshold.
     * **thinking** — nothing is playing yet, so there is no echo to talk
       over and no reason to lower the bar. One frame at the normal wake
       threshold, and nothing else.
@@ -139,6 +149,14 @@ def decide(*,
                 f"scores {prev_score:.3f}/{score:.3f} — two consecutive "
                 f"frames >= {barge_threshold:.2f}",
             )
+        # One frame at the normal wake bar is a wake word wherever it is
+        # heard. Under the echo a real one often holds the bar for a single
+        # frame (2026-11-18, C95 at 3m: 4 of 9 misses peaked 0.53-0.73 on one
+        # frame), and the reply alone never got near it (20 min of stories:
+        # one frame at 0.30, otherwise <= 0.006).
+        if score >= wake_threshold:
+            return BargeDecision(
+                True, f"score={score:.3f} >= {wake_threshold:.2f} (one frame at the wake bar)")
         return BargeDecision(False, "")
 
     if score >= wake_threshold:

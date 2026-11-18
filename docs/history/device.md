@@ -707,6 +707,17 @@ push and every connect.
   state is `stream` in every mode, because an old controller only acts on a
   device wake when stream frames are arriving.
 
+- **2026-11-18, barge at 3m on C95: one frame at the wake bar now barges.**
+  Four 2-minute rounds over long replies (~37 attempts). The device's own
+  score trace showed 9 misses that held the 0.25 barge bar for ONE frame
+  only, four of them at 0.53-0.73, and the two-frame rule cut none. A
+  20-minute soak of 21 stories with nobody talking: 15,156 frames scored,
+  one frame at 0.302, every other reply peak <= 0.006. So a single frame at
+  `owwThreshold` crosses during playback as well (not with minFrames > 1).
+  Ruled out the same night: cutting the reply's 175Hz voicing peak by 6dB
+  (same story text, no gain), and the centre mic is the wrong one to score:
+  offline the edge mic facing the talker scored about twice its recall.
+
 ## On-device wake word (shadow mode)
 
 The Echo can run the wake model itself. `owwOnDevice` = `off` (default),

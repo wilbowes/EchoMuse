@@ -41,7 +41,7 @@ def test_one_loud_frame_during_playback_does_not_fire():
     The whole bug. An isolated transient in the assistant's own narration
     scored 0.091 and 0.184 against a 0.05 bar and cancelled the response.
     """
-    assert playback(0.9, prev=0.0).fired is False
+    assert playback(WAKE - 0.01, prev=0.0).fired is False
     assert playback(0.184, prev=0.02, barge=0.05).fired is False
 
 
@@ -66,7 +66,20 @@ def test_the_first_frame_of_a_run_cannot_fire():
     stream discontinuity. A carried-over score would let one frame of a new
     turn fire on evidence from the previous one.
     """
-    assert playback(0.99, prev=0.0).fired is False
+    assert playback(WAKE - 0.01, prev=0.0).fired is False
+
+
+def test_one_frame_at_the_wake_threshold_fires_during_playback():
+    """
+    Under the echo a real wake word often holds the bar for one frame only:
+    2026-11-18, C95 at 3m, 4 of 9 misses peaked 0.53-0.73 on a single frame.
+    The reply's own voice never got near it (20 min: one frame at 0.302).
+    """
+    for s in (WAKE, 0.53, 0.73):
+        d = playback(s, prev=0.0)
+        assert d.fired is True
+        assert "wake bar" in d.note
+    assert playback(0.302, prev=0.0).fired is False
 
 
 def test_a_genuine_barge_still_fires_at_realistic_scores():
@@ -116,7 +129,7 @@ def test_a_person_repeating_themselves_is_still_caught():
 
 def test_a_decision_that_did_not_fire_carries_no_reason():
     """So a caller cannot log a justification for something that never fired."""
-    assert playback(0.9, prev=0.0).note == ""
+    assert playback(0.4, prev=0.0).note == ""
     assert thinking(0.0).note == ""
 
 
