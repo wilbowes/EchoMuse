@@ -175,6 +175,50 @@ var radarVoicing = &Voicing{
 	CueTrimDb:  -6, // set by ear on 035T
 }
 
+// donutVoicing: the correction is fitted to the Dot 3's own stock EQ at 70%
+// volume (2026-10-25; 0.52dB RMS against its shape from 100Hz to 16kHz), the
+// shape a blind listen on 41C8 preferred to flat in 3 of 3 (2026-11-19).
+// ByVolume is stock's own bass change across EQ_50..EQ_100 as one shared
+// peak (73.1Hz Q0.43, worst 2.1dB RMS 50-400Hz), zero at 65% where the
+// correction already holds EQ_70; stock's treble does not change with volume
+// once its level steps (the volume law's job) are taken out.
+//
+// The dynamics are NOT stock's. Stock's sub-70Hz band is 20:1 from -50dB,
+// always working, and in the same listen every version run through it
+// pumped ("the backing pushes quieter when the lyrics come in") while the EQ
+// alone did not. Here they are set from 41C8's own distortion map (Yeti
+// on-axis, 2026-11-19): the driver is 24-32dB down at 63-100Hz and its 3rd
+// harmonic there is -28dB at -18dBFS and -15dB at -12dBFS, so a fixed LR4
+// high-pass at 70Hz does the sub band's job without moving, the guard
+// below it is a backstop from -24dB, and the first upper band takes 3:1
+// from -20dB (100Hz is ~13% distortion at -18dBFS). Mids are linear to
+// -12dBFS, so the upper bands are biscuit's 2:1 from -10dB. The ceiling is
+// stock's +5dB into the chain.
+var donutVoicing = &Voicing{
+	Correction: []Peak{
+		{114.6, 13.45, 0.300},
+		{2893.6, -11.07, 1.168},
+		{816.9, -4.30, 0.400},
+		{7646.2, 3.46, 0.620},
+	},
+	Shelf:          Shelf{6190.9, 15.47},
+	HighpassHz:     70,
+	Notch:          Peak{70, 0, 1},
+	Crossovers:     [2]float64{500, 7500},
+	Upper:          [3]BandLaw{{3, -20, 20}, {2, -10, 10}, {2, -10, 10}},
+	UpperFloorDb:   -40,
+	UpperHoldMs:    30,
+	UpperReleaseMs: 100,
+	BassFloorDb:    -40,
+	BassHoldMs:     20,
+	ByVolume: []VolumeEQ{
+		{Hz: 73.1, Q: 0.428, Gains: []VolumeGain{
+			{45, 5.10}, {55, 3.46}, {65, 0}, {75, -2.70}, {85, -8.18}, {95, -8.85},
+		}},
+	},
+	CeilingDb: 5,
+}
+
 // BiscuitVoicing is biscuit's voicing, for the output chain's tests and its
 // default chain.
 func BiscuitVoicing() *Voicing { return biscuitVoicing }
