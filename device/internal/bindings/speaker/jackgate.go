@@ -35,7 +35,7 @@ import (
 // goroutine takes neither: it only loads plugged.
 type jackGate struct {
 	mu      sync.Mutex
-	intent  atomic.Bool // the latest position route was given: true in
+	intent  atomic.Bool // the latest position route was given: true = inserted
 	plugged atomic.Bool
 
 	write func(mixerWrite) error
@@ -117,6 +117,11 @@ func (g *jackGate) reconcile(j board.Jack, desired func() (inserted, known bool)
 	}
 	drift := jackRoutingDrift(j, inserted, current)
 	failed = g.writeAll(drift)
+	if inserted && len(failed) > 0 {
+		// A drifted Insert control we could not put back: the speaker may be
+		// on, so stereo goes until a later reconcile confirms the whole set.
+		g.plugged.Store(false)
+	}
 	if inserted && complete && len(failed) == 0 && !g.plugged.Load() {
 		g.permit()
 		permitted = g.plugged.Load()

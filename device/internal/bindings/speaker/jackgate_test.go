@@ -258,6 +258,27 @@ func TestReconcileRecoversAFailedInsert(t *testing.T) {
 	}
 }
 
+// With a plug in and stereo permitted, an Insert control that drifted and
+// cannot be written back withdraws the permission: the speaker may be on.
+func TestReconcileWithdrawsPluggedWhenADriftCannotBeRepaired(t *testing.T) {
+	g, f := newFakeGate(t)
+	var pos position
+	routeTo(g, &pos, true)
+	if !g.plugged.Load() {
+		t.Fatal("not plugged after a clean insert")
+	}
+	f.state[mux] = "Off" // something outside us moved it
+	f.failSet[mux] = true
+	_, failed, permitted := g.reconcile(biscuitJack, pos.get)
+	if g.plugged.Load() || permitted || len(failed) != 1 {
+		t.Fatalf("plugged=%v permitted=%v failed=%v after an unrepaired drift", g.plugged.Load(), permitted, failed)
+	}
+	f.failSet[mux] = false
+	if _, _, permitted := g.reconcile(biscuitJack, pos.get); !permitted || !g.plugged.Load() {
+		t.Error("the next clean reconcile did not restore the permission")
+	}
+}
+
 // Before any position is known the reconcile does nothing at all.
 func TestReconcileWaitsForAPosition(t *testing.T) {
 	g, f := newFakeGate(t)
