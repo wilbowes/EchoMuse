@@ -166,10 +166,12 @@ var radarVoicing = &Voicing{
 		}},
 	},
 	CeilingDb: 7,
-	// The button floor (level 57) at -33dB, ea.3's floor: at the plain slope
-	// it was -28dB, and with the low-volume EQ's lift a reply there was loud
-	// on 035T (Wil, 2026-11-03).
-	DbPerLevel: 40.0 / 70,
+	// The button floor (level 57) at -50dB: "one step up from mute, just
+	// discernible in a quiet room", picked by ear on 035T at 1m (Wil,
+	// 2026-11-19). -33dB measured ~61dBA at 1m on a radar (#1157). One
+	// straight line to the ceiling, so every press is the same ~1.6dB
+	// (two levels a step), the scale a listener anticipates.
+	DbPerLevel: 57.0 / 70,
 	CueTrimDb:  -6, // set by ear on 035T
 }
 

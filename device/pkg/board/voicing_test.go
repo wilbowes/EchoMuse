@@ -47,11 +47,12 @@ func TestRadarBassFollowsVolumeDown(t *testing.T) {
 	}
 }
 
-// Radar's button floor (level 57, internal/server volume.go) is at -33dB,
-// ea.3's floor; the plain slope put it at -28dB, loud on 035T.
+// Radar's button floor (level 57, internal/server volume.go) is at -50dB,
+// set by ear on 035T (#1157): -33dB measured ~61dBA at 1m, conversation
+// level.
 func TestRadarButtonFloor(t *testing.T) {
 	v := radarVoicing
-	if got := float64(57-127)*v.DbPerLevel + v.CeilingDb; math.Abs(got+33) > 1e-9 {
-		t.Errorf("radar floor %v dB, want -33", got)
+	if got := float64(57-127)*v.DbPerLevel + v.CeilingDb; math.Abs(got+50) > 1e-9 {
+		t.Errorf("radar floor %v dB, want -50", got)
 	}
 }
