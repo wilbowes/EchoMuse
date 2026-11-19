@@ -56,3 +56,48 @@ func TestRadarButtonFloor(t *testing.T) {
 		t.Errorf("radar floor %v dB, want -50", got)
 	}
 }
+
+// Stock Dot 3 adds bass as the volume falls and takes it away at the top, as
+// radar does; the table must keep that direction.
+func TestDonutBassFollowsVolumeDown(t *testing.T) {
+	bass := donutVoicing.ByVolume[0]
+	prev := math.Inf(1)
+	for pct := 0.0; pct <= 100; pct += 5 {
+		g := bass.GainAt(pct)
+		if g > prev {
+			t.Fatalf("bass rises with volume at %g%%: %g after %g", pct, g, prev)
+		}
+		prev = g
+	}
+	if bass.GainAt(100) >= 0 || bass.GainAt(40) <= 0 {
+		t.Errorf("bass %g at 100%%, %g at 40%%: want a cut at the top, a lift below", bass.GainAt(100), bass.GainAt(40))
+	}
+	for i := 1; i < len(bass.Gains); i++ {
+		if bass.Gains[i].Percent <= bass.Gains[i-1].Percent {
+			t.Errorf("percents not ascending at %d", i)
+		}
+	}
+}
+
+// The Dot 3's protection comes from 41C8's own distortion map, never from
+// stock's MBCL.cfg, whose always-working sub band pumped in a blind listen
+// (2026-11-19). The driver is 24-32dB down at 63-100Hz and its 3rd harmonic
+// there is -15dB at -12dBFS: the sub band is a fixed high-pass, and nothing
+// compresses where the driver is clean.
+func TestDonutProtectionIsFromItsDriver(t *testing.T) {
+	v, hw := donutVoicing, donutHardware.Speaker
+	if v.HighpassHz < 70 {
+		t.Errorf("high-pass %gHz: below 70Hz the driver radiates nothing and distorts most", v.HighpassHz)
+	}
+	if g := hw.BassGuard.ThresholdDb; g < -30 || g > -18 {
+		t.Errorf("bass guard from %gdB: want a backstop near -24dB, where 63Hz distortion climbs; stock's -50 pumped", g)
+	}
+	if b := v.Upper[0]; b.ThresholdDb > -18 || b.ThresholdDb < -30 {
+		t.Errorf("70-500Hz band from %gdB: 100Hz is ~13%% distortion at -18dBFS", b.ThresholdDb)
+	}
+	for i, b := range v.Upper[1:] {
+		if b.ThresholdDb < -12 {
+			t.Errorf("upper band %d from %gdB: the mids are linear to -12dBFS", i+2, b.ThresholdDb)
+		}
+	}
+}

@@ -405,8 +405,11 @@ var donutHardware = &Hardware{
 			{"LINEOUT Mux", []string{"VOICE_AMP"}},
 			{"HPOUT Mux", []string{"OPEN"}},
 		},
-		// Biscuit's band until the Dot 3's driver is measured.
-		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
+		// A backstop under the voicing's 70Hz high-pass, from where 41C8's
+		// 3rd harmonic at 63Hz starts to climb (donutVoicing). Not stock's
+		// -50dB: always working, it pumped.
+		BassGuard: BassBand{CrossoverHz: 70, ThresholdDb: -24},
+		Voicing:   donutVoicing,
 	},
 }
 
