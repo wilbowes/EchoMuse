@@ -596,6 +596,39 @@ above the rest). Its TDM is 4ch S32_LE at 16kHz on two tlv320aic3101, and:
   scorer band 26-29 dB on ch1 against C95's 18-25. Data and scripts:
   `/root/em-diag/donut-barge-2026-11-19` (local).
 
+- **2026-11-19, the rest of the donut AEC findings (41C8, offline on raw
+  captures r1/r2/cap1/cap2 plus live rounds).**
+  - **No 12 dB ceiling: converged, the donut cancels 26-29 dB** at every speex
+    frame size (fills the "not measured: the donut" gap in the 11-17 bullet
+    above). The 10-12 dB seen was cold-start convergence of the 80 ms frame
+    (6-12 s; 10 ms ~3 s). Coherence ref→mic gives a linear ceiling of ~22 dB
+    broadband over a reply (2-4 kHz weakest, 7-11 dB); a Wiener IR cut to
+    40/80/160/300 ms gives 21.8/22.6/23.8/24.2 dB, so the 80 ms tail is not
+    the limit. A standalone mdf.c harness reproduces the device's replay
+    exactly. Device CPU on 41C8 (srv, top): idle 47%, playback with the
+    canceller ~70%, +3 tap scorers ~105%, +3 taps at the 10 ms frame ~97%.
+  - **#1229: an unlocked search of ±250 ms missed a real jump.** A lost 160 ms
+    loopback batch moved the echo 151.6 → 311.4 ms and the second reply was
+    never cancelled; ±500 ms relocks in 1.1 s on replay. Extraction at +18 dB
+    clipped 1-2.5% of samples on loud replies, so the donut takes 12 dB of
+    AEC headroom (`AECHeadroomDb`), residual −7 → −12..−18 dB.
+  - **The scored mic matters.** The device scores one mic idle and in a reply
+    (ch1, the first edge mic); on cap1 it was the weakest of the four (a try
+    scored 0.01-0.61 on ch1 against 0.74-0.92 on ch0/ch2). Best-of-4 roughly
+    doubles offline barges against ch1 alone. Delay-and-sum gains nothing (mics
+    within ±1 sample). The bench taps' `SpreadChannels` began at the locked
+    mic, so tap 0 duplicated the scored one.
+  - **Sub-sample delay tracking is the next lever.** Integer moves of whole
+    samples leave real sub-period drift uncorrected; a phase-slope tracker
+    following the echo to a fraction of a sample (offline, cap1, 10 ms frame)
+    gave 4 of 5 barges on ch1, against 1 with the aligner fix alone.
+  - **Confounds to remember:** 41C8 was at volume 0.35 and C95 at 0.60 during
+    the comparison; a donut barge's STT carried story words (`On the corner
+    because`) as the gate opened on frame 2, and the real command went as
+    a continuation. Two methods for echo over voice disagreed (27-28 dB on a
+    quiet wake, ~5 dB at the loudest try frame); settle it with a mixed
+    bench (a recorded wake at a fixed level over real echo).
+
 - **`MicMutes`** are the board's ADC mutes; the donut has only ADC_A and ADC_B
   fitted.
 
