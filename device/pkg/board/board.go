@@ -57,7 +57,7 @@ var Donut = &Board{
 }
 
 // Known is every board the firmware can identify.
-var Known = []*Board{Biscuit, Radar, Donut}
+var Known = []*Board{Biscuit, Radar, Donut, Crumpet}
 
 // Detect returns the board beneath root, or nil when none matches. root is ""
 // on a device and a fixture directory in tests.

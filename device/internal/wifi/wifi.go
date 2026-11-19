@@ -132,8 +132,9 @@ type Network struct {
 }
 
 type marker struct {
-	NewSSID   string `json:"newSsid"`
-	StartedAt int64  `json:"startedAt"`
+	PreviousSSIDHex string `json:"previousSsidHex,omitempty"`
+	NewSSID         string `json:"newSsid"`
+	StartedAt       int64  `json:"startedAt"`
 }
 
 var (
@@ -142,6 +143,10 @@ var (
 	// pending holds an unreported Result until the controller connection
 	// can carry it (drained by TakeResult from the OnConnected callback).
 	pending *Result
+	// unconfirmed says the marker and backup on disk belong to a change that
+	// succeeded and awaits wifi_commit. Kept apart from pending, which a later
+	// rejected request overwrites before that commit arrives.
+	unconfirmed bool
 )
 
 // ─── Which base OS, and therefore which paths ─────────────────────────────────
@@ -686,18 +691,21 @@ func PendingResult() *Result {
 	return &r
 }
 
-// Commit handles the controller's wifi_commit ack: the provisional state
-// (marker + backup) is deleted so a future crash/restart keeps the new
-// network, and the pending result stops being re-sent. The controller
-// acks failure results too — the revert already removed marker/backup,
-// so the removes are harmless no-ops there.
+// Commit handles the controller's wifi_commit ack: the pending result stops
+// being re-sent, and a change that succeeded gives up its recovery files so a
+// later restart keeps the new network. Any ack proves that network reaches
+// the controller, whichever result it answers. Files left by a failed revert
+// stay for RecoverIfPending.
 func Commit() {
-	clearMarker()
-	_ = os.Remove(backupPath())
 	mu.Lock()
+	defer mu.Unlock()
 	pending = nil
-	mu.Unlock()
-	log.Println("[wifi] result acknowledged — backup and pending marker removed")
+	if unconfirmed {
+		unconfirmed = false
+		clearMarker()
+		_ = os.Remove(backupPath())
+	}
+	log.Println("[wifi] result acknowledged")
 }
 
 // Change switches to a new network with automatic rollback. Runs
@@ -736,23 +744,42 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		setResult(Result{OK: false, SSID: ssid, Error: fmt.Sprintf("cannot read current config: %v", err)})
 		return
 	}
+	join := func() error { return reloadConf(composeConf(ssidBytes, psk)) }
+	restore := func() error { return reloadConf(string(old)) }
+	native := platform.NativeInit()
+	var previousSSID []byte
+	if native {
+		previousSSID = currentSSIDBytes()
+		target, previous, err := nativePlan(ssidBytes, psk, string(old), previousSSID)
+		if err != nil {
+			setResult(Result{OK: false, SSID: ssid, Error: err.Error()})
+			return
+		}
+		join = func() error { return nativeConnect(target) }
+		restore = func() error { return nativeRestore(previous) }
+	}
 	if err := os.WriteFile(backupPath(), old, 0o600); err != nil {
 		setResult(Result{OK: false, SSID: ssid, Error: fmt.Sprintf("cannot write backup: %v", err)})
 		return
 	}
-	mk, _ := json.Marshal(marker{NewSSID: ssid, StartedAt: time.Now().Unix()})
+	mk, _ := json.Marshal(marker{NewSSID: ssid, StartedAt: time.Now().Unix(), PreviousSSIDHex: hex.EncodeToString(previousSSID)})
 	if err := writeMarker(markerP, mk); err != nil {
+		_ = os.Remove(backupPath()) // nothing will ever restore from it
 		setResult(Result{OK: false, SSID: ssid, Error: fmt.Sprintf("cannot write pending marker: %v", err)})
 		return
 	}
+	// The files now belong to this change; an earlier success they covered
+	// is superseded by it.
+	mu.Lock()
+	unconfirmed = false
+	mu.Unlock()
 
 	revert := func(reason string) {
 		log.Printf("[wifi] change to %q failed (%s) — reverting", ssid, reason)
 		// Restore with WiFi down (see reloadConf) — but if the restore
 		// write fails, conf is beyond self-healing: leave the marker so
 		// RecoverIfPending retries on next start.
-		restoreErr := reloadConf(string(old))
-		if restoreErr != nil {
+		if restoreErr := restore(); restoreErr != nil {
 			log.Printf("[wifi] REVERT FAILED: %v — marker left for recovery on restart", restoreErr)
 		} else {
 			clearMarker()
@@ -762,7 +789,7 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
 
-	if err := reloadConf(composeConf(ssidBytes, psk)); err != nil {
+	if err := join(); err != nil {
 		revert(err.Error())
 		return
 	}
@@ -773,8 +800,22 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 	}
 	log.Printf("[wifi] associated to %q", ssid)
 
-	if !waitFor("IPv4 address", ipTimeout, func() bool { return currentIPv4() != "" }) {
-		revert(fmt.Sprintf("associated to %q but no IP within %s (DHCP problem?)", ssid, ipTimeout))
+	networkTimeout := ipTimeout
+	if native {
+		// On Crumpet, supplicant COMPLETED can precede the manager's DHCP
+		// start by 40s. Wait for its L3 state, not the framework's 20s budget.
+		networkTimeout = 90 * time.Second
+	}
+	if !waitFor("network and IPv4 readiness", networkTimeout, func() bool {
+		if native {
+			output, err := nativeWifiCommand("get_net_state")
+			if err != nil || nativeNetworkState(output) != "CONNECTED" {
+				return false
+			}
+		}
+		return currentIPv4() != ""
+	}) {
+		revert(fmt.Sprintf("associated to %q but network/IP not ready within %s (DHCP problem?)", ssid, networkTimeout))
 		return
 	}
 	log.Printf("[wifi] got IP %s", currentIPv4())
@@ -787,7 +828,9 @@ func Change(ssidBytes []byte, psk string, connected func() bool) {
 	// Connected on the new network. Marker + backup stay until the
 	// controller acknowledges with wifi_commit.
 	log.Printf("[wifi] change to %q succeeded — awaiting commit from controller", ssid)
-	setResult(Result{OK: true, SSID: ssid})
+	mu.Lock()
+	pending, unconfirmed = &Result{OK: true, SSID: ssid}, true
+	mu.Unlock()
 }
 
 // readMarker returns the pending-change marker, ours or the legacy one.
@@ -834,7 +877,21 @@ func RecoverIfPending() {
 		clearMarker()
 		return
 	}
-	if err := reloadConf(string(backup)); err != nil {
+	restore := func() error { return reloadConf(string(backup)) }
+	if platform.NativeInit() {
+		restore = func() error {
+			previousSSID, err := hex.DecodeString(m.PreviousSSIDHex)
+			if err != nil {
+				return fmt.Errorf("invalid previous SSID in the marker")
+			}
+			previous, err := nativeProfileFromConf(string(backup), previousSSID)
+			if err != nil {
+				return err
+			}
+			return nativeRestore(previous)
+		}
+	}
+	if err := restore(); err != nil {
 		log.Printf("[wifi] startup restore failed: %v — leaving marker for next start", err)
 		return
 	}

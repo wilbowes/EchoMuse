@@ -73,3 +73,9 @@ func Base() string {
 	once.Do(func() { cached = Detect("") })
 	return cached
 }
+
+// NativeInit identifies our own enforcing service role under original init.
+func NativeInit() bool {
+	context, _ := os.ReadFile("/proc/self/attr/current")
+	return strings.Trim(string(context), "\x00 \t\r\n") == "u:r:echomuse:s0"
+}

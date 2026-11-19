@@ -2,11 +2,40 @@ package codec
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/pkg/board"
 )
+
+func TestMicGainsUseOnlyPopulatedADCs(t *testing.T) {
+	zero, pga := 0, 24
+	for _, tc := range []struct {
+		board *board.Board
+		adcs  []string
+	}{
+		{board.Biscuit, []string{"A", "B", "C", "D"}},
+		{board.Radar, []string{"A", "B", "C", "D"}},
+		{board.Donut, []string{"A", "B"}},
+		{board.Crumpet, []string{"A", "B"}},
+	} {
+		b := &recordingBackend{}
+		mixer.Use(b)
+		SetMicGains(tc.board.Hardware.MicADCs, nil, nil)
+		if len(b.sets) != 0 {
+			t.Fatal("absent gain was written")
+		}
+		SetMicGains(tc.board.Hardware.MicADCs, &zero, &pga)
+		var want [][]string
+		for _, adc := range tc.adcs {
+			want = append(want, []string{"ADC_" + adc + " Digital Volume Control", "0"}, []string{"ADC_" + adc + " MICPGA Volume Ctrl", "24"})
+		}
+		if !reflect.DeepEqual(b.sets, want) {
+			t.Errorf("%s writes %v, want %v", tc.board.ID, b.sets, want)
+		}
+	}
+}
 
 // The tables are the board's and are pinned in pkg/board. These drive what
 // the codec does with them, through a fake mixer: on a host the default

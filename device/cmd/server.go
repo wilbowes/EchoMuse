@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,9 +26,9 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/aec"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
+	"github.com/wilbowes/EchoMuse/internal/bindings/codec"
 	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
-	"github.com/wilbowes/EchoMuse/internal/bindings/mixer"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
@@ -827,6 +828,11 @@ func main() {
 	}()
 
 	log.Println("Ready")
+	if platform.NativeInit() {
+		if err := exec.Command("/system/bin/setprop", "echomuse.boot_ready", "1").Run(); err != nil {
+			log.Printf("could not acknowledge native boot: %v", err)
+		}
+	}
 	time.Sleep(2 * time.Second)
 
 	go func() {
@@ -1249,18 +1255,7 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	// offered it, the config stored it, and the mic stayed where it was —
 	// a control that appeared to work. Absent is still absent, so firmware
 	// meeting a controller that omits the key behaves as it always did.
-	if msg.AdcDigitalGain != nil {
-		g := strconv.Itoa(*msg.AdcDigitalGain)
-		for _, adc := range []string{"A", "B", "C", "D"} {
-			mixer.Set("ADC_"+adc+" Digital Volume Control", g)
-		}
-	}
-	if msg.AdcMicpga != nil {
-		g := strconv.Itoa(*msg.AdcMicpga)
-		for _, adc := range []string{"A", "B", "C", "D"} {
-			mixer.Set("ADC_"+adc+" MICPGA Volume Ctrl", g)
-		}
-	}
+	codec.SetMicGains(board.CurrentLayout().MicADCs, msg.AdcDigitalGain, msg.AdcMicpga)
 }
 
 // applyAecConfig pushes the current effective AEC config into the canceller.
@@ -1888,6 +1883,14 @@ func platformInit() int {
 // and re-applies on every start. Absent on a kernel without MTK HPS, in which
 // case there is nothing to do and nothing to warn about.
 func applyCoreFloor() {
+	cmdline, _ := os.ReadFile("/proc/cmdline")
+	if platform.NativeInit() && slices.Contains(strings.Fields(string(cmdline)), "maxcpus=1") {
+		// Crumpet's native boot only: keep its explicitly requested single
+		// CPU until the native firmware/DVFS handoff has been completed.
+		// Everywhere else the floor is raised on every start.
+		log.Print("[cpu] retaining explicit maxcpus=1 boot policy")
+		return
+	}
 	const path = "/proc/hps/num_base_perf_serv"
 	before, err := os.ReadFile(path)
 	if err != nil {

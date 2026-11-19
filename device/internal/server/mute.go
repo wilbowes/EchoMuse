@@ -11,9 +11,13 @@ import (
 )
 
 type muteController struct {
-	mu      sync.Mutex
-	muted   bool
-	ledCtrl func() led.Controller
+	mu        sync.Mutex
+	privacyMu sync.Mutex // serialize hardware-state reads with their resulting changes
+	// Guarded by privacyMu: the GPIO latch has agreed with us once, and its
+	// last read or entry failed.
+	latchTrusted, latchFailing bool
+	muted                      bool
+	ledCtrl                    func() led.Controller
 	// dotMuted is set externally to block dot button events while muted
 	onMuteChange func(muted bool)
 	// persist, when set, is called after every Toggle() so the mute state
