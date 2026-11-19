@@ -216,6 +216,11 @@ type MicArray struct {
 	// EchoRef is a channel carrying the device's own playback in the same
 	// frame as the microphones, -1 when there is none.
 	EchoRef int
+	// AECHeadroomDb is how far under micGainDb the microphones are extracted
+	// while the canceller is armed, given back after it, so the echo of loud
+	// playback does not clip the S16 extraction (clipping is distortion no
+	// canceller removes). 0 is the default 6dB.
+	AECHeadroomDb float64
 }
 
 // Mic is a microphone's channel and its angle.
@@ -272,6 +277,12 @@ var donutMics = MicArray{
 	},
 	Centre:  -1,
 	EchoRef: -1,
+	// The speaker sits under these mics: during a reply 41C8's raw capture
+	// peaked at -10dBFS, so at the default 6dB of headroom 1-2.5% of samples
+	// clipped and the canceller left the echo only 7.5dB down; at 12dB none
+	// clipped, it reached 14.5-19dB, and replayed barge-ins went from 1 to 8
+	// over the same two replies (2026-11-19).
+	AECHeadroomDb: 12,
 }
 
 // biscuitHardware: names read off VVV (FireOS 5.5.5.4) on 2026-10-04, numbers

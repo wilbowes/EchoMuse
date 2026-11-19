@@ -202,3 +202,28 @@ func TestAJumpPastTheLockedSearchIsLostThenFoundAgain(t *testing.T) {
 		t.Errorf("locked=%v moved %d, want 2304", r.a.Locked(), r.a.offset-before)
 	}
 }
+
+// 41C8 (2026-11-19): the echo trailed the reference by 151.6 ms, then one
+// 160 ms capture batch slipped between two replies and it trailed by 311.4
+// ms. The unlocked search reached only 250 ms, so it never locked again and
+// the whole reply went out uncancelled. A batch slip on top of the donut's
+// own delay must still be found.
+func TestABatchSlipOnTheDonutsDelayIsFoundAgain(t *testing.T) {
+	r := newRig(30, 888-2426) // echo 2426 samples (151.6 ms) behind
+	for i := 0; i < 40; i++ {
+		r.step(false)
+	}
+	if !r.a.Locked() {
+		t.Fatalf("no lock at the donut's own delay: searches=%d misses=%d", r.a.Searches, r.a.Misses)
+	}
+	before := r.a.offset
+	// One 160 ms chunk of loopback never reaches the ring while the room
+	// plays it: the reference count falls 2560 samples behind the echo.
+	r.refPos += 7680
+	for i := 0; i < 80; i++ {
+		r.step(false)
+	}
+	if !r.a.Locked() || r.a.offset-before != -2560 {
+		t.Errorf("locked=%v moved %d, want -2560: a delay of %.1f ms was never found", r.a.Locked(), r.a.offset-before, float64(2426+2560)/16)
+	}
+}

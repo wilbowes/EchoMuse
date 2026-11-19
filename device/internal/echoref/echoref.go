@@ -40,8 +40,11 @@ const (
 
 	// coarseMax / lockedMax bound the delay searched: a stream start can put
 	// the two counts anywhere within a chunk or two, a slip moves them by a
-	// period.
-	coarseMax = Rate / 4  // ±250 ms when not locked
+	// period. Unlocked it must cover a whole lost 160 ms capture batch on top
+	// of the donut's own ~150 ms: on 41C8 (2026-11-19) the echo went from
+	// 151.6 to 311.4 ms behind between two replies, past the old 250 ms, and
+	// the lock never came back.
+	coarseMax = Rate / 2  // ±500 ms when not locked
 	lockedMax = Rate / 25 // ±40 ms when locked
 
 	decim = 8 // coarse search at 2 kHz
