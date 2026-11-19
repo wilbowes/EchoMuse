@@ -228,6 +228,13 @@ type Canceller struct {
 // sets this.
 func (c *Canceller) SetRefClean(on bool) { c.refClean.Store(on) }
 
+// SetRefSide says which of the output's two channels the hardware reference
+// loops back, 0 left or 1 right (board.MicArray.EchoRefSide), so the
+// de-aliasing matches it against that side. The same on mono output; with a
+// plug in, Sendspin plays L != R (#273), and biscuit's ch8 is the right.
+// Call it before the speaker starts writing; any value but 1 is the left.
+func (c *Canceller) SetRefSide(side int) { c.dealias.setSide(side) }
+
 // SetHardwareRef selects the far-end source. True takes it from ch8 of the
 // mic capture; false uses the software tap at the speaker ALSA write.
 //

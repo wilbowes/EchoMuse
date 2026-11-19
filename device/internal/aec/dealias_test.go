@@ -19,6 +19,16 @@ func output(n int, from int, f func(i int) float64) []byte {
 	return b
 }
 
+// outputLR is output with a different signal on each side.
+func outputLR(n int, from int, l, r func(i int) float64) []byte {
+	b := make([]byte, n*4)
+	for i := 0; i < n; i++ {
+		binary.LittleEndian.PutUint16(b[i*4:], uint16(int16(l(from+i))))
+		binary.LittleEndian.PutUint16(b[i*4+2:], uint16(int16(r(from+i))))
+	}
+	return b
+}
+
 // loopback is ch8 as the hardware makes it: every third output sample from
 // output index p, no filter.
 func loopback(n int, p int, f func(i int) float64) []byte {
@@ -102,6 +112,82 @@ func TestDealiasFollowsAndRelocks(t *testing.T) {
 	if d.relocks != 1 || d.losses != 1 {
 		t.Errorf("relocks=%d losses=%d, want 1 and 1", d.relocks, d.losses)
 	}
+}
+
+// With a plug in, Sendspin plays L != R (#273), and biscuit's ch8 loops back
+// the RIGHT channel. Set to that side the ring matches it and the reference
+// is rebuilt; left on the left, nothing matches and ch8 passes as captured,
+// which is the fallback, not a wrong lock.
+func TestDealiasLocksOnTheLoopbacksSide(t *testing.T) {
+	left := func(i int) float64 { return 0.6 * twoTones(i+5000) }
+	for _, side := range []int{1, 0} {
+		d := newDealias()
+		d.setSide(side)
+		for k := 0; k < 12; k++ {
+			d.feed(outputLR(2048, k*2048, left, twoTones))
+		}
+		ref := loopback(2560, 4*2048+2, twoTones) // the right channel
+		got := d.clean(ref)
+		if side == 1 {
+			if !d.locked || bytes.Equal(got, ref) || level(got, 4000) > 80 {
+				t.Errorf("side 1: locked=%v, alias %.0f: not rebuilt from the right channel", d.locked, level(got, 4000))
+			}
+			if d.pos != 4*2048+2+3*2560 {
+				t.Errorf("side 1: locked at %d, want %d", d.pos-3*2560, 4*2048+2)
+			}
+		} else if d.locked || !bytes.Equal(got, ref) {
+			t.Errorf("side 0: locked=%v on a loopback of the other channel", d.locked)
+		}
+	}
+}
+
+// On the mono audio the speaker plays without a plug both sides are the
+// same samples, so the side changes nothing: the same lock, the same bytes.
+func TestDealiasSideIsIrrelevantOnDualMono(t *testing.T) {
+	var outs [2][][]byte
+	var pos [2]int64
+	for side := 0; side < 2; side++ {
+		d := newDealias()
+		d.setSide(side)
+		for k := 0; k < 20; k++ {
+			d.feed(output(2048, k*2048, twoTones))
+		}
+		p := 4*2048 + 1
+		for k := 0; k < 3; k++ {
+			outs[side] = append(outs[side], append([]byte(nil), d.clean(loopback(2560, p, twoTones))...))
+			p += 3 * 2560
+		}
+		pos[side] = d.pos
+		if !d.locked {
+			t.Fatalf("side %d: not locked", side)
+		}
+	}
+	if pos[0] != pos[1] {
+		t.Errorf("locked at %d on the left, %d on the right", pos[0], pos[1])
+	}
+	for k := range outs[0] {
+		if !bytes.Equal(outs[0][k], outs[1][k]) {
+			t.Errorf("batch %d: the rebuilt reference depends on the side", k)
+		}
+	}
+	// Out of range is the left, never an index past the frame.
+	d := newDealias()
+	d.setSide(7)
+	if d.side.Load() != 0 {
+		t.Errorf("side 7 stored as %d", d.side.Load())
+	}
+	var none *dealias
+	none.setSide(1)
+
+	// The Canceller passes the board's side through, and without a dealias
+	// (a cleaned reference) has nothing to set.
+	c := New(1)
+	c.SetRefSide(1)
+	if c.dealias.side.Load() != 1 {
+		t.Error("SetRefSide(1) did not reach the de-aliasing ring")
+	}
+	c.dealias = nil
+	c.SetRefSide(1)
 }
 
 // A ch8 that is not the output, and silence, pass through unchanged.

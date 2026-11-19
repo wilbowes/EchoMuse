@@ -157,6 +157,9 @@ func main() {
 	// applyAecConfig from env defaults below and on every config push.
 	mics := board.CurrentLayout().Mics
 	canceller := aec.NewFrame(mics.NumMics(), mics.AECFrame)
+	// Before the speaker exists: its write loop feeds the de-aliasing ring
+	// from the first period, on the side the loopback carries (#273).
+	canceller.SetRefSide(mics.EchoRefSide)
 
 	// The level tap drives the energy-reactive LED ring ("meter" pattern).
 	// The Server doesn't exist yet when the speaker starts its pump loop,

@@ -5,6 +5,7 @@ import (
 	"log"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,8 +34,14 @@ type dealias struct {
 	// mu guards the ring and head, which the speaker's write loop fills.
 	// Nothing slow happens under it: a search runs on a copy (#866).
 	mu   sync.Mutex
-	ring [dealiasRing]int16 // the output's left channel, 48kHz
+	ring [dealiasRing]int16 // the output's side channel (below), 48kHz
 	head int64              // samples ever written; ring index is head % dealiasRing
+
+	// side is the output channel the loopback carries, 0 left or 1 right
+	// (board.MicArray.EchoRefSide), the one the ring keeps. Equal on the
+	// mono audio the speaker plays without a plug; with a plug in, Sendspin
+	// plays L != R (#273) and only the loopback's own side matches.
+	side atomic.Int32
 
 	// The rest belongs to the mic goroutine (clean).
 	fir        [dealiasTaps]float64
@@ -99,12 +106,26 @@ func (d *dealias) feed(period []byte) {
 		return
 	}
 	n := len(period) / 4
+	off := 2 * int(d.side.Load())
 	d.mu.Lock()
 	for i := 0; i < n; i++ {
-		d.ring[(d.head+int64(i))%dealiasRing] = int16(binary.LittleEndian.Uint16(period[i*4:]))
+		d.ring[(d.head+int64(i))%dealiasRing] = int16(binary.LittleEndian.Uint16(period[i*4+off:]))
 	}
 	d.head += int64(n)
 	d.mu.Unlock()
+}
+
+// setSide picks the output channel the ring keeps: 1 is the right, anything
+// else the left, so a bad value can never index past the frame on the
+// speaker goroutine. Safe on nil.
+func (d *dealias) setSide(side int) {
+	if d == nil {
+		return
+	}
+	if side != 1 {
+		side = 0
+	}
+	d.side.Store(int32(side))
 }
 
 // window is the ring as of one moment: the live one under mu, or a copy.
