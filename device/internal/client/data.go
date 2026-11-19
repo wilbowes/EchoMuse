@@ -272,6 +272,8 @@ type DataClient struct {
 	// that wires ch8 differently, and cancelling the near-end against
 	// another mic is far worse than not cancelling at all. A board that
 	// fails either test simply keeps the software tap.
+	// headroom is the board's aecHeadroomFor, fixed at construction.
+	headroom float64
 	// makeupClipped counts samples clamped giving aecHeadroom back after
 	// the canceller; reported with the extraction's own clipping.
 	makeupClipped uint64
@@ -319,6 +321,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		spk:        spk,
 		readyCh:    make(chan string, 1),
 		beam:       beamformer.New(board.CurrentLayout().Mics),
+		headroom:   aecHeadroomFor(board.CurrentLayout().Mics),
 		proc:       processor.New(),
 		aec:        canceller,
 		listenGate: listen.New(0, 0, 0),
@@ -369,8 +372,26 @@ func (d *DataClient) SetAecRefSource(v string) {
 }
 
 // aecHeadroom is the gain (6dB) the mics are extracted without while the
-// canceller is armed, and applyMakeup gives back after it.
+// canceller is armed, and applyMakeup gives back after it, unless the board
+// states its own (board.MicArray.AECHeadroomDb).
 const aecHeadroom = 2.0
+
+// aecHeadroomGain is d.headroom, or the default for a client built without
+// NewDataClient (a zero would divide the extraction by nothing).
+func (d *DataClient) aecHeadroomGain() float64 {
+	if d.headroom <= 0 {
+		return aecHeadroom
+	}
+	return d.headroom
+}
+
+// aecHeadroomFor is the board's headroom as a linear gain.
+func aecHeadroomFor(a board.MicArray) float64 {
+	if a.AECHeadroomDb <= 0 {
+		return aecHeadroom
+	}
+	return math.Pow(10, a.AECHeadroomDb/20)
+}
 
 // applyMakeup scales S16LE mono in place by g, clamping, and returns how
 // many samples it clamped.
@@ -1347,7 +1368,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			aecArmed := d.aec.Enabled()
 			extractGain := gainLin
 			if aecArmed {
-				extractGain = gainLin / aecHeadroom
+				extractGain = gainLin / d.aecHeadroomGain()
 			}
 			mono, angle := d.beam.Process(raw, beamAngle, extractGain)
 
@@ -1391,7 +1412,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				mono = d.aec.Process(mono)
 			}
 			if aecArmed {
-				d.makeupClipped += applyMakeup(mono, aecHeadroom)
+				d.makeupClipped += applyMakeup(mono, d.aecHeadroomGain())
 			}
 			clipped := d.beam.ClippedSamples() + d.makeupClipped
 
