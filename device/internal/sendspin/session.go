@@ -530,7 +530,13 @@ func (s *session) onAudio(msg []byte) {
 	// it, then decodes by it, and the chunk carries what came out.
 	stereo := s.c.stereo.Load()
 	s.dec.setStereo(stereo)
-	pcm, ch, err := s.dec.decode(make([]int16, 0, 4096), payload, stereo)
+	// Room for what the chunk will decode to, so a stereo one does not
+	// regrow the slice: 4096 samples per channel.
+	capacity := 4096
+	if stereo && s.dec.f.Channels == 2 {
+		capacity = 2 * 4096
+	}
+	pcm, ch, err := s.dec.decode(make([]int16, 0, capacity), payload, stereo)
 	if err != nil {
 		log.Printf("[sendspin] decode: %v", err)
 		return

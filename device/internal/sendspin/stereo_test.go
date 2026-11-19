@@ -216,6 +216,25 @@ func TestResetClearsHistory(t *testing.T) {
 	}
 }
 
+// Only a stereo Opus stream can be swapped, so only it keeps a history: a
+// mono stream copies nothing per packet.
+func TestMonoOpusStreamKeepsNoHistory(t *testing.T) {
+	d, err := newDecoder(streamFormat{Codec: "opus", SampleRate: 48000, Channels: 1, BitDepth: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.close()
+	for _, p := range opusPackets(t)[:30] {
+		d.setStereo(true) // a no-op on a mono stream
+		if _, ch, err := d.decode(nil, p, true); err != nil || ch != 1 {
+			t.Fatalf("ch=%d err=%v", ch, err)
+		}
+	}
+	if d.histN != 0 {
+		t.Errorf("a mono stream kept %d packets of history", d.histN)
+	}
+}
+
 type flacFixture struct {
 	Header string
 	Chunks []struct{ Data string }

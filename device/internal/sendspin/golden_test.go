@@ -56,11 +56,20 @@ func goldenPush(p *player, ts int64, c goldenChunk) { p.push(ts, c.pcm, c.ch) }
 
 func goldenFill(p *player, out []byte, playAt time.Time) bool { return p.Fill(out, playAt, false) }
 
+// goldenReached is what the schedule made the player do, beyond its counts:
+// a correction with the period early is a repeat, one with it late a drop
+// (Fill's switch), told apart since playerStats counts both as Corrections.
+type goldenReached struct {
+	playerStats
+	repeats, drops int
+}
+
 // goldenPlay queues every payload, stamped back to back from 5s on the
 // server's clock, and pulls periods until the queue has run dry. It returns
-// the hash of every period and whether each played, and the player's counts,
-// so a caller can check the schedule reached what it is meant to.
-func goldenPlay(t *testing.T, f streamFormat, payloads [][]byte) (string, playerStats) {
+// the hash of every period and whether each played, and what the player
+// did, so a caller can check the schedule reached what it is meant to. The
+// observation reads the counts between periods and hashes nothing more.
+func goldenPlay(t *testing.T, f streamFormat, payloads [][]byte) (string, goldenReached) {
 	t.Helper()
 	d, err := newDecoder(f)
 	if err != nil {
@@ -80,6 +89,7 @@ func goldenPlay(t *testing.T, f streamFormat, payloads [][]byte) (string, player
 	out := make([]byte, periodFrames*4)
 	periodUs := int64(periodFrames) * 1_000_000 / outRate
 	playAt := ts
+	var reached goldenReached
 	for k := 0; k < 400; k++ {
 		us := playAt
 		switch k {
@@ -101,7 +111,15 @@ func goldenPlay(t *testing.T, f streamFormat, payloads [][]byte) (string, player
 		for i := range out {
 			out[i] = 0xAA // a stale byte left unwritten shows
 		}
+		before := p.stats()
 		played := goldenFill(p, out, at(us))
+		if after := p.stats(); after.Corrections > before.Corrections && after.Snaps == before.Snaps {
+			if after.LastErrorUs < 0 {
+				reached.repeats++
+			} else {
+				reached.drops++
+			}
+		}
 		if played {
 			h.Write([]byte{1})
 			h.Write(out)
@@ -113,14 +131,15 @@ func goldenPlay(t *testing.T, f streamFormat, payloads [][]byte) (string, player
 		}
 		playAt += periodUs
 	}
-	return hex.EncodeToString(h.Sum(nil)), p.stats()
+	reached.playerStats = p.stats()
+	return hex.EncodeToString(h.Sum(nil)), reached
 }
 
-func goldenOpus(t *testing.T) (string, playerStats) {
+func goldenOpus(t *testing.T) (string, goldenReached) {
 	return goldenPlay(t, streamFormat{Codec: "opus", SampleRate: 48000, Channels: 2, BitDepth: 16}, opusPackets(t))
 }
 
-func goldenFlac(t *testing.T) (string, playerStats) {
+func goldenFlac(t *testing.T) (string, goldenReached) {
 	raw, err := os.ReadFile("testdata/flac_chunks.json")
 	if err != nil {
 		t.Fatal(err)
@@ -183,22 +202,23 @@ func goldenHello(t *testing.T) string {
 
 func TestMonoPlaybackMatchesGolden(t *testing.T) {
 	var got goldenFile
-	var st playerStats
-	got.Opus, st = goldenOpus(t)
 	// The schedule must reach every path it is there for, or the hash pins
-	// less than it claims.
-	if st.Snaps < 2 || st.Corrections < 2 || st.Underruns < 1 {
-		t.Fatalf("opus: schedule reached snaps=%d corrections=%d underruns=%d", st.Snaps, st.Corrections, st.Underruns)
+	// less than it claims: both snaps, a repeat AND a drop, an underrun.
+	check := func(name string, r goldenReached) {
+		t.Helper()
+		if r.Snaps < 2 || r.repeats < 1 || r.drops < 1 || r.Underruns < 1 {
+			t.Fatalf("%s: schedule reached snaps=%d repeats=%d drops=%d underruns=%d",
+				name, r.Snaps, r.repeats, r.drops, r.Underruns)
+		}
 	}
-	got.Flac, st = goldenFlac(t)
-	if st.Snaps < 2 || st.Corrections < 2 || st.Underruns < 1 {
-		t.Fatalf("flac: schedule reached snaps=%d corrections=%d underruns=%d", st.Snaps, st.Corrections, st.Underruns)
-	}
+	var r goldenReached
+	got.Opus, r = goldenOpus(t)
+	check("opus", r)
+	got.Flac, r = goldenFlac(t)
+	check("flac", r)
 	f := streamFormat{Codec: "pcm", SampleRate: 48000, Channels: 2, BitDepth: 16}
-	got.PCMStereo, st = goldenPlay(t, f, goldenStereoPCM())
-	if st.Snaps < 2 || st.Corrections < 2 || st.Underruns < 1 {
-		t.Fatalf("pcm: schedule reached snaps=%d corrections=%d underruns=%d", st.Snaps, st.Corrections, st.Underruns)
-	}
+	got.PCMStereo, r = goldenPlay(t, f, goldenStereoPCM())
+	check("pcm", r)
 	got.Hello = goldenHello(t)
 
 	// What the hello declares, in the open, beside its hash.

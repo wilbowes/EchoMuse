@@ -207,7 +207,11 @@ func (d *decoder) decode(dst []int16, payload []byte, stereo bool) ([]int16, int
 		if err != nil {
 			return dst, d.ch, err
 		}
-		d.remember(payload)
+		if d.f.Channels == 2 {
+			// Only a stereo stream is ever swapped (setStereo), so only it
+			// needs the history.
+			d.remember(payload)
+		}
 		return append(dst, d.opus[:n*d.ch]...), d.ch, nil
 	}
 	if stereo && d.f.Channels == 2 {
