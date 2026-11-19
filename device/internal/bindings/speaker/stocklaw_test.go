@@ -27,7 +27,8 @@ func TestStockLawNeedsAVoicing(t *testing.T) {
 // for the jack (#273). On every board, whatever the controller pushes and
 // wherever the plug is, the two are never on together, and whenever stereo
 // is on the chain's own params (chainForJack) have stock sound off, so the
-// chain permits what the speaker asks for.
+// chain permits what the speaker asks for. Stereo is on exactly for a known
+// plug on a board whose jack takes it (board.Speaker.StereoJack).
 func TestStockAndStereoAreNeverBothOn(t *testing.T) {
 	var params []outchain.Params
 	for _, stockSound := range []bool{false, true} {
@@ -47,14 +48,15 @@ func TestStockAndStereoAreNeverBothOn(t *testing.T) {
 					for _, inserted := range []bool{false, true} {
 						plugged := known && inserted
 						stock := stockLawOn(v, active, p, plugged)
-						stereo := stereoOut(stock, known, inserted)
+						boardStereo := b.Hardware.Speaker.StereoJack
+						stereo := stereoOut(stock, plugged, boardStereo)
 						if stock && stereo {
 							t.Errorf("%s %+v active=%v known=%v inserted=%v: stock sound and stereo both on", b.ID, p, active, known, inserted)
 						}
 						if stereo && chainForJack(p, plugged).StockSound {
 							t.Errorf("%s %+v: stereo on while the chain is given stock sound", b.ID, p)
 						}
-						if stereo != plugged {
+						if stereo != (plugged && boardStereo) {
 							t.Errorf("%s %+v active=%v known=%v inserted=%v: stereo %v", b.ID, p, active, known, inserted, stereo)
 						}
 					}

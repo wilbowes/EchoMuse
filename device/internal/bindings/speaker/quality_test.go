@@ -300,7 +300,7 @@ func qRenderStereo(sp board.Speaker, plugged bool, level int, xl, xr []float64) 
 	c.SetActive(true)
 	c.SetVolume(level)
 	c.SetParams(chainForJack(params, plugged))
-	c.SetStereo(stereoOut(stock, true, plugged))
+	c.SetStereo(stereoOut(stock, plugged, sp.StereoJack))
 
 	var vol softVolume
 	if stock {
@@ -335,11 +335,12 @@ func qRenderStereo(sp board.Speaker, plugged bool, level int, xl, xr []float64) 
 	return yl, yr
 }
 
-// Stereo over the jack (#273), on every board: with a plug in, 1kHz on the
-// left and 300Hz on the right come out each on its own side, the other's
-// tone more than 80dB down; without one, the same input comes out L == R in
-// every sample, since the internal speaker plays the right channel alone.
-// Its own test, so the mono ratchet's baseline is untouched.
+// Stereo over the jack (#273): on a board whose jack takes it, with a plug
+// in, 1kHz on the left and 300Hz on the right come out each on its own side,
+// the other's tone more than 80dB down; without a plug, or on a board whose
+// jack is unchecked, the same input comes out L == R in every sample, since
+// the internal speaker plays the right channel alone. Its own test, so the
+// mono ratchet's baseline is untouched.
 func TestOutputStereoJack(t *testing.T) {
 	n := int(qSeconds * qFs)
 	xl, xr := make([]float64, n), make([]float64, n)
@@ -351,12 +352,20 @@ func TestOutputStereoJack(t *testing.T) {
 	for _, b := range board.Known {
 		for _, lvl := range []int{qRefLvl, 127} {
 			yl, yr := qRenderStereo(b.Hardware.Speaker, true, lvl, xl, xr)
-			pl, pr := qSpectrum(yl), qSpectrum(yr)
-			if d := qToneDb(pr, 1000) - qToneDb(pl, 1000); d > -80 {
-				t.Errorf("%s/jack level %d: the left's 1kHz in the right at %.1fdB", b.ID, lvl, d)
-			}
-			if d := qToneDb(pl, 300) - qToneDb(pr, 300); d > -80 {
-				t.Errorf("%s/jack level %d: the right's 300Hz in the left at %.1fdB", b.ID, lvl, d)
+			if b.Hardware.Speaker.StereoJack {
+				pl, pr := qSpectrum(yl), qSpectrum(yr)
+				if d := qToneDb(pr, 1000) - qToneDb(pl, 1000); d > -80 {
+					t.Errorf("%s/jack level %d: the left's 1kHz in the right at %.1fdB", b.ID, lvl, d)
+				}
+				if d := qToneDb(pl, 300) - qToneDb(pr, 300); d > -80 {
+					t.Errorf("%s/jack level %d: the right's 300Hz in the left at %.1fdB", b.ID, lvl, d)
+				}
+			} else {
+				for i := range yl {
+					if yl[i] != yr[i] {
+						t.Fatalf("%s/jack level %d: sample %d L=%v R=%v on a board whose jack is unchecked", b.ID, lvl, i, yl[i], yr[i])
+					}
+				}
 			}
 
 			yl, yr = qRenderStereo(b.Hardware.Speaker, false, lvl, xl, xr)

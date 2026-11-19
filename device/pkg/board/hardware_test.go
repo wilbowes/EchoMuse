@@ -481,6 +481,22 @@ func TestBiscuitsLoopbackIsTheRightChannel(t *testing.T) {
 	}
 }
 
+// Stereo over the jack (#273) is for a board whose plug is known to silence
+// its speaker and whose jack carries L and R apart: biscuit alone so far.
+// Radar's and donut's jacks are unchecked (docs/history/device.md,
+// 2026-11-19), and a board added later starts at false.
+func TestStereoJackIsBiscuitsAlone(t *testing.T) {
+	for _, b := range Known {
+		want := b.ID == "biscuit"
+		if got := b.Hardware.Speaker.StereoJack; got != want {
+			t.Errorf("%s: StereoJack %v, want %v", b.ID, got, want)
+		}
+		if b.Hardware.Speaker.StereoJack && len(b.Hardware.Speaker.Jack.Insert) == 0 {
+			t.Errorf("%s: stereo over a jack with no Insert set to silence the speaker", b.ID)
+		}
+	}
+}
+
 func checkTable(t *testing.T, table []Ctl, want map[string]bool, value string) {
 	t.Helper()
 	got := map[string]bool{}
