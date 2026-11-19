@@ -1241,6 +1241,17 @@ a stock FireOS 5.5.5.4 Dot and ours: writing ctl 62 with music playing took the
 jack from inaudible to audible, while the `ref` loopback tap stayed flat —
 confirming it is a post-DAC analog stage and not something upstream.
 
+**2026-11-19, correction: the jack does NOT physically cut the speaker.**
+The 2026-09-03 boot measurement below (`h2w=1`, `Ext_Speaker_Amp_Switch=On`)
+had the Dot playing to the room with a cable in, so `Ext_Speaker_Amp_Switch`
+decides whether the speaker plays and accdet turns it off on insert; the
+observation above is accdet and Android's `AudioOut_2` acting under the mixer
+readings. What is shared is the DAC: speaker and jack carry the same signal,
+the speaker the right channel only. So voice on the speaker with music on the
+jack is possible only as voice on R and music on L, which puts voice on the
+jack too; Wil judged that a workaround, and #409 and #1222 were closed as not
+planned. Not measured as a split; radar and donut jacks unchecked.
+
 **`Audio_DacMux_Setting` is the jack's second missing piece (#700, found by
 @Kozikodi).** emOS left it Off and stock runs it On; with it Off the jack sat
 20-30dB under stock's level on FireOS 5, and on FireOS 6 only one channel
