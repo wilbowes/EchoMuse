@@ -186,14 +186,13 @@ func (l *limiter) stepStereo(xl, xr float64) (float64, float64) {
 		}
 	}
 
-	// #275's counts, per sample: a frame clipped on both sides counts twice.
-	for _, out := range [2]float64{outL, outR} {
-		if math.Abs(out) > ceiling {
-			if l.enabled {
-				l.clipped++
-			} else {
-				l.clippedBypassed++
-			}
+	// #275's counts, per FRAME: one clipped on either side counts once, so
+	// dual-mono audio counts what the mono path counts.
+	if math.Abs(outL) > ceiling || math.Abs(outR) > ceiling {
+		if l.enabled {
+			l.clipped++
+		} else {
+			l.clippedBypassed++
 		}
 	}
 	return outL, outR

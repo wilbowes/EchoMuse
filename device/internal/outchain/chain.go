@@ -448,7 +448,14 @@ func (c *Chain) beginProcess(stereoCapable bool) (applied *Params, active bool) 
 // engage starts per-channel processing, the right channel's state from the
 // left's: on the dual-mono audio until now the two would have been equal.
 func (c *Chain) engage() {
-	c.eqR = c.eq.clone()
+	// Into eqR's own sections, which apply() keeps designed alongside eq's:
+	// nothing is allocated on the ALSA goroutine. clone only if the two
+	// ever disagree in shape.
+	if len(c.eqR.sections) == len(c.eq.sections) {
+		copy(c.eqR.sections, c.eq.sections)
+	} else {
+		c.eqR = c.eq.clone()
+	}
 	c.guard.split()
 	c.lim.split()
 	c.stereo = true

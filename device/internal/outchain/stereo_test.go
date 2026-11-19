@@ -325,6 +325,50 @@ func TestPermissionDropMergesWithoutAStep(t *testing.T) {
 	}
 }
 
+// The clip counts (#275) are per frame on the per-channel path, so on
+// dual-mono audio a stereo chain reports what the mono path reports, with
+// the limiter bypassed (the backstop doing its job on a boosted EQ) and on.
+func TestStereoClipCountsMatchTheMonoPathOnDualMono(t *testing.T) {
+	for _, limiting := range []bool{false, true} {
+		p := DefaultParams()
+		p.Bands = [NumBands]float64{12, 12, 12, 12, 12, 12, 12, 12}
+		p.LimiterEnabled = limiting
+		mono, st := stereoChain(p), stereoChain(p)
+		mono.SetStereo(false)
+		mono.Process(make([]byte, 2048*4))
+		st.Process(make([]byte, 2048*4))
+		st.engage()
+		loud := tone(30000, 1000)
+		for k := 1; k < 5; k++ {
+			mono.Process(interleave(2048, k*2048, loud, loud))
+			st.Process(interleave(2048, k*2048, loud, loud))
+		}
+		if !st.stereo {
+			t.Fatal("not on the per-channel path")
+		}
+		ms, ss := mono.TakeStats(), st.TakeStats()
+		if !limiting && ms.ClippedBypassed == 0 {
+			t.Fatal("bypassed: nothing clipped, so the test proves nothing")
+		}
+		if ms != ss {
+			t.Errorf("limiting=%v: mono %+v, stereo %+v", limiting, ms, ss)
+		}
+	}
+}
+
+// Going per channel allocates nothing on the ALSA goroutine: the right EQ's
+// sections are already there, designed with the left's.
+func TestEngageDoesNotAllocate(t *testing.T) {
+	c := shaped()
+	c.Process(make([]byte, 2048*4))
+	if allocs := testing.AllocsPerRun(20, func() {
+		c.engage()
+		c.merge()
+	}); allocs != 0 {
+		t.Errorf("%.0f allocations per engage", allocs)
+	}
+}
+
 // ProcessFloat at unity is Process in float: per channel too.
 func TestProcessFloatStereoMatchesProcessAtUnity(t *testing.T) {
 	a, b := shaped(), shaped()
