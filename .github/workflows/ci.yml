@@ -122,6 +122,7 @@ jobs:
           node controller/tests/wizard_log_class.test.mjs
           node controller/tests/wizard_step_failure.test.mjs
           node controller/tests/web_usb_blocked.test.mjs
+          node controller/tests/adb_auth.test.mjs
           node controller/tests/emos_md5.test.mjs
           node controller/tests/boot_image_length.test.mjs
           node controller/tests/send_in_chunks.test.mjs
