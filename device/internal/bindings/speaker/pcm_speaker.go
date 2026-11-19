@@ -199,11 +199,13 @@ type PcmSpeaker struct {
 // the source smooths it), reporting false when it has nothing due. uncertain
 // is how far playAt may be off from the measurement itself — half the time
 // the status read took — so a source can decline to learn from a reading
-// the scheduler interrupted. Active says whether it has anything queued at
-// all, so an idle source costs no status read.
+// the scheduler interrupted. stereo says whether the period may carry
+// L != R; false, the source writes L == R in every frame, since the internal
+// speaker plays the right channel alone (#273). Active says whether it has
+// anything queued at all, so an idle source costs no status read.
 type MusicSource interface {
 	Active() bool
-	Fill(out []byte, playAt time.Time, uncertain time.Duration) bool
+	Fill(out []byte, playAt time.Time, uncertain time.Duration, stereo bool) bool
 }
 
 type sourceBox struct{ s MusicSource }
@@ -245,7 +247,7 @@ func (p *PcmSpeaker) pullSource() []byte {
 	}
 	playAt := now.Add(time.Duration(d) * time.Second / 48000)
 	p.dacStep.note(playAt, read, string(b), time.Duration(len(p.srcBuf)/4)*time.Second/48000)
-	if !box.s.Fill(p.srcBuf, playAt, read/2) {
+	if !box.s.Fill(p.srcBuf, playAt, read/2, false) {
 		return nil
 	}
 	p.srcLastNs.Store(now.UnixNano())

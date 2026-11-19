@@ -40,20 +40,21 @@ type goldenFile struct {
 type goldenChunk struct {
 	pcm    []int16
 	frames int
+	ch     int
 }
 
 func goldenDecode(t *testing.T, d *decoder, payload []byte) goldenChunk {
 	t.Helper()
-	pcm, err := d.decode(nil, payload)
+	pcm, ch, err := d.decode(nil, payload, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return goldenChunk{pcm: pcm, frames: len(pcm)}
+	return goldenChunk{pcm: pcm, frames: len(pcm) / ch, ch: ch}
 }
 
-func goldenPush(p *player, ts int64, c goldenChunk) { p.push(ts, c.pcm) }
+func goldenPush(p *player, ts int64, c goldenChunk) { p.push(ts, c.pcm, c.ch) }
 
-func goldenFill(p *player, out []byte, playAt time.Time) bool { return p.Fill(out, playAt) }
+func goldenFill(p *player, out []byte, playAt time.Time) bool { return p.Fill(out, playAt, false) }
 
 // goldenPlay queues every payload, stamped back to back from 5s on the
 // server's clock, and pulls periods until the queue has run dry. It returns

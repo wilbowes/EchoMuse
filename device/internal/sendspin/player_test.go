@@ -34,7 +34,7 @@ func newTestPlayer(offset int64) *player {
 	p := newPlayer(syncedFilter(offset))
 	// 10s of audio in 25ms chunks, first sample due at server 5s.
 	for c := 0; c < 400; c++ {
-		p.push(5_000_000+int64(c)*25_000, ramp(c*1200, 1200))
+		p.push(5_000_000+int64(c)*25_000, ramp(c*1200, 1200), 1)
 	}
 	return p
 }
@@ -53,7 +53,7 @@ func TestFirstPeriodLandsOnTheSampleDueAtThatInstant(t *testing.T) {
 		{"5ms early: 240 frames of silence", 5_000_000 - off - 5_000, 0, 240},
 	} {
 		p := newTestPlayer(off)
-		if !p.Fill(out, at(tc.playAtUs)) {
+		if !p.Fill(out, at(tc.playAtUs), false) {
 			t.Fatalf("%s: nothing played", tc.name)
 		}
 		for i := 0; i < tc.lead; i++ {
@@ -69,7 +69,7 @@ func TestFirstPeriodLandsOnTheSampleDueAtThatInstant(t *testing.T) {
 
 func TestNotYetDueIsNothingToPlay(t *testing.T) {
 	p := newTestPlayer(0)
-	if p.Fill(make([]byte, periodFrames*4), at(5_000_000-200_000)) {
+	if p.Fill(make([]byte, periodFrames*4), at(5_000_000-200_000), false) {
 		t.Error("played a stream 200ms before its first sample was due")
 	}
 }
@@ -86,7 +86,7 @@ func TestDriftIsCorrectedWithSmallStepsWithinOneMillisecond(t *testing.T) {
 		playAt := 5_000_000.0
 		var prevOut int16 = -1
 		for k := 0; k < 180; k++ { // ~7.7s
-			if !p.Fill(out, at(int64(playAt))) {
+			if !p.Fill(out, at(int64(playAt)), false) {
 				t.Fatalf("ppm %v period %d: ran dry", ppm, k)
 			}
 			// Continuity: consecutive periods join with at most a step.
@@ -118,9 +118,9 @@ func TestDriftIsCorrectedWithSmallStepsWithinOneMillisecond(t *testing.T) {
 func TestALargeErrorSnaps(t *testing.T) {
 	p := newTestPlayer(0)
 	out := make([]byte, periodFrames*4)
-	p.Fill(out, at(5_000_000))
+	p.Fill(out, at(5_000_000), false)
 	next := int64(5_000_000) + int64(periodFrames)*1_000_000/48000 + 20_000 // 20ms jump
-	p.Fill(out, at(next))
+	p.Fill(out, at(next), false)
 	if st := p.stats(); st.Snaps != 2 {
 		t.Errorf("snaps %d, want 2", st.Snaps)
 	}
@@ -132,9 +132,9 @@ func TestALargeErrorSnaps(t *testing.T) {
 
 func TestRunningDryMidPeriodPadsWithSilenceAndCountsAnUnderrun(t *testing.T) {
 	p := newPlayer(syncedFilter(0))
-	p.push(5_000_000, ramp(0, 1000))
+	p.push(5_000_000, ramp(0, 1000), 1)
 	out := make([]byte, periodFrames*4)
-	if !p.Fill(out, at(5_000_000)) {
+	if !p.Fill(out, at(5_000_000), false) {
 		t.Fatal("nothing played")
 	}
 	if sample(out, 999) != 999 || sample(out, 1000) != 0 || sample(out, periodFrames-1) != 0 {
@@ -143,7 +143,7 @@ func TestRunningDryMidPeriodPadsWithSilenceAndCountsAnUnderrun(t *testing.T) {
 	if p.stats().Underruns != 1 {
 		t.Errorf("underruns %d", p.stats().Underruns)
 	}
-	if p.Fill(out, at(5_100_000)) {
+	if p.Fill(out, at(5_100_000), false) {
 		t.Error("an empty queue played")
 	}
 }
@@ -158,8 +158,8 @@ func TestClearDropsEverything(t *testing.T) {
 
 func TestUnsynchronisedClockPlaysNothing(t *testing.T) {
 	p := newPlayer(newTimeFilter())
-	p.push(5_000_000, ramp(0, 48000))
-	if p.Fill(make([]byte, periodFrames*4), at(5_000_000)) {
+	p.push(5_000_000, ramp(0, 48000), 1)
+	if p.Fill(make([]byte, periodFrames*4), at(5_000_000), false) {
 		t.Error("played before the clock was synchronised")
 	}
 }
@@ -178,10 +178,10 @@ func TestVolumeFollowsThePerceptualCurve(t *testing.T) {
 	for i := range full {
 		full[i] = 20000
 	}
-	p.push(5_000_000, full)
+	p.push(5_000_000, full, 1)
 	p.setGain(50, false)
 	out := make([]byte, periodFrames*4)
-	p.Fill(out, at(5_000_000))
+	p.Fill(out, at(5_000_000), false)
 	if sample(out, 0) != 20000 {
 		t.Errorf("ramp did not start from the old gain: %d", sample(out, 0))
 	}
