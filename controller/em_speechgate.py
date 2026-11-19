@@ -17,12 +17,22 @@ costs ~0.4ms per 80ms frame. The model ships inside openwakeword, which the
 controller already carries, so nothing new is distributed.
 
 The gate HOLDS audio rather than dropping it. Once a frame scores at the
-threshold, everything held is released in order ahead of it, so HA receives
-exactly the stream it would have received ungated, only later. That matters:
+threshold, the held audio is released in order ahead of it. That matters:
 HA's microVAD spends its first 760ms returning a -1 sentinel, and trimming
 the lead-in to a short preroll would eat the start of short commands ("stop")
 — the failure `ha_vad_stalled_verdict` exists for. If the gate never opens,
 nothing is sent and the turn ends on the ordinary no-speech timeout.
+
+But only the last RELEASE_LEAD_S of it. Released whole, a late opening hands
+HA everything at once: whatever loud non-speech led the turn (a barge's reply
+tail and wake word tail), then the pause before the command. HA's segmenter
+reads that as a command followed by silence and ends the turn before the
+real command, so STT transcribes the residue. C95 2026-11-19: barge, 1.5s
+pause, gate opened at +1840ms, HA ended 67ms later on "Yeah."; HA 2026.11.2's
+vad.py with pymicro-vad 1.0.1 over the saved turn ends it at 1.89s, and
+with only the last 1.0-1.2s released it is still listening. A gate that
+opens within RELEASE_LEAD_S of the start (a command run on from the wake
+word) still sends everything.
 
 Lives on the controller, not the device, so it covers both listening modes,
 every trigger (wake, button, follow-up) and any board built against the wire
@@ -52,6 +62,11 @@ THRESHOLD = 0.5
 # with no speech, so this is only reached if that stops being true; keeping
 # the newest audio is right then, since speech onset is at the end.
 MAX_HOLD_S = 8.0
+# How much held audio goes out ahead of the opening frame. Above HA's 760ms
+# microVAD warm-up plus its 0.3s speech_seconds, so a short command's onset
+# that Silero scored under the bar still reaches HA after the warm-up. Older
+# held audio scored as non-speech for over a second; it is residue or pause.
+RELEASE_LEAD_S = 1.2
 FRAME_S = 0.08
 
 # 640 samples (40ms) per model call, two per 80ms frame. The frame's
@@ -61,11 +76,15 @@ CHUNK = 640
 
 
 class SpeechGate:
-    """Holds a turn's frames until one scores as speech, then passes all."""
+    """Holds a turn's frames until one scores as speech, then passes the
+    last RELEASE_LEAD_S of them and everything after."""
 
-    def __init__(self, threshold: float = THRESHOLD, max_hold_s: float = MAX_HOLD_S):
+    def __init__(self, threshold: float = THRESHOLD, max_hold_s: float = MAX_HOLD_S,
+                 release_lead_s: float = RELEASE_LEAD_S):
         self.threshold = threshold
         self._held: deque[bytes] = deque(maxlen=max(1, int(max_hold_s / FRAME_S)))
+        self._lead = max(0, round(release_lead_s / FRAME_S))
+        self.trimmed = 0         # held frames not released when it opened
         self.open = False
         self.peak = 0.0          # highest probability seen while held
         self.frames_seen = 0
@@ -87,13 +106,17 @@ class SpeechGate:
         self.opened_at = self.frames_seen - 1
         out = list(self._held)
         self._held.clear()
-        return out
+        keep = self._lead + 1            # the lead plus the opening frame
+        self.trimmed = max(0, len(out) - keep)
+        return out[self.trimmed:]
 
     def summary(self) -> str:
         """One clause for the turn log: what the gate did."""
         if self.open:
+            trimmed = (f", first {self.trimmed * FRAME_S * 1000:.0f}ms not sent"
+                       if self.trimmed else "")
             return (f"opened at frame {self.opened_at} "
-                    f"(+{self.opened_at * FRAME_S * 1000:.0f}ms)")
+                    f"(+{self.opened_at * FRAME_S * 1000:.0f}ms){trimmed}")
         return (f"never opened: {self.frames_seen} frames held, "
                 f"peak {self.peak:.2f} < {self.threshold:.2f}, nothing sent to HA")
 
