@@ -571,6 +571,31 @@ above the rest). Its TDM is 4ch S32_LE at 16kHz on two tlv320aic3101, and:
   has to run from the capture loop. `tools/echoref_replay` caught every jump
   the offline analysis found on four raw captures.
 
+- **2026-11-19, barge-in over a reply almost never fired on 41C8 (C95
+  fine): the reference, not the acoustics.** Three faults, all in how the
+  loopback reaches the canceller. (1) A locked `Take` that came back nil
+  (late) dropped the canceller to the software tap and back, rebuilding it
+  from the saved path each time: 86-380 flaps an hour at idle, so every reply
+  started at ~4 dB and took ~10 s to reach 25. Now silence for that batch
+  (`fillRefGap`) and a `[echoref]` line when the counters move. (2) The
+  aligner flipped ±21-25 samples between two peaks of the echo's own
+  correlation (0.85/1.00, ringing near 650 Hz); the talker's voice tipped it,
+  so it moved exactly on the wake words (cap1: 68.2, 71.5, 77.1, 79.4 s,
+  `tools/echoref_replay`) and mis-registered a converged filter. Real slips
+  are whole 16 ms periods (256 samples), so a locked move under 128 is the
+  echo, not a slip (benched separately). (3) Sub-period steps are real too
+  (−4.1 samples at 55.8 s: 1-2 kHz cancellation 15 → −4 dB); a 10 ms speex
+  frame inside the 80 ms block recovers in ~3 s against 6-12 s, at ~1.9x
+  CPU. Offline over two captures, device-like 0-1 barges, all three fixed ~5.
+  **Ruled out, measured:** voicing (residual ≈ linear in level), mic clipping
+  (0.1-0.2%), the wake scorer (offline chain = device scores on the device's
+  own scorer input), frame drops (0), the mixer (ADC_A/B PGA 40, digital 88,
+  unmuted, no AGC; the ADC_C/D write failures are the 8-mic table on a 4-mic
+  board), a delay-and-sum beam (mics within ±1 sample). The donut has less
+  margin than the biscuit to begin with: echo over a clean wake in the
+  scorer band 26-29 dB on ch1 against C95's 18-25. Data and scripts:
+  `/root/em-diag/donut-barge-2026-11-19` (local).
+
 - **`MicMutes`** are the board's ADC mutes; the donut has only ADC_A and ADC_B
   fitted.
 
