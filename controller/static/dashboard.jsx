@@ -3048,6 +3048,8 @@ function Card({ device, onClick }) {
 //   client.push(path, Uint8Array, onProgress?)
 //   client.pull(path)   -> Uint8Array
 //   client.close()
+const ADB_AUTH_TIMEOUT_MS = 20000;
+
 const _ADB = (() => {
   // Module cache — loaded once on first requestDevice() call.
   let _mods = null;
@@ -3055,15 +3057,24 @@ const _ADB = (() => {
   async function _load(logFn) {
     if (_mods) return _mods;
     logFn('Loading ADB library from esm.sh…');
-    const [webUsbMod, adbMod] = await Promise.all([
+    // Every module pins @yume-chan/adb to 2.1.0: credential-web declares
+    // ^2.1.0, and an unpinned bundle pulls 2.6.x beside ours (#1206, where a
+    // mixed copy broke the RSA key path).
+    const [webUsbMod, adbMod, credMod] = await Promise.all([
       import('https://esm.sh/@yume-chan/adb-daemon-webusb@2.1.0?bundle&deps=@yume-chan/adb@2.1.0'),
       import('https://esm.sh/@yume-chan/adb@2.1.0?bundle'),
+      import('https://esm.sh/@yume-chan/adb-credential-web@2.1.0?bundle&deps=@yume-chan/adb@2.1.0'),
     ]);
     _mods = {
       manager:       webUsbMod.AdbDaemonWebUsbDeviceManager,
       Transport:     adbMod.AdbDaemonTransport,
       Adb:           adbMod.Adb,
       defaultAuths:  adbMod.ADB_DEFAULT_AUTHENTICATORS,
+      // The browser's ADB key, kept in IndexedDB so it is the same key on
+      // every visit. adb 2.1.0 requires a store: without one, any adbd that
+      // asks for a key (FireOS with ro.adb.secure=1) crashed the step on
+      // credentialStore.iterateKeys(). TWRP never asks, which hid it.
+      credentialStore: new credMod.default('EchoMuse'),
     };
     logFn('ADB library loaded.');
     return _mods;
@@ -3168,7 +3179,7 @@ const _ADB = (() => {
       const blocked = webUsbBlocked();
       if (blocked) throw new Error(`${blocked.why} ${blocked.fix}`);
 
-      const { manager, Transport, Adb, defaultAuths } = await _load(logFn);
+      const { manager, Transport, Adb, defaultAuths, credentialStore } = await _load(logFn);
 
       // Release any previous connection — calling connect() on an already-claimed
       // interface hangs indefinitely. This happens on retry after a reboot.
@@ -3187,11 +3198,25 @@ const _ADB = (() => {
       const connection = await usbDevice.connect();
 
       logFn('Authenticating ADB…');
-      const transport = await Transport.authenticate({
-        serial:         usbDevice.serial ?? 'echomuse',
-        connection,
-        authenticators: defaultAuths,
-      });
+      // An adbd that does not know this browser's key waits forever: the Echo
+      // has no screen to accept it. firebreak (since 2026-11-11) locks rooted
+      // FireOS to the key of the computer that unlocked it, so this is the
+      // normal case on Android. TWRP accepts any key, and the emOS flow needs
+      // nothing else.
+      let authTimer;
+      const transport = await Promise.race([
+        Transport.authenticate({
+          serial:         usbDevice.serial ?? 'echomuse',
+          connection,
+          credentialStore,
+          authenticators: defaultAuths,
+        }),
+        new Promise((_, reject) => {
+          authTimer = setTimeout(() => reject(new Error(
+            'The Echo did not accept this browser’s ADB key. Start it in TWRP (`firebreak twrp`) and connect again.'
+          )), ADB_AUTH_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(authTimer));
       logFn('ADB authenticated.');
 
       const adb = new Adb(transport);
