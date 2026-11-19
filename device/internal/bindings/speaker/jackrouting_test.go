@@ -131,3 +131,19 @@ func TestChainForJackDoesNotModifyTheStoredParams(t *testing.T) {
 		t.Errorf("stored params were modified")
 	}
 }
+
+// L != R only with a plug KNOWN to be in and no stock-sound law (#273): the
+// internal speaker plays the right channel alone, and before jack.Watch has
+// dispatched nobody knows where the plug is.
+func TestStereoNeedsAKnownPlug(t *testing.T) {
+	for _, stock := range []bool{false, true} {
+		for _, known := range []bool{false, true} {
+			for _, inserted := range []bool{false, true} {
+				want := known && inserted && !stock
+				if got := stereoOut(stock, known, inserted); got != want {
+					t.Errorf("stock=%v known=%v inserted=%v: stereo %v, want %v", stock, known, inserted, got, want)
+				}
+			}
+		}
+	}
+}

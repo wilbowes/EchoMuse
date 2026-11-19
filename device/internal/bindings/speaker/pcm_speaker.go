@@ -96,6 +96,14 @@ type PcmSpeaker struct {
 	jackInserted bool
 	jackKnown    bool
 	chainParams  outchain.Params
+
+	// plugged is jackKnown && jackInserted for the write loop, which takes
+	// no lock (#273): true only once SetJackRouting(true) has finished its
+	// writes, false before SetJackRouting(false) starts its own. It is what
+	// lets a period carry L != R (stereoOut), so it is never true while the
+	// internal speaker may still be playing.
+	plugged atomic.Bool
+
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
@@ -229,7 +237,10 @@ func (p *PcmSpeaker) SetMusicSource(s MusicSource) {
 // pause between the two (scheduler, GC) a late measurement: +4–10ms
 // readings every minute on C95, 2026-10-01 (#707). The bracket's width says
 // how much to trust the reading, and the source is told.
-func (p *PcmSpeaker) pullSource() []byte {
+//
+// stereo is the period's stereoOut, passed on: false, the source writes
+// L == R (#273).
+func (p *PcmSpeaker) pullSource(stereo bool) []byte {
 	box := p.src.Load()
 	if box == nil || !box.s.Active() {
 		return nil
@@ -247,7 +258,7 @@ func (p *PcmSpeaker) pullSource() []byte {
 	}
 	playAt := now.Add(time.Duration(d) * time.Second / 48000)
 	p.dacStep.note(playAt, read, string(b), time.Duration(len(p.srcBuf)/4)*time.Second/48000)
-	if !box.s.Fill(p.srcBuf, playAt, read/2, false) {
+	if !box.s.Fill(p.srcBuf, playAt, read/2, stereo) {
 		return nil
 	}
 	p.srcLastNs.Store(now.UnixNano())
@@ -466,7 +477,21 @@ func waitForFreePcm(card, device int, timeout time.Duration) {
 //     ON, so a device booted with a cable in played out its internal speaker
 //     until someone unplugged and replugged — which is exactly why replugging
 //     was the folk remedy. It manufactures the edge the boot never had.
+//
+// Stereo (#273) follows `plugged`, ordered so L != R is never written while
+// the internal speaker (right channel only) may be on: on REMOVAL it is
+// cleared first, before anything else, so the next period the write loop
+// builds is mono; on INSERT it is set last, after the chain and stock law
+// have been re-derived and the writes (internal amp off) have been made.
+// What removal cannot reach is the ALSA ring: up to alsaBufferFrames
+// (~171ms) plus the period being built, ~0.2s, already written as stereo,
+// play out of the internal speaker as its right channel. Accepted (#273):
+// holding the mixer writes back until the ring drains would leave the jack
+// routed after the plug has gone, and the speaker off for as long.
 func (p *PcmSpeaker) SetJackRouting(inserted bool) {
+	if !inserted {
+		p.plugged.Store(false)
+	}
 	p.jackMu.Lock()
 	p.jackInserted = inserted
 	p.jackKnown = true
@@ -481,6 +506,17 @@ func (p *PcmSpeaker) SetJackRouting(inserted bool) {
 	if guardBypassed {
 		log.Printf("[speaker] output chain: bass guard bypassed while the jack is in use")
 	}
+	if inserted && !p.plugged.Swap(true) {
+		log.Printf("[speaker] stereo permitted: a plug is in the jack")
+	}
+}
+
+// StereoOut reports whether the write loop may currently play L != R
+// (stereoOut, #273): a plug known to be in and no stock-sound law. For the
+// Sendspin decode hint; the write loop reads its own answer every period.
+func (p *PcmSpeaker) StereoOut() bool {
+	pl := p.plugged.Load()
+	return stereoOut(p.stock.Load(), pl, pl)
 }
 
 func (p *PcmSpeaker) applyJackWrites(ws []mixerWrite) {
@@ -577,6 +613,15 @@ func (p *PcmSpeaker) silenceLoop() {
 		default:
 		}
 
+		// One answer per period on whether it may carry L != R (#273),
+		// given to the music source and the chain alike; stock is read
+		// once with it and also picks the branch below. plugged implies a
+		// known plug position: only SetJackRouting sets it.
+		stock := p.stock.Load()
+		pl := p.plugged.Load()
+		stereo := stereoOut(stock, pl, pl)
+		p.chain.SetStereo(stereo)
+
 		var voice, music []byte
 		if p.voice.ready(primePeriods) {
 			voice = p.voice.take()
@@ -589,7 +634,7 @@ func (p *PcmSpeaker) silenceLoop() {
 			p.report(p.music.drained(), "music")
 		}
 		if music == nil && !p.music.playing && !p.music.isActive() {
-			music = p.pullSource()
+			music = p.pullSource(stereo)
 		}
 
 		var response responsePeriod
@@ -620,7 +665,7 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 
 		var out []byte
-		if p.stock.Load() {
+		if stock {
 			tgt := p.vol.targetGain()
 			if hasResponse {
 				tgt = response.volumeTarget

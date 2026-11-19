@@ -290,6 +290,85 @@ func qMeasure(t *testing.T, sp board.Speaker, plugged bool) qPath {
 	return r
 }
 
+// qRenderStereo is qRender for a different signal on each side, the chain
+// told what the write loop would tell it (stereoOut) for the plug position.
+// It returns the two output channels at S16 scale.
+func qRenderStereo(sp board.Speaker, plugged bool, level int, xl, xr []float64) (yl, yr []float64) {
+	params := outchain.DefaultParams()
+	stock := stockLawOn(sp.Voicing, true, params, plugged)
+	c := outchain.NewFor(qFs, guardBand(sp.BassGuard), sp.Voicing)
+	c.SetActive(true)
+	c.SetVolume(level)
+	c.SetParams(chainForJack(params, plugged))
+	c.SetStereo(stereoOut(stock, true, plugged))
+
+	var vol softVolume
+	if stock {
+		vol.set(StockVolumeGain(level, sp.Voicing))
+	} else {
+		vol.set(VolumeGain(level))
+	}
+	vol.settle()
+	wide := make([]float64, qPeriod*2)
+	buf := make([]byte, qPeriod*4)
+	for off := 0; off+qPeriod <= len(xl); off += qPeriod {
+		for i := 0; i < qPeriod; i++ {
+			l, r := xl[off+i], xr[off+i]
+			if stock {
+				wide[i*2], wide[i*2+1] = l*vol.cur, r*vol.cur
+			} else {
+				binary.LittleEndian.PutUint16(buf[i*4:], uint16(int16(math.Round(l))))
+				binary.LittleEndian.PutUint16(buf[i*4+2:], uint16(int16(math.Round(r))))
+			}
+		}
+		if stock {
+			c.ProcessWide(wide, buf)
+		} else {
+			c.Process(buf)
+			vol.apply(buf)
+		}
+		for i := 0; i < qPeriod; i++ {
+			yl = append(yl, float64(int16(binary.LittleEndian.Uint16(buf[i*4:]))))
+			yr = append(yr, float64(int16(binary.LittleEndian.Uint16(buf[i*4+2:]))))
+		}
+	}
+	return yl, yr
+}
+
+// Stereo over the jack (#273), on every board: with a plug in, 1kHz on the
+// left and 300Hz on the right come out each on its own side, the other's
+// tone more than 80dB down; without one, the same input comes out L == R in
+// every sample, since the internal speaker plays the right channel alone.
+// Its own test, so the mono ratchet's baseline is untouched.
+func TestOutputStereoJack(t *testing.T) {
+	n := int(qSeconds * qFs)
+	xl, xr := make([]float64, n), make([]float64, n)
+	a := 32767 * math.Pow(10, -6.0/20)
+	for i := range xl {
+		xl[i] = a * math.Sin(2*math.Pi*1000*float64(i)/qFs)
+		xr[i] = a * math.Sin(2*math.Pi*300*float64(i)/qFs)
+	}
+	for _, b := range board.Known {
+		for _, lvl := range []int{qRefLvl, 127} {
+			yl, yr := qRenderStereo(b.Hardware.Speaker, true, lvl, xl, xr)
+			pl, pr := qSpectrum(yl), qSpectrum(yr)
+			if d := qToneDb(pr, 1000) - qToneDb(pl, 1000); d > -80 {
+				t.Errorf("%s/jack level %d: the left's 1kHz in the right at %.1fdB", b.ID, lvl, d)
+			}
+			if d := qToneDb(pl, 300) - qToneDb(pr, 300); d > -80 {
+				t.Errorf("%s/jack level %d: the right's 300Hz in the left at %.1fdB", b.ID, lvl, d)
+			}
+
+			yl, yr = qRenderStereo(b.Hardware.Speaker, false, lvl, xl, xr)
+			for i := range yl {
+				if yl[i] != yr[i] {
+					t.Fatalf("%s/speaker level %d: sample %d L=%v R=%v with no plug", b.ID, lvl, i, yl[i], yr[i])
+				}
+			}
+		}
+	}
+}
+
 func TestOutputQuality(t *testing.T) {
 	got := map[string]qPath{}
 	for _, b := range board.Known {

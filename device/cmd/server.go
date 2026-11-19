@@ -475,6 +475,15 @@ func main() {
 	// measured against a stock Dot 2026-09-03 for the rest).
 	go jack.Watch(ctx, func(inserted bool) {
 		pcmSpeaker.SetJackRouting(inserted)
+		// Sendspin decodes stereo while the speaker may play it (#273): a
+		// hint only, read AFTER SetJackRouting so it is the new answer.
+		// The speaker folds anything stereo still queued once the plug is
+		// out, so a stale hint can cost bytes, never L != R on the speaker.
+		// A player started after this reads the speaker itself
+		// (applySendspinConfig, under the same ss.mu sendspinPlayer takes).
+		if c := sendspinPlayer(); c != nil {
+			c.SetStereo(pcmSpeaker.StereoOut())
+		}
 	})
 	// Android's audio HAL rewrites the codec on every mediaserver restart —
 	// roughly once a minute with a plug inserted — so applying the routing on

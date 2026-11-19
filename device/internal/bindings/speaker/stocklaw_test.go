@@ -23,6 +23,47 @@ func TestStockLawNeedsAVoicing(t *testing.T) {
 	}
 }
 
+// Stock sound is the internal driver's voicing and mono by design; stereo is
+// for the jack (#273). On every board, whatever the controller pushes and
+// wherever the plug is, the two are never on together, and whenever stereo
+// is on the chain's own params (chainForJack) have stock sound off, so the
+// chain permits what the speaker asks for.
+func TestStockAndStereoAreNeverBothOn(t *testing.T) {
+	var params []outchain.Params
+	for _, stockSound := range []bool{false, true} {
+		for _, guard := range []bool{false, true} {
+			for _, limiter := range []bool{false, true} {
+				p := outchain.DefaultParams()
+				p.StockSound, p.GuardEnabled, p.LimiterEnabled = stockSound, guard, limiter
+				params = append(params, p)
+			}
+		}
+	}
+	for _, b := range board.Known {
+		v := b.Hardware.Speaker.Voicing
+		for _, p := range params {
+			for _, active := range []bool{false, true} {
+				for _, known := range []bool{false, true} {
+					for _, inserted := range []bool{false, true} {
+						plugged := known && inserted
+						stock := stockLawOn(v, active, p, plugged)
+						stereo := stereoOut(stock, known, inserted)
+						if stock && stereo {
+							t.Errorf("%s %+v active=%v known=%v inserted=%v: stock sound and stereo both on", b.ID, p, active, known, inserted)
+						}
+						if stereo && chainForJack(p, plugged).StockSound {
+							t.Errorf("%s %+v: stereo on while the chain is given stock sound", b.ID, p)
+						}
+						if stereo != plugged {
+							t.Errorf("%s %+v active=%v known=%v inserted=%v: stereo %v", b.ID, p, active, known, inserted, stereo)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 // Every board without a voicing must keep the plain law.
 func TestEveryBoardWithoutAVoicingKeepsThePlainLaw(t *testing.T) {
 	for _, b := range board.Known {

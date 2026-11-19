@@ -1,8 +1,11 @@
 package speaker
 
 import (
+	"encoding/binary"
 	"math"
 	"testing"
+
+	"github.com/wilbowes/EchoMuse/internal/outchain"
 )
 
 // period builds a stereo S16 period where every frame has the same value.
@@ -196,5 +199,100 @@ func TestBothChannelsAreScaled(t *testing.T) {
 	l, r := sampleAt(buf, 3, 0), sampleAt(buf, 3, 1)
 	if l != r {
 		t.Fatalf("channels diverged: L=%d R=%d", l, r)
+	}
+}
+
+// stereoPeriod builds a period from one function per channel at frame
+// offset from.
+func stereoPeriod(frames, from int, l, r func(i int) float64) []byte {
+	b := make([]byte, frames*4)
+	for i := 0; i < frames; i++ {
+		binary.LittleEndian.PutUint16(b[i*4:], uint16(int16(l(from+i))))
+		binary.LittleEndian.PutUint16(b[i*4+2:], uint16(int16(r(from+i))))
+	}
+	return b
+}
+
+// toneAmp is the amplitude of hz in one channel of a period, by correlation;
+// hz is a whole number of cycles in it.
+func toneAmp(b []byte, ch int, hz float64) float64 {
+	n := len(b) / 4
+	var re, im float64
+	for i := 0; i < n; i++ {
+		x := float64(sampleAt(b, i, ch))
+		re += x * math.Cos(2*math.Pi*hz*float64(i)/48000)
+		im += x * math.Sin(2*math.Pi*hz*float64(i)/48000)
+	}
+	return 2 * math.Hypot(re, im) / float64(n)
+}
+
+// With a plug in, stereo Sendspin music mixed under a mono reply (#273), as
+// the write loop does it on both of its plain paths (Mix, then Process and
+// the volume; the boosted reply's MixResponse, then ProcessFloat and
+// applyFloat): the music's sides stay apart, the voice is the same on both,
+// and the duck takes both sides down by the same gain.
+func TestStereoMusicUnderMonoVoiceDucks(t *testing.T) {
+	const (
+		frames  = 2048
+		voiceHz = 468.75 // whole cycles in 2048 frames at 48kHz
+		leftHz  = 1500.0
+		rightHz = 3000.0
+		duckDb  = -12.0
+	)
+	sine := func(amp, hz float64) func(int) float64 {
+		return func(i int) float64 { return amp * math.Sin(2*math.Pi*hz*float64(i)/48000) }
+	}
+	voiceF := sine(6000, voiceHz)
+	for _, boosted := range []bool{false, true} {
+		c := outchain.New(48000)
+		c.SetActive(true)
+		c.SetParams(chainForJack(outchain.DefaultParams(), true))
+		c.SetStereo(stereoOut(false, true, true))
+		var m Mixer
+		m.SetGainImmediate(DuckGain(duckDb))
+		var vol softVolume
+		vol.set(VolumeGain(120))
+		vol.settle()
+		gains := make([]float64, frames)
+		for i := range gains {
+			gains[i] = 1.5 // a boosted reply: the wide path
+		}
+		wide := make([]float64, frames*2)
+
+		var out []byte
+		for k := 0; k < 6; k++ {
+			voice := stereoPeriod(frames, k*frames, voiceF, voiceF)
+			music := stereoPeriod(frames, k*frames, sine(8000, leftHz), sine(8000, rightHz))
+			if boosted {
+				w := m.MixResponse(wide, voice, music, DuckGain(duckDb), gains, nil)
+				c.ProcessFloat(w, gains)
+				out = voice
+				vol.applyFloat(w, out, vol.targetGain())
+			} else {
+				out = m.Mix(voice, music, DuckGain(duckDb))
+				c.Process(out)
+				vol.apply(out)
+			}
+		}
+
+		g := VolumeGain(120)
+		voiceGain := 1.0
+		if boosted {
+			voiceGain = 1.5
+		}
+		vl, vr := toneAmp(out, 0, voiceHz), toneAmp(out, 1, voiceHz)
+		ml, mr := toneAmp(out, 0, leftHz), toneAmp(out, 1, rightHz)
+		xl, xr := toneAmp(out, 1, leftHz), toneAmp(out, 0, rightHz)
+		wantVoice := 6000 * voiceGain * g
+		wantMusic := 8000 * float64(DuckGain(duckDb)) / float64(unityGain) * g
+		if math.Abs(vl-vr) > 1 || math.Abs(vl-wantVoice) > wantVoice*0.01 {
+			t.Errorf("boosted=%v: voice %.0f left, %.0f right, want %.0f on both", boosted, vl, vr, wantVoice)
+		}
+		if math.Abs(ml-mr) > wantMusic*0.01 || math.Abs(ml-wantMusic) > wantMusic*0.01 {
+			t.Errorf("boosted=%v: ducked music %.0f left, %.0f right, want %.0f on both", boosted, ml, mr, wantMusic)
+		}
+		if xl > 2 || xr > 2 {
+			t.Errorf("boosted=%v: the sides leaked: %.1f of the left in the right, %.1f of the right in the left", boosted, xl, xr)
+		}
 	}
 }

@@ -142,6 +142,11 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
 			c.SetVolume(levelToPct(vol.VolumeLevel()))
 			c.SetMinBuffer(sendspinBuffer(ss.proxy))
+			// The decode hint (#273), before a server can connect. Under
+			// ss.mu, which the jack callback's sendspinPlayer also takes, so
+			// a plug change either lands before this read or finds the
+			// player and tells it.
+			c.SetStereo(spk.StereoOut())
 			// Open before Start advertises: Music Assistant dials when the
 			// record appears and may not retry a timeout. Logged, not
 			// fatal: FireOS has no filter to open.
