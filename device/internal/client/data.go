@@ -281,6 +281,9 @@ type DataClient struct {
 	hwRefSeenSilent bool
 	hwRefSeenAudio  bool
 	hwRefOn         bool
+	refGaps         int       // locked batches with no reference, given silence
+	refLogged       [4]int    // moves, losses, late, gaps at the last [echoref] line
+	refLogAt        time.Time // when that line was
 
 	// hwRefMode is the operator's override, config.AecRef{Auto,HW,SW}. It
 	// is the ONE field here written from another goroutine — the control
@@ -481,7 +484,34 @@ func (d *DataClient) loopbackRef(raw, mono []byte) ([]byte, bool) {
 	if !ok {
 		return nil, true
 	}
-	return ea.EchoAligner().Take(idx, len(mono)/2), true
+	al := ea.EchoAligner()
+	ref := al.Take(idx, len(mono)/2)
+	ref, filled := fillRefGap(ref, al.Locked(), len(mono))
+	if filled {
+		d.refGaps++
+	}
+	if al.Locked() && time.Since(d.refLogAt) > time.Minute {
+		g := [4]int{al.Moves, al.Losses, al.Late, d.refGaps}
+		if g != d.refLogged {
+			d.refLogged, d.refLogAt = g, time.Now()
+			log.Printf("[echoref] offset %d, moves %d, losses %d, late %d, gaps filled %d",
+				al.Offset(), g[0], g[1], g[2], g[3])
+		}
+	}
+	return ref, true
+}
+
+// fillRefGap gives a locked aligner's missing reference (late, or gone from
+// the ring) as n bytes of silence, so the canceller stays on the loopback.
+// Returning nil there dropped to the software tap and back, rebuilding the
+// canceller each time: hundreds of times an hour on 41C8 at idle, so every
+// reply began from the saved path and took ~10s to converge (2026-11-19).
+// Unlocked stays nil: no delay, no reference.
+func fillRefGap(ref []byte, locked bool, n int) ([]byte, bool) {
+	if ref != nil || !locked {
+		return ref, false
+	}
+	return make([]byte, n), true
 }
 
 // useLoopbackRef moves the canceller between the aligned loopback and the
