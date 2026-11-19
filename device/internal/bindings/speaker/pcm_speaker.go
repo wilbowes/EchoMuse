@@ -76,7 +76,10 @@ type PcmSpeaker struct {
 	pcm board.PCMAddr
 	// out is the board's own playback needs, and problems what of them
 	// could not be met, reported to the controller.
-	out        output
+	out output
+	// idle re-asserts the board's AmpMute while nothing plays; nil on a
+	// board without one.
+	idle       *idleMute
 	problems   []string
 	statusFile string
 	session    *tinyalsa.AudioSession
@@ -367,6 +370,8 @@ func (p *PcmSpeaker) Init() error {
 	// ones measured on radar's mics (2026-10-23).
 	if err := p.out.releaseMute(); err != nil {
 		p.problems = append(p.problems, err.Error())
+	} else if p.out.spec.AmpMute != "" {
+		p.idle = newIdleMute(idleMuteAfter)
 	}
 
 	log.Println("PcmSpeaker initialised — silence stream running")
@@ -666,6 +671,15 @@ func (p *PcmSpeaker) silenceLoop() {
 		if p.levelTap != nil {
 			p.levelTap(level)
 		}
+		// The amp's own mute back on after a long silence, off before the
+		// period that ends it is written (#1153; idleMute).
+		if p.idle != nil {
+			if mute, release := p.idle.step(isSilencePeriod(out)); mute {
+				p.out.holdMute()
+			} else if release {
+				p.out.releaseMute()
+			}
+		}
 		meter.beforeWrite()
 		if err := p.pump(out); err != nil {
 			log.Printf("silenceLoop: pump error: %v", err)
@@ -673,6 +687,13 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 		meter.afterWrite()
 	}
+}
+
+// isSilencePeriod reports whether out is the shared silence buffer, which the
+// write loop uses exactly when nothing (voice, music, filter tail or cue) is
+// playing. A zeroed copy is a filter tail and counts as audio.
+func isSilencePeriod(out []byte) bool {
+	return len(out) > 0 && &out[0] == &silencePeriod[0]
 }
 
 // stockPeriod builds one period under the stock-sound profile, in stock
