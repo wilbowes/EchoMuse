@@ -2408,6 +2408,61 @@ static const char *wpa_conf(void)
     return NULL;
 }
 
+/* A WiFi change the firmware never confirmed (device/internal/wifi): its
+ * marker, and the old conf it backed up beside the one it wrote (ours; the
+ * second path is where firmware before 2026-11 put it).
+ *
+ * The firmware undoes an unconfirmed change itself, in RecoverIfPending at
+ * start, but it starts only after /run/net-up. A new network that gives no
+ * address therefore stranded the Echo for good: no address, so no firmware,
+ * so no undo (#1163, 2026-11-19). So init puts the old conf back when a boot
+ * has had no network for WIFI_UNDO_TURNS with a change still pending, and
+ * leaves the marker and backup: the firmware, once up, restores the same
+ * bytes again, clears both and reports the failed change to the controller. */
+#define WIFI_PENDING     "/data/local/etc/echomuse/wifi_pending"
+#define WIFI_BAK         EMOS_WPA_CONF ".echomuse-bak"
+#define WIFI_BAK_OLD     ANDROID_WPA_CONF ".echomuse-bak"
+#define WIFI_UNDO_TURNS  36             /* 5s turns: three minutes */
+
+/* Copy the backup over `conf`, owner and mode taken from `cur` (the conf the
+ * supplicant reads now, so it can still read this one), through a temp file
+ * and a rename so a power cut leaves one whole conf or the other. Returns
+ * 1 when restored, 0 when there is nothing to undo, -1 on failure. */
+static int wifi_undo(const char *marker, const char *bak, const char *bak_old,
+                     const char *conf, const char *cur)
+{
+    if (access(marker, F_OK) != 0)
+        return 0;
+    const char *from = access(bak, R_OK) == 0 ? bak
+                     : access(bak_old, R_OK) == 0 ? bak_old : NULL;
+    if (!from)
+        return 0;
+    int in = open(from, O_RDONLY);
+    if (in < 0)
+        return -1;
+    struct stat st, cs;
+    if (fstat(in, &st) != 0 || st.st_size <= 0) { close(in); return -1; }
+    char tmp[256];
+    snprintf(tmp, sizeof tmp, "%s.undo", conf);
+    int out = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (out < 0) { close(in); return -1; }
+    int rc = copy_range(in, out, st.st_size);
+    if (rc == 0 && cur && stat(cur, &cs) == 0) {
+        if (fchown(out, cs.st_uid, cs.st_gid) != 0 ||
+            fchmod(out, cs.st_mode & 07777) != 0)
+            rc = -1;
+    }
+    if (rc == 0 && fsync(out) != 0)
+        rc = -1;
+    close(out);
+    close(in);
+    if (rc != 0 || rename(tmp, conf) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 1;
+}
+
 /* The control socket directory is declared INSIDE the conf, so it cannot be a
  * constant: em-wifi declares /data/emos/sockets and a wizard-provisioned device
  * Android's, and wpa_conf() prefers ours the moment it exists.
@@ -2616,7 +2671,13 @@ static void net_main(void)
                           "/system/etc/dhcpcd/dhcpcd.conf", "wlan0", NULL };
     char *dhcp_fos6[] = { "/sbin/udhcpc", "-B", "-f", "-i", "wlan0",
                           "-s", (char *)UDHCPC_SCRIPT, NULL };
-    char **dhcp = vendor ? dhcp_fos6 : dhcp_fos5;
+    /* -B (broadcast replies) is needed on some networks (#714: no lease
+     * without it) and fatal on others (#1163: an Asus guest network's
+     * broadcast OFFER never reached the Echo, which never sent a REQUEST).
+     * So a dry restart below swaps to the other one, from -B first. */
+    char *dhcp_fos6_uni[] = { "/sbin/udhcpc", "-f", "-i", "wlan0",
+                              "-s", (char *)UDHCPC_SCRIPT, NULL };
+    int dhcp_bcast = 1;
     if (!vendor && lease_dir_ready(DHCPCD_LEASE_DIR, AID_DHCP, AID_DHCP) != 0)
         netlog("%s not usable (errno=%d): DNS will come from the gateway\n",
                DHCPCD_LEASE_DIR, errno);
@@ -2714,6 +2775,7 @@ static void net_main(void)
      * exist and are not working, which is a fault worth showing. Waiting with
      * NO conf is not a fault and never turns it red -- see below. */
     int nocarrier = 0, said_fail = 0, said_noconf = 0;
+    int offline = 0, undone = 0;                /* see wifi_undo */
 
     for (;;) {
         pid_t d;
@@ -2764,6 +2826,25 @@ static void net_main(void)
             nocarrier = 0;
         }
 
+        /* No network this boot for three minutes, with a WiFi change still
+         * unconfirmed: back to the network it replaced (wifi_undo). Once. */
+        if (!netup && !undone && ++offline >= WIFI_UNDO_TURNS) {
+            undone = 1;
+            int u = wifi_undo(WIFI_PENDING, WIFI_BAK, WIFI_BAK_OLD,
+                              EMOS_WPA_CONF, conf);
+            if (u != 0)
+                netlog("wifi: unconfirmed change, no network for %ds - "
+                       "previous conf %s\n", WIFI_UNDO_TURNS * 5,
+                       u > 0 ? "restored" : "restore FAILED");
+            if (u > 0) {
+                if (dhc > 0) kill(dhc, SIGTERM);
+                kill(wpa, SIGTERM);              /* respawned on the restored conf */
+                wpa = -1;
+                sleep(5);
+                continue;
+            }
+        }
+
         if (readint("/sys/class/net/wlan0/carrier") != 1) {
             if (dhc > 0)
                 kill(dhc, SIGTERM);
@@ -2788,7 +2869,8 @@ static void net_main(void)
             nudges = 0;
             nocarrier = 0;
             if (dhc < 0) {
-                dhc = spawn(dhcp);
+                dhc = spawn(!vendor ? dhcp_fos5
+                            : dhcp_bcast ? dhcp_fos6 : dhcp_fos6_uni);
                 dry = 0;
             } else if (has_ip("wlan0")) {
                 dry = 0;
@@ -2830,6 +2912,11 @@ static void net_main(void)
             } else if (++dry >= 4) {
                 kill(dhc, SIGTERM);
                 dry = 0;
+                if (vendor) {
+                    dhcp_bcast = !dhcp_bcast;
+                    netlog("dhcp: no lease, retrying %s broadcast replies\n",
+                           dhcp_bcast ? "with" : "without");
+                }
             }
         }
         sleep(5);
