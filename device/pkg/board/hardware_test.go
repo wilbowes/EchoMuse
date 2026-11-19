@@ -116,6 +116,9 @@ func TestDonutResolvesByNameOnly(t *testing.T) {
 	if l.Mics.NumMics() != 4 || l.Mics.Format != S32LE || len(l.MicMutes) != 4 {
 		t.Errorf("mics %+v, mutes %q", l.Mics, l.MicMutes)
 	}
+	if got := strings.Join(l.MicADCs(), ""); got != "AB" {
+		t.Errorf("mic ADCs %q, want AB: ADC_C/D are not fitted", got)
+	}
 	if l.MuteLEDGPIO != "" {
 		t.Errorf("mute LED gpio %q on a board whose mute LED is the privacy driver's", l.MuteLEDGPIO)
 	}
@@ -509,5 +512,22 @@ func TestTLVJackIsStocks(t *testing.T) {
 	}
 	if tlvJack.Insert[0].Values[0] != "Off" || tlvJack.Remove[2].Values[0] != "On" {
 		t.Errorf("amp: insert %v, remove %v", tlvJack.Insert[0], tlvJack.Remove[2])
+	}
+}
+
+func TestMicADCsAreTheMutedOnes(t *testing.T) {
+	for _, c := range []struct {
+		mutes []string
+		want  string
+	}{
+		{tlvMicMutes, "ABCD"},
+		{nil, "ABCD"}, // none stated: the old four
+		{[]string{"ADC_A Left Mute", "ADC_A Right Mute"}, "A"},
+		{[]string{"Mic Mute"}, "ABCD"},
+	} {
+		l := &Layout{MicMutes: c.mutes}
+		if got := strings.Join(l.MicADCs(), ""); got != c.want {
+			t.Errorf("%q: %q, want %q", c.mutes, got, c.want)
+		}
 	}
 }

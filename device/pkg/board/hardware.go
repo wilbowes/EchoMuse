@@ -3,6 +3,7 @@ package board
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -554,4 +555,26 @@ func Current() *Board {
 func CurrentLayout() *Layout {
 	resolveCurrent()
 	return currentLayout
+}
+
+// MicADCs are the codec ADCs ("A", "B", ...) behind the microphones, read
+// off the board's mutes ("ADC_A Left Mute"), so a gain is written only to
+// ADCs that are fitted: the donut's ADC_C/D refuse it, and the failures read
+// like a fault. None stated means the TLV boards' four.
+func (l *Layout) MicADCs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range l.MicMutes {
+		if !strings.HasPrefix(m, "ADC_") || len(m) < 6 || m[5] != ' ' {
+			continue
+		}
+		if x := m[4:5]; !seen[x] {
+			seen[x] = true
+			out = append(out, x)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"A", "B", "C", "D"}
+	}
+	return out
 }

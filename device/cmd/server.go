@@ -1251,13 +1251,13 @@ func applyHardwareConfig(msg config.ConfigMessage) {
 	// meeting a controller that omits the key behaves as it always did.
 	if msg.AdcDigitalGain != nil {
 		g := strconv.Itoa(*msg.AdcDigitalGain)
-		for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, adc := range board.CurrentLayout().MicADCs() {
 			mixer.Set("ADC_"+adc+" Digital Volume Control", g)
 		}
 	}
 	if msg.AdcMicpga != nil {
 		g := strconv.Itoa(*msg.AdcMicpga)
-		for _, adc := range []string{"A", "B", "C", "D"} {
+		for _, adc := range board.CurrentLayout().MicADCs() {
 			mixer.Set("ADC_"+adc+" MICPGA Volume Ctrl", g)
 		}
 	}
