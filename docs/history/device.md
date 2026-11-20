@@ -1222,9 +1222,11 @@ enabled it and nothing happened" this removes.
   spot, yet the tap set swung between ch0/2/4 and ch1/3/5 as the beam lock
   wandered (ch4, ch0, the ch1/3/5 side): evenly spaced taps held up where
   three beside the lock would have bet on a wrong direction. Second round,
-  one try from each button and both diagonals: 6 of 6, wakes 0.27-0.89; the
-  stream alone would have missed two (peaks 0.16, 0.26), so 8 of the 12
-  needed a tap. Server CPU during a reply 69% ->
+  one try from each button and both diagonals: all 6 announcements cut,
+  wakes 0.27-0.89, but two took three attempts each (Wil), so about 6 of 10
+  attempts; the stream alone would have missed two of the catches (peaks
+  0.16, 0.26). Round 1's attempt count was not recorded. Count attempts,
+  not announcements cut. Server CPU during a reply 69% ->
   97% of a core (peak 126% at the reply's start, scorers primed), idle 33%
   unchanged; 2 cores online. No false-barge figure yet: no reply played with
   nobody talking.
