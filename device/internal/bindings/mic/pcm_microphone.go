@@ -94,10 +94,17 @@ func NewMicrophone() (*PcmMicrophone, error) {
 		return nil, errors.New("no microphone this firmware can read on this board")
 	}
 	cfg := pcm.Config{
-		Channels:    layout.Mics.Channels,
-		SampleRate:  16000,
-		PeriodSize:  512,
+		Channels:   layout.Mics.Channels,
+		SampleRate: 16000,
+		PeriodSize: 512,
+		// Read one period at a time, a period behind the hardware pointer
+		// (readLoop), delivered in the same 2560-frame batches. A whole-ring
+		// read the moment the driver says it is ready returned 2048 frames
+		// (128 ms) of stale ring every ~2 s on 41C8 (hardware timestamps,
+		// 2026-11-20); the Dot 2 reads the same way. 20 periods left the
+		// donut's TDM capture open but never delivering.
 		PeriodCount: 5,
+		AvailMin:    2 * 512,
 		Format:      tinyalsa.PCM_FORMAT_S24_3LE,
 	}
 	if layout.Mics.Format == board.S32LE {
@@ -171,7 +178,7 @@ const loopbackTries = 8
 // mic loop's audio-vs-wall ledger for it once a minute (see readLoop's note
 // on what the sign means).
 func drainLoopback(stream chan []byte, rate, bytesPerFrame int, al *echoref.Aligner) {
-	var first, last time.Time
+	var first, last, prev time.Time
 	var frames int64
 	for audio := range stream {
 		if al != nil {
@@ -181,6 +188,12 @@ func drainLoopback(stream chan []byte, rate, bytesPerFrame int, al *echoref.Alig
 			rawLoopTap(audio)
 		}
 		now := time.Now()
+		if !prev.IsZero() {
+			if g := now.Sub(prev); g > 100*time.Millisecond {
+				log.Printf("[mic] loopback stall: %dms between periods", g.Milliseconds())
+			}
+		}
+		prev = now
 		if first.IsZero() {
 			first, last = now, now
 			continue // the ledger starts at the first arrival, as the mic's does
@@ -199,10 +212,15 @@ func drainLoopback(stream chan []byte, rate, bytesPerFrame int, al *echoref.Alig
 // startLoopback opens the loopback once and waits for its first audio.
 func startLoopback(l *board.Layout) (chan []byte, error) {
 	dev := tinyalsa.NewDevice(l.Loopback.Card, l.Loopback.Device, pcm.Config{
-		Channels:    l.LoopbackChs,
-		SampleRate:  l.LoopbackRate,
-		PeriodSize:  768,
-		PeriodCount: 10,
+		Channels:   l.LoopbackChs,
+		SampleRate: l.LoopbackRate,
+		PeriodSize: 768,
+		AvailMin:   2 * 768, // a period behind the hardware pointer, as the mics
+		// 512 ms of ring. At 160 ms a reader held off that long by a busy CPU
+		// overran it and lost a ring of reference: the echo jumped 2557
+		// samples mid-reply and cancelling was gone for ~7 s (41C8,
+		// 2026-11-20).
+		PeriodCount: 32,
 		Format:      tinyalsa.PCM_FORMAT_S16_LE,
 	})
 	stream := make(chan []byte, 40)
@@ -261,11 +279,15 @@ func startLoopback(l *board.Layout) (chan []byte, error) {
 //
 // Consequence for whoever reads a long uptime: seconds of accumulated
 // negative skew are expected and mean nothing is wrong.
+//
+// Re-measure that on a Dot 2: the donut's "fast capture clock" (~270ppm)
+// was stale whole-ring reads and went to 0ppm once reads waited for
+// AvailMin (41C8, 2026-11-20). SPJ read the same whole ring.
 func (p *PcmMicrophone) readLoop() {
 	stream := make(chan []byte, 16)
 
 	go func() {
-		if err := p.device.GetAudioStream(p.device.DeviceConfig, stream); err != nil {
+		if err := p.device.GetAudioStreamChunked(p.device.DeviceConfig, 512, 2560, stream); err != nil {
 			log.Printf("mic: ALSA stream error: %v", err)
 		}
 	}()
@@ -310,7 +332,7 @@ func (p *PcmMicrophone) readLoop() {
 			lastReport = now
 		}
 
-		// GetAudioStream hands over a fresh slice per read (GoTinyAlsa #1),
+		// GetAudioStreamChunked hands over a fresh slice per batch (GoTinyAlsa #1),
 		// so this can be passed on as-is. Copying here was too late: the
 		// library reused one buffer, and a batch still queued in stream was
 		// overwritten by the next read — repeated or torn audio (#607).
