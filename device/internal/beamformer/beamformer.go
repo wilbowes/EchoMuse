@@ -60,7 +60,10 @@ const (
 	sampleRate   = 16000
 	periodFrames = 512
 
-	// Smoothing constants
+	// Smoothing constants. Every constant below counts 512-frame ANALYSIS
+	// periods, which Process cuts out of whatever it is handed: the mic
+	// arrives in 2560-frame (160ms) batches, and stepping these once per
+	// call stretched every time constant 5x (see Process).
 	smoothAlpha   = 0.9   // fast smoother (~320ms time constant at 32ms/period)
 	baselineAlpha = 0.995 // slow smoother (~10s time constant) — tracks background noise
 
@@ -96,7 +99,7 @@ type Beamformer struct {
 	// Tracks steady background noise (TV, fan, etc.).
 	energyBaseline []float64
 
-	// baselineReady counts periods until baseline is initialised (~3s warmup).
+	// baselineReady counts periods until baseline is initialised (~3.2s warmup).
 	baselineReady int
 
 	// energyHistory is a ring of per-period, per-direction HF energies —
@@ -132,6 +135,11 @@ type Beamformer struct {
 	chanBuf [][]float32
 	hfBuf   [][]float32
 
+	// carry holds the frames of a buffer that did not fill a whole analysis
+	// period, completed by the next call, so any buffer size yields the
+	// same periods. Capacity is one period, allocated in New.
+	carry []byte
+
 	// micBuf holds the microphones MicChannels extracts beside the one in
 	// use, reused across periods: nothing keeps them past the canceller.
 	micBuf [][]byte
@@ -157,6 +165,7 @@ func New(a board.MicArray) *Beamformer {
 		hfBuf:              make([][]float32, n),
 		micBuf:             make([][]byte, a.NumMics()),
 	}
+	b.carry = make([]byte, 0, periodFrames*b.frameSize)
 	for d, m := range a.Perimeter {
 		b.candidateAngles[d], b.directionToChannel[d] = m.Angle, m.Ch
 		b.chanBuf[d] = make([]float32, periodFrames)
@@ -365,17 +374,56 @@ func (b *Beamformer) Unlock() {
 //     driven direction, ignores the energy-based lock channel.
 //   - Locked, steerAngle < 0 (auto): the perimeter mic selected at Lock() time.
 //
-// angle is the estimated dominant source direction (0–360°, clockwise from
-// 12 o'clock), or -1 when unlocked.
+// angle is the direction of the microphone in use (0–360°, clockwise from
+// 12 o'clock), or -1 when unlocked. It used to be the loudest smoothed
+// direction, which could differ from the locked mic, so the LED arc pointed
+// somewhere other than the audio.
 func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono []byte, angle float64) {
-	if len(raw) < periodFrames*b.frameSize {
+	// Direction estimation runs on every 512-frame period in raw, whatever
+	// the buffer size, and regardless of BeamformingEnabled, so the
+	// baseline is warm the moment beamforming is enabled.
+	b.analyse(raw)
+
+	// Unlocked: the wake microphone. Covers OWW listening and
+	// disabled-beamforming voice turns. No channel splices.
+	if b.lockedChannel < 0 {
 		return b.extractChannel(raw, b.omniChannel(), gain), -1
 	}
 
-	// Always decode and update smoothers — direction estimation runs
-	// continuously regardless of BeamformingEnabled. This keeps the baseline
-	// warm so Lock() gets a good onset ratio the moment beamforming is enabled.
-	b.decodeChannels(raw)
+	ch := b.OutputChannel(steerAngle)
+	return b.extractChannel(raw, ch, gain), b.candidateAngles[b.channelDirection(ch)]
+}
+
+// analyse feeds every whole analysis period in raw to analysePeriod,
+// carrying a partial one into the next call. Until 2026-11 Process analysed
+// only the first 512 frames of each buffer and stepped the smoothers once
+// per call; the mic delivers 2560-frame batches, so it saw 32ms of every
+// 160ms and every time constant ran 5x long: the lock-back ring spanned
+// 10.24s, its top-8 burst 1.28s, and warm-up took 16s instead of 3.2s.
+func (b *Beamformer) analyse(raw []byte) {
+	blk := periodFrames * b.frameSize
+	if n := len(b.carry); n > 0 {
+		need := blk - n
+		if len(raw) < need {
+			b.carry = append(b.carry, raw...)
+			return
+		}
+		b.carry = append(b.carry, raw[:need]...)
+		b.analysePeriod(b.carry)
+		b.carry = b.carry[:0]
+		raw = raw[need:]
+	}
+	for len(raw) >= blk {
+		b.analysePeriod(raw[:blk])
+		raw = raw[blk:]
+	}
+	b.carry = append(b.carry, raw...)
+}
+
+// analysePeriod steps the smoothers, baseline and lock-back ring by one
+// 512-frame period.
+func (b *Beamformer) analysePeriod(period []byte) {
+	b.decodeChannels(period)
 	b.bandDiff()
 	hfChannels := b.hfBuf
 
@@ -403,33 +451,20 @@ func (b *Beamformer) Process(raw []byte, steerAngle float64, gain float64) (mono
 		}
 	}
 
-	if b.baselineReady < 100 { // ~3s warmup at 32ms/period
+	if b.baselineReady < 100 { // ~3.2s warmup
 		b.baselineReady++
 	}
+}
 
-	// Unlocked: the wake microphone. Covers OWW listening and
-	// disabled-beamforming voice turns. No channel splices.
-	if b.lockedChannel < 0 {
-		return b.extractChannel(raw, b.omniChannel(), gain), -1
-	}
-
-	// Locked — select output channel and reported angle.
-	bestDir := 0
-	for di := 1; di < b.nDirections; di++ {
-		if b.energySmooth[di] > b.energySmooth[bestDir] {
-			bestDir = di
+// channelDirection is the direction whose microphone is ch. Only perimeter
+// channels are ever locked, so the fallback is unreachable in practice.
+func (b *Beamformer) channelDirection(ch int) int {
+	for d, c := range b.directionToChannel {
+		if c == ch {
+			return d
 		}
 	}
-
-	if steerAngle >= 0 {
-		// Fixed-beam: config-driven direction, ignores energy-based lock
-		angle = b.candidateAngles[b.nearestDirection(steerAngle)]
-	} else {
-		// Auto: use the channel selected at Lock() time
-		angle = b.candidateAngles[bestDir]
-	}
-
-	return b.extractChannel(raw, b.OutputChannel(steerAngle), gain), angle
+	return 0
 }
 
 // OutputChannel is the channel Process returns audio from: the wake
