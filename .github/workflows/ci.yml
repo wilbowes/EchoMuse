@@ -793,6 +793,8 @@ jobs:
           /tmp/cmdlinecheck
           cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
+          cc -O2 -o /tmp/wifiundocheck emos/init/wifiundocheck.c
+          /tmp/wifiundocheck
       # DNS comes from the DHCP lease (#1066), by RFC 2131/2132/3396. A wrong
       # parse keeps the address and the controller and loses only names.
       - name: DNS is taken from the lease, by the spec
