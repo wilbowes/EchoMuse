@@ -1,6 +1,7 @@
 package beamformer
 
 import (
+	"math/rand"
 	"reflect"
 	"testing"
 
@@ -338,6 +339,128 @@ func TestS32SamplesReadAsTheirTop24Bits(t *testing.T) {
 	// ch1 (the wake mic, no centre) is -(2<<16) of 2^23: -512 after 24-to-16.
 	if got := int16(uint16(mono[0]) | uint16(mono[1])<<8); got != -512 {
 		t.Errorf("ch1 extracted %d, want -512", got)
+	}
+}
+
+// ─── Analysis timebase ────────────────────────────────────────────────────────
+
+// burst is a stretch of louder audio on one direction's microphone.
+type burst struct {
+	at, dur float64 // seconds
+	dir     int
+	gain    int32
+}
+
+// scene renders seconds of 9-channel S24_3LE: low white noise on every
+// microphone plus the given bursts. Deterministic, so two renders are
+// byte-identical.
+func scene(seconds float64, bursts ...burst) []byte {
+	frames := int(seconds * sampleRate)
+	rng := rand.New(rand.NewSource(1))
+	buf := make([]byte, frames*frameSize)
+	for f := 0; f < frames; f++ {
+		t := float64(f) / sampleRate
+		for ch := 0; ch < nChannels; ch++ {
+			v := int32(rng.NormFloat64() * 2000)
+			for _, bu := range bursts {
+				if ch == biscuit.Perimeter[bu.dir].Ch && t >= bu.at && t < bu.at+bu.dur {
+					v *= bu.gain
+				}
+			}
+			b := f*frameSize + ch*byteSample
+			buf[b], buf[b+1], buf[b+2] = byte(v), byte(v>>8), byte(v>>16)
+		}
+	}
+	return buf
+}
+
+// feed hands raw to b in chunks of the given frame counts, cycled.
+func feed(b *Beamformer, raw []byte, chunks ...int) {
+	for i := 0; len(raw) > 0; i++ {
+		n := chunks[i%len(chunks)] * frameSize
+		if n > len(raw) {
+			n = len(raw)
+		}
+		b.Process(raw[:n], -1, 1.0)
+		raw = raw[n:]
+	}
+}
+
+// The mic delivers 2560-frame batches; the constants count 512-frame
+// periods. Any buffer size must leave identical analysis state, or the time
+// constants depend on how ALSA happens to batch (they ran 5x long until
+// 2026-11 for exactly this reason).
+func TestAnalysisIndependentOfBufferSize(t *testing.T) {
+	raw := scene(6, burst{4.2, 0.6, 2, 20})
+	ref := New(biscuit)
+	feed(ref, raw, 512)
+	for _, chunks := range [][]int{{2560}, {300, 1024, 2560, 700, 1}, {5120}} {
+		b := New(biscuit)
+		feed(b, raw, chunks...)
+		if b.baselineReady != ref.baselineReady || b.historyCount != ref.historyCount ||
+			b.historyIdx != ref.historyIdx {
+			t.Fatalf("chunks %v: ready=%d count=%d idx=%d, want %d %d %d", chunks,
+				b.baselineReady, b.historyCount, b.historyIdx,
+				ref.baselineReady, ref.historyCount, ref.historyIdx)
+		}
+		for di := 0; di < nDirections; di++ {
+			if b.energySmooth[di] != ref.energySmooth[di] || b.energyBaseline[di] != ref.energyBaseline[di] {
+				t.Fatalf("chunks %v dir %d: smooth/baseline differ from 512-frame feed", chunks, di)
+			}
+			for i := range b.energyHistory {
+				if b.energyHistory[i][di] != ref.energyHistory[i][di] {
+					t.Fatalf("chunks %v dir %d: history[%d] differs", chunks, di, i)
+				}
+			}
+		}
+	}
+}
+
+// A wake word anywhere within a 160ms batch, including the tail the old code
+// never decoded, must lock to the speaker — and a louder voice elsewhere in
+// the room 5s earlier must not win. The window is ~2s; it was 10.24s until
+// 2026-11, and picked the earlier voice.
+func TestLockBackFindsWakeAtAnyBatchOffset(t *testing.T) {
+	const speaker, other = 2, 5
+	for _, off := range []int{0, 100, 1000, 2400} {
+		wakeAt := 17.6 + float64(off)/sampleRate // a batch boundary
+		raw := scene(wakeAt+0.9, burst{12, 0.6, other, 40}, burst{wakeAt, 0.6, speaker, 20})
+		b := New(biscuit)
+		feed(b, raw, 2560)
+		b.Lock(true)
+		if want := biscuit.Perimeter[speaker].Ch; b.lockedChannel != want {
+			t.Fatalf("offset %d: locked ch%d, want ch%d", off, b.lockedChannel, want)
+		}
+	}
+}
+
+// Warm-up and the lock-back window are 100 and 64 periods of 32ms: 3.2s and
+// 2.05s of audio, not of Process calls.
+func TestWarmupAndWindowInAudioTime(t *testing.T) {
+	b := New(biscuit)
+	feed(b, scene(3.1), 2560)
+	if b.baselineReady >= 100 {
+		t.Fatalf("baseline ready after 3.1s (%d periods)", b.baselineReady)
+	}
+	feed(b, scene(0.2), 2560)
+	if b.baselineReady != 100 || b.historyCount != historyPeriods {
+		t.Fatalf("after 3.3s: ready=%d history=%d, want 100 and %d",
+			b.baselineReady, b.historyCount, historyPeriods)
+	}
+}
+
+// The reported angle is the microphone in use, even when another direction
+// is louder: the LED arc must not point away from the audio.
+func TestAngleIsLockedMicrophone(t *testing.T) {
+	b := warmBeamformer(1e-6)
+	b.lockedChannel = b.directionToChannel[2]
+	b.energySmooth[5] = 1.0
+	raw := scene(0.16)
+	if _, angle := b.Process(raw, -1, 1.0); angle != b.candidateAngles[2] {
+		t.Fatalf("angle %.0f, want %.0f (locked direction 2)", angle, b.candidateAngles[2])
+	}
+	if _, angle := b.Process(raw, b.candidateAngles[4], 1.0); angle != b.candidateAngles[4] {
+		t.Fatalf("fixed beam: angle %.0f, want %.0f", angle, b.candidateAngles[4])
 	}
 }
 

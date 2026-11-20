@@ -103,6 +103,18 @@ below); the diagram is the path the chosen one takes.
 
 Note the real buffer cadence: GoTinyAlsa's `GetAudioStream` reads the whole ALSA buffer per chunk (PeriodSize 512 × PeriodCount 5), so the mic pipeline runs on **160ms batches of 2560 samples**, not single 32ms periods. Anything assuming 512-sample buffers must handle multiples (this silently disabled AEC for four releases — see `aec.Process`).
 
+- **2026-11-06: the beamformer had the same bug.** `Process` decoded only the
+  first 512 frames of each 2560-frame batch and stepped its smoothers, baseline
+  and lock-back ring once per call, so it analysed 32ms of every 160ms and
+  every time constant ran 5x long: lock-back window 10.24s (meant 2.05s),
+  top-8 burst 1.28s (meant 256ms), warm-up 16s (meant 3.2s). A loud voice
+  elsewhere in the room up to ~10s before the wake word could win the lock.
+  It now analyses every 512-frame period in whatever it is handed, carrying a
+  partial one over (`TestAnalysisIndependentOfBufferSize`). Same change:
+  `angle` in auto mode was the loudest smoothed direction, not the locked
+  mic, so the LED arc could point away from the audio. Found by an external
+  review (Codex) of the mic pipeline.
+
 The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-free**: every 32ms period is sent continuously (batched into 80ms frames) so openwakeword scores an uninterrupted stream, and no adaptive gain state can drift with room noise. The VAD gate and AGC apply only to bounded `lock_mic` turn streams (button-triggered), which get a fresh `ResetAGC()` per stream.
 
 - **Beamformer** (`internal/beamformer/`) — selects the perimeter mic with the highest onset energy ratio (fast/slow EWMA) at voice turn start, then locks for the duration. Its `extractChannel` also applies the fixed mic gain (`micGainDb`, default +24dB) against the full 24-bit sample before quantising to S16 — captured speech sits at ~−70dBFS, so gain must happen pre-truncation to recover real resolution. `vadThreshold` stays in pre-gain units (the device scales it by the gain internally). **It is a selector, not a summing beamformer, and that is settled — do not propose delay-and-sum.** A frequency-domain implementation (exact FFT phase shifts, no interpolation artefacts) exists in `device/tools/bf_capture` and was measured as only marginally better than mic selection. The reason is the 72mm aperture, not the code: diffuse-field noise coherence is 0.84–0.99 below 1.5kHz where speech energy lives, so a sum has almost nothing uncorrelated to cancel, and 36mm adjacent spacing puts spatial aliasing at 4.76kHz — a working window of roughly 2–4.7kHz. Superdirective/differential beamforming is the only class that works at this aperture and it trades against white-noise gain (20dB+ amplification of sensor self-noise) on unmatched capsules across four ADCs. Full derivation and the coherence table are in SETUP.md's mic-array section (SETUP.md is the architecture reference; the chronological log is JOURNAL.md, the rooting prerequisites docs/rooting.md). **Far-field reach is therefore not a beamforming problem here** — it is room noise floor, distance and placement; the single-channel levers (`nsAsr`, wake model) are the ones that exist. **Reopened by Wil on 2026-10-14** for superdirective, with the metric
