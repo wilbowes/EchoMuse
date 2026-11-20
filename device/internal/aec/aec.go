@@ -36,6 +36,24 @@ package aec
 #include "src/mdf.c"
 
 float em_fft_parity(int n);
+
+// em_aec_bypass is what speex_echo_cancellation outputs when the far end
+// has been bit-exact silent for longer than the filter's history: the echo
+// estimate is then exactly zero and the pre- and de-emphasis cancel, which
+// leaves speex's DC notch. It runs that notch on the state's own memory and
+// leaves memD, memE and memX where speex would have, so cancelling resumes
+// on the next sound with no step. The filter itself is untouched.
+static void em_aec_bypass(SpeexEchoState *st, const spx_int16_t *in, spx_int16_t *out)
+{
+   int i, n = st->frame_size;
+   filter_dc_notch16(in, st->notch_radius, st->input, n, st->notch_mem, 1);
+   for (i = 0; i < n; i++)
+      out[i] = WORD2INT(st->input[i]);
+   st->memD[0] = st->memE[0] = st->input[n - 1];
+   // One pre-emphasis memory per far-end channel (K > 1 with #1219's x²).
+   for (i = 0; i < st->K; i++)
+      st->memX[i] = 0;
+}
 */
 import "C"
 
@@ -124,6 +142,12 @@ type Canceller struct {
 	// nothing to learn or remove, and running them is most of the cost.
 	farQuiet  int
 	micFrames uint64
+	// bypassFrames counts frames passed through em_aec_bypass: past
+	// quietHold silent reference frames even the microphone in use has
+	// nothing to cancel, and the canceller was 3.1% of a core while
+	// nothing played (C95, 2026-11-17).
+	bypassFrames uint64
+	noIdleBypass bool // tests only: run speex itself, to compare against
 
 	statePath   string    // saved echo path (persist.go); empty = off
 	lastSaveTry time.Time // monotonic, rate-limits maybeSaveLocked
@@ -595,7 +619,24 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 			}
 		}
 
-		C.speex_echo_cancellation(c.st, c.micBuf, c.refBuf, c.outBuf)
+		quiet := true
+		for _, v := range ref {
+			if v != 0 {
+				quiet = false
+				break
+			}
+		}
+		if quiet {
+			c.farQuiet++
+		} else {
+			c.farQuiet = 0
+		}
+		if c.farQuiet > quietHold && !c.noIdleBypass {
+			C.em_aec_bypass(c.st, c.micBuf, c.outBuf) // nothing playing: see em_aec_bypass
+			c.bypassFrames++
+		} else {
+			C.speex_echo_cancellation(c.st, c.micBuf, c.refBuf, c.outBuf)
+		}
 		for i := 0; i < FrameSize; i++ {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
 		}
@@ -734,11 +775,16 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 			if m != active && c.farQuiet > quietHold {
 				continue
 			}
-			c.micFrames++
 			sub := mics[m][off : off+FrameSize*2]
 			for i := 0; i < FrameSize; i++ {
 				mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))
 			}
+			if c.farQuiet > quietHold && !c.noIdleBypass { // only the active mic gets here
+				C.em_aec_bypass(c.micStates[m], c.micBuf, c.outBuf)
+				c.bypassFrames++
+				continue
+			}
+			c.micFrames++
 			C.speex_echo_cancellation(c.micStates[m], c.micBuf, c.refBuf, c.outBuf)
 		}
 		for i := 0; i < FrameSize; i++ {
