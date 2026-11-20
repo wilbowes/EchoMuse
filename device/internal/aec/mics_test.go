@@ -301,3 +301,32 @@ func TestPffftMatchesKissInSpeexsPacking(t *testing.T) {
 		}
 	}
 }
+
+// A tapped microphone's audio is exactly what the canceller gives when that
+// microphone is the one in use: each filter is its own, so scoring a tap is
+// scoring the mic as a turn on it would hear it. The active output is
+// unchanged by tapping, and a tap outside the array comes back nil.
+func TestTapsAreTheMicAsIfInUse(t *testing.T) {
+	const frames = 40
+	signal := synth(frames * FrameSize)
+	echoes := sevenEchoes(signal)
+	tapped, plain2, plain0 := hwCanceller(64), hwCanceller(64), hwCanceller(64)
+	for f := 0; f < frames; f++ {
+		lo, hi := f*FrameSize, (f+1)*FrameSize
+		mics := make([][]byte, NumMics)
+		for ch := range mics {
+			mics[ch] = toBytes(echoes[ch][lo:hi])
+		}
+		ref := toBytes(signal[lo:hi])
+		out, taps := tapped.ProcessMicsWithRefTaps(mics, 0, ref, []int{2, 99})
+		if want := plain0.ProcessMicsWithRef(mics, 0, ref); !bytes.Equal(out, want) {
+			t.Fatalf("frame %d: tapping changed the active microphone's output", f)
+		}
+		if want := plain2.ProcessMicsWithRef(mics, 2, ref); !bytes.Equal(taps[0], want) {
+			t.Fatalf("frame %d: tap on mic 2 differs from mic 2 in use", f)
+		}
+		if taps[1] != nil {
+			t.Fatalf("frame %d: a tap outside the array returned audio", f)
+		}
+	}
+}

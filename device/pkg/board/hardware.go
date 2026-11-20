@@ -222,6 +222,13 @@ type MicArray struct {
 	// playback does not clip the S16 extraction (clipping is distortion no
 	// canceller removes). 0 is the default 6dB.
 	AECHeadroomDb float64
+	// ReplyTaps is how many other microphones are scored for the wake word
+	// while a reply plays, beside the one the wake stream scores. The talker
+	// may be on any side, and one microphone facing away caught 4-6 of 9-11
+	// barge-ins at 3 m where the best of the rest caught nearly all (41C8 and
+	// 15LE, 2026-11-20). Each costs a wake scorer (~20% of a core) during
+	// replies only. 0: the wake stream alone.
+	ReplyTaps int
 }
 
 // Mic is a microphone's channel and its angle.
@@ -284,6 +291,9 @@ var donutMics = MicArray{
 	// clipped, it reached 14.5-19dB, and replayed barge-ins went from 1 to 8
 	// over the same two replies (2026-11-19).
 	AECHeadroomDb: 12,
+	// Every other microphone: with four, plain mics caught as many
+	// barge-ins as fixed beams (6.75 of 10 against 5.25-7.25, 2026-11-20).
+	ReplyTaps: 3,
 }
 
 // biscuitHardware: names read off VVV (FireOS 5.5.5.4) on 2026-10-04, numbers

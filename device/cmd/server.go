@@ -1336,6 +1336,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		} else {
 			sc.SetBargeThreshold(0, nil)
 		}
+		syncReplyTaps(dc, cc, spk, srv, model, threshold, false)
 		if shadowState.mode != mode {
 			shadowState.mode = mode
 			log.Printf("[shadow] mode now %q (%s)", mode, actsOnCrossings(mode))
@@ -1370,6 +1371,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		benchScorer(sc, spk)
 	}
 	dc.SetShadowScorer(sc)
+	syncReplyTaps(dc, cc, spk, srv, model, threshold, true)
 	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
 	shadowState.streamSig = streamSig
 	bargeNote := "barge-in off"
@@ -1378,6 +1380,55 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	}
 	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f, %s) — %s",
 		sc.Info(), threshold, bargeNote, actsOnCrossings(mode))
+}
+
+// syncReplyTaps keeps the board's reply taps (MicArray.ReplyTaps) in step
+// with the wake scorer: present while barge-in is on, rebuilt with it, and
+// otherwise given its thresholds in place. A tap's crossing is the stream's:
+// it goes to onWakeCrossing, where a second crossing inside an open session
+// is refused.
+func syncReplyTaps(dc *client.DataClient, cc *client.ControlClient, spk *speaker.PcmSpeaker,
+	srv *server.Server, model string, threshold float32, rebuild bool) {
+	snap := config.Get().Snapshot()
+	n := board.CurrentLayout().Mics.ReplyTaps
+	if n <= 0 || spk == nil || snap.BargeInEnabled == nil || !*snap.BargeInEnabled {
+		if len(dc.TapScorers()) > 0 {
+			dc.SetTapScorers(nil, nil)
+			log.Printf("[taps] off")
+		}
+		return
+	}
+	bar := float32(snap.BargeInThreshold)
+	tune := func(sc *shadow.Scorer) {
+		sc.SetThreshold(threshold)
+		sc.SetMinFrames(snap.OwwMinFrames)
+		// Fed only while a reply plays, so always at the barge bar.
+		sc.SetBargeThreshold(bar, func() bool { return true })
+	}
+	if have := dc.TapScorers(); !rebuild && len(have) == n {
+		for _, sc := range have {
+			tune(sc)
+		}
+		return
+	}
+	var scs []*shadow.Scorer
+	for i := 0; i < n; i++ {
+		sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
+			onWakeCrossing(cc, dc, spk, srv, score, crossed, at)
+		})
+		if err != nil {
+			log.Printf("[taps] scorer %d not started: %v", i, err)
+			for _, s := range scs {
+				s.Close()
+			}
+			dc.SetTapScorers(nil, nil)
+			return
+		}
+		tune(sc)
+		scs = append(scs, sc)
+	}
+	dc.SetTapScorers(scs, func() bool { return spk.VoiceAudible(wakeword.ScoreSpan) })
+	log.Printf("[taps] %d more microphones scored during replies", n)
 }
 
 // replyStillHeard reports whether a voice reply is queued, arriving or still

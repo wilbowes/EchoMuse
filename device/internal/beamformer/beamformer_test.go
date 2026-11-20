@@ -1,6 +1,7 @@
 package beamformer
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/pkg/board"
@@ -337,5 +338,26 @@ func TestS32SamplesReadAsTheirTop24Bits(t *testing.T) {
 	// ch1 (the wake mic, no centre) is -(2<<16) of 2^23: -512 after 24-to-16.
 	if got := int16(uint16(mono[0]) | uint16(mono[1])<<8); got != -512 {
 		t.Errorf("ch1 extracted %d, want -512", got)
+	}
+}
+
+// SpreadChannels starts from the last turn's microphone and goes round the
+// array evenly; before any lock it starts from the first direction.
+func TestSpreadChannelsStartsFromTheLastLock(t *testing.T) {
+	a := board.MicArray{Channels: 4, Format: board.S32LE, Centre: -1, EchoRef: -1,
+		Perimeter: []board.Mic{{Ch: 1, Angle: 0}, {Ch: 2, Angle: 90}, {Ch: 3, Angle: 180}, {Ch: 0, Angle: 270}}}
+	b := New(a)
+	if got := b.SpreadChannels(4); !reflect.DeepEqual(got, []int{1, 2, 3, 0}) {
+		t.Fatalf("before a lock: %v", got)
+	}
+	b.lastLockedDir = 2
+	if got := b.SpreadChannels(4); !reflect.DeepEqual(got, []int{3, 0, 1, 2}) {
+		t.Fatalf("after locking direction 2: %v", got)
+	}
+	if got := b.SpreadChannels(2); !reflect.DeepEqual(got, []int{3, 1}) {
+		t.Fatalf("two, evenly spaced: %v", got)
+	}
+	if got := b.SpreadChannels(9); len(got) != 4 {
+		t.Fatalf("more than the array has: %v", got)
 	}
 }
