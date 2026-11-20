@@ -1215,6 +1215,14 @@ enabled it and nothing happened" this removes.
   11-11 put at 1-2/h only at bars of 0.15-0.20. The beams were learnt on 15LE
   itself on 11-06, so this is the same unit, room and talker: not yet shown on
   another Dot 2 or on the radar.
+- 2026-11-20, 15LE (Dot 2, emOS 32) with three reply taps (#1241, ch0/2/4
+  evenly spaced from the last lock): Wil barged 6 announcements at 3 m and
+  all 6 were cut, wakes 0.54-0.86; the wake stream's own mic (ch6) peaked
+  0.003-0.055 on every one, so each catch was a tap's. The tap set rotated
+  with the talker (ch0/2/4 and ch1/3/5). Server CPU during a reply 69% ->
+  97% of a core (peak 126% at the reply's start, scorers primed), idle 33%
+  unchanged; 2 cores online. No false-barge figure yet: no reply played with
+  nobody talking.
 - 2026-11-20, donut beams offline on the 41C8 3 m round (per-mic speex
   outputs): plane-wave superdirective MVDR (diffuse,
   loading 0.1) for the four button mics, 12 azimuths. Two-frame barge catches
