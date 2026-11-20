@@ -1123,6 +1123,48 @@ enabled it and nothing happened" this removes.
   open. Every device carries the full asset set whatever its wake word mode
   (controller `reconcile_action`), so this reaches controller-scoring devices
   too, on their next connect.
+- 2026-11-20, 41C8 (donut) on the stale-read-fixed bench build (server_x),
+  3 m barge round, 120 s, 86 s of full-volume reply: offline replay of the raw
+  capture found 9 wake attempts over playback; the device's
+  own stream passed the two-frame barge rule on 6, 8 of 9 peaked >= 0.5, and
+  the controller logged on-device wakes at 0.55-0.89 throughout. Offline
+  variants against the same capture, mean over 4 mics: speex echo 23.5 dB
+  removed; + preprocess residual-echo suppression 25.8 dB but barge-rule
+  catches 4.8/9 vs 5.3 (helps one quiet try, costs two loud ones); x^2 far-end
+  channel (#1219) +0.0-0.3 dB, 5.6/9: the donut's speaker has no even-order
+  distortion worth cancelling, unlike the Dot 2's. Neither is worth shipping
+  for the donut. Replay traps: the loopback-to-mic lag is 1469 samples
+  (constant, sync clean) and the reference needs ~32 samples of lead or the
+  echo onset falls before tap 0 (8.5 dB -> 19.8 dB); speex preprocess skips
+  residual suppression entirely while denoise is off.
+- 2026-11-20, 15LE (Dot 2, emOS 32) on the stale-read fix (chunked mic reads,
+  AvailMin): capture clock went from 176 ppm "fast" (EA ea.1, 19 h) to flat
+  (-150 ms first-batch offset, 0 ppm), so the Dot 2's "fast clock" was the
+  same stale whole-ring reads as the donut's. Idle mics carry a 45 Hz tone at
+  ~950 rms (Wil's server fans, acoustic; also on plain main). 3 m barge round,
+  11 tries over full-volume announcements: the wake scorer's mic (ch6) caught
+  4; offline, the best other mic passed the two-frame barge rule on 10 of 11
+  (ch0-ch2, the side facing the talker, 0.71-0.93 where ch6 scored 0.01-0.23).
+  The misses are the scoring mic facing away, not sync or cancelling (11-14 dB
+  on device and offline alike). All four catches were then closed by the
+  controller: the wake-over-announcement bug fixed the same day.
+- 2026-11-20, same 15LE round replayed through the 11-11 bench beam union
+  (sd0.1_30, rtf-en0.01_45, rtf-sd1.0_45 on the per-mic canceller output, no
+  post-filter): two-frame barge catches of 11, mean over 4
+  frame phases: ch6 alone 4.25, three beams 10.5 (ch6 adds nothing), three
+  plain mics (ch0/2/4) 8.25, all seven mics 9.5. No false fire in 20 s of
+  reply with nobody talking (max 0.04): too short to bound the false rate, which
+  11-11 put at 1-2/h only at bars of 0.15-0.20. The beams were learnt on 15LE
+  itself on 11-06, so this is the same unit, room and talker: not yet shown on
+  another Dot 2 or on the radar.
+- 2026-11-20, donut beams offline on the 41C8 3 m round (per-mic speex
+  outputs): plane-wave superdirective MVDR (diffuse,
+  loading 0.1) for the four button mics, 12 azimuths. Two-frame barge catches
+  of 10 tries, mean of 4 phases: the four plain mics 6.75; three evenly spaced
+  beams 5.25-6.50 depending on rotation; four beams 5.75; all twelve 7.25. No
+  false fire in 49 s of reply-only audio for any set. Geometry-steered beams do
+  not beat plain mics on the donut (4 mics, 3 degrees of freedom); talker-learnt
+  steering was not tried (no calibration capture on 41C8).
 
 ## The external audio jack
 
