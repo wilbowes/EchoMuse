@@ -103,8 +103,12 @@ type Scorer struct {
 	// scorer exactly as it was.
 	bargeThreshold float32
 	speakerActive  func() bool
-	refract        time.Duration
-	onCross        func(score, threshold float32, at time.Time)
+	// replyAudible is whether the speaker is playing a REPLY (the assistant's
+	// own voice) rather than only music. While it does, the reply rules apply
+	// whatever the two thresholds are (barsLocked). Nil: music rules only.
+	replyAudible func() bool
+	refract      time.Duration
+	onCross      func(score, threshold float32, at time.Time)
 
 	ch   chan queued
 	done chan struct{}
@@ -302,13 +306,52 @@ func (s *Scorer) SetBargeThreshold(t float32, active func() bool) {
 	s.mu.Unlock()
 }
 
-// effectiveThreshold picks the bar currently in force. Caller holds mu.
-func (s *Scorer) effectiveThresholdLocked() float32 {
-	if s.bargeThreshold > 0 && s.speakerActive != nil && s.speakerActive() &&
-		s.bargeThreshold < s.threshold {
-		return s.bargeThreshold
+// PlaybackOneFrameBar is the lowest score at which ONE frame is a wake word
+// while the speaker plays a reply, whatever the wake threshold says. Across
+// 505 near-misses and 30 real detections on a live fleet no genuine wake word
+// scored below 0.502 (em_barge.decide), and under the echo a real one can hold
+// the bar for a single frame (C95 at 3m: 0.53-0.73). A wake threshold set
+// below it, for a quiet room or a model that scores low, must not also lower
+// the bar for one frame of the assistant's own voice: on the office Dot
+// (owwThreshold 0.25 = bargeInThreshold) one frame at that bar was enough to
+// cut a reply nobody had interrupted, at 0.317 (2026-11-20).
+const PlaybackOneFrameBar = 0.5
+
+// SetReplyAudible sets the predicate for "a reply is audible" (the speaker's
+// voice plane, not music). Pass nil to clear it.
+func (s *Scorer) SetReplyAudible(audible func() bool) {
+	s.mu.Lock()
+	s.replyAudible = audible
+	s.mu.Unlock()
+}
+
+// barsLocked picks the bars in force for the next frame: bar is what a frame
+// must clear; playback is whether the playback rules apply (two consecutive
+// frames, or one at oneFrame).
+//
+//   - Speaker playing with bargeInThreshold under the wake threshold: the
+//     barge bar, as always (music included).
+//   - A reply audible: the playback rules WHATEVER the two thresholds are, and
+//     one frame needs PlaybackOneFrameBar at least. When the wake threshold
+//     sat at or under bargeInThreshold the pair rule used to vanish and one
+//     frame of the reply barged.
+//   - Music alone with the wake threshold at or under the barge bar: the
+//     normal wake rules, unchanged.
+//
+// Caller holds mu.
+func (s *Scorer) barsLocked() (bar, oneFrame float32, playback bool) {
+	bar, oneFrame = s.threshold, s.threshold
+	if s.bargeThreshold <= 0 || s.speakerActive == nil || !s.speakerActive() {
+		return bar, oneFrame, false
 	}
-	return s.threshold
+	low := s.bargeThreshold < s.threshold
+	if low {
+		bar = s.bargeThreshold
+	}
+	if s.replyAudible != nil && s.replyAudible() {
+		return bar, max(s.threshold, PlaybackOneFrameBar), true
+	}
+	return bar, oneFrame, low
 }
 
 // Push queues one chunk of 16kHz mono PCM. It never blocks and never fails:
@@ -477,8 +520,7 @@ func (s *Scorer) run() {
 		s.mu.Lock()
 		reset := s.resetReq
 		s.resetReq = false
-		threshold := s.effectiveThresholdLocked()
-		lowBar := threshold < s.threshold
+		threshold, oneFrame, lowBar := s.barsLocked()
 		s.stats.Threshold = threshold
 		s.mu.Unlock()
 
@@ -574,8 +616,9 @@ func (s *Scorer) run() {
 		// One frame at the normal wake bar also crosses at the barge bar: under
 		// the echo a real wake word often holds that bar for a single frame
 		// (C95 at 3m, 2026-11-18), which the reply alone never reached.
+		// While a reply plays, never below PlaybackOneFrameBar (see there).
 		// Not with minFrames > 1, where a wake needs that many frames anyway.
-		high := lowBar && s.minFrames <= 1 && score >= s.threshold
+		high := lowBar && s.minFrames <= 1 && score >= oneFrame
 		crossed := (high || above && (!lowBar || s.prevAbove) && (lowBar || len(s.runAts) >= need)) &&
 			now.Sub(s.lastCross) >= s.refract
 		// A crossing at the barge bar is dated from the first of its two
