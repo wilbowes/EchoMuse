@@ -1218,8 +1218,11 @@ enabled it and nothing happened" this removes.
 - 2026-11-20, 15LE (Dot 2, emOS 32) with three reply taps (#1241, ch0/2/4
   evenly spaced from the last lock): Wil barged 6 announcements at 3 m and
   all 6 were cut, wakes 0.54-0.86; the wake stream's own mic (ch6) peaked
-  0.003-0.055 on every one, so each catch was a tap's. The tap set rotated
-  with the talker (ch0/2/4 and ch1/3/5). Server CPU during a reply 69% ->
+  0.003-0.055 on every one, so each catch was a tap's. All six from one
+  spot, yet the tap set swung between ch0/2/4 and ch1/3/5 as the beam lock
+  wandered (ch4, ch0, the ch1/3/5 side): evenly spaced taps held up where
+  three beside the lock would have bet on a wrong direction. Other sides not
+  tried. Server CPU during a reply 69% ->
   97% of a core (peak 126% at the reply's start, scorers primed), idle 33%
   unchanged; 2 cores online. No false-barge figure yet: no reply played with
   nobody talking.
