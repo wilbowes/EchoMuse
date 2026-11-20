@@ -116,6 +116,7 @@ type Beamformer struct {
 	// lockedChannel is the ALSA channel selected at gate open.
 	// -1 means unlocked (use live best-direction selection).
 	lockedChannel int
+	lastLockedDir int // direction index of the most recent Lock, -1 before any
 
 	// clippedSamples counts output samples clamped to int16 range by the
 	// mic gain in extractChannel. Only touched from the mic goroutine
@@ -141,6 +142,7 @@ func New(a board.MicArray) *Beamformer {
 	n := len(a.Perimeter)
 	b := &Beamformer{
 		lockedChannel:      -1,
+		lastLockedDir:      -1,
 		nDirections:        n,
 		nMics:              a.NumMics(),
 		frameSize:          a.Channels * a.Format.Bytes(),
@@ -244,6 +246,23 @@ func (b *Beamformer) Lock(enabled bool) {
 	}
 
 	b.lockedChannel = b.directionToChannel[best]
+	b.lastLockedDir = best
+}
+
+// SpreadChannels returns n perimeter microphones spaced evenly round the
+// array, starting from the direction the last turn locked to (the talker's,
+// as far as the device knows) or the first direction before any lock.
+func (b *Beamformer) SpreadChannels(n int) []int {
+	if n <= 0 || b.nDirections == 0 {
+		return nil
+	}
+	n = min(n, b.nDirections)
+	start := max(b.lastLockedDir, 0)
+	out := make([]int, n)
+	for i := range out {
+		out[i] = b.directionToChannel[(start+i*b.nDirections/n)%b.nDirections]
+	}
+	return out
 }
 
 // onsetRatio returns energySmooth[di] / energyBaseline[di].

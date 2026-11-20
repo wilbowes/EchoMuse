@@ -345,8 +345,29 @@ func (s *Scorer) PushBytesAt(b []byte, at time.Time) {
 
 // queued is one frame and its capture time.
 type queued struct {
-	pcm []int16
-	at  time.Time
+	pcm   []int16
+	at    time.Time
+	prime bool // reset, then take pcm as history only: no scores
+}
+
+// Prime resets the scorer and gives it pcm (S16LE, any multiple of 80ms) as
+// the history the next frame is scored against, so it can score from that
+// frame instead of warming up for ~1.5s. One queue slot, whatever its length.
+func (s *Scorer) Prime(b []byte) {
+	if s.closed.Load() {
+		return
+	}
+	pcm := make([]int16, len(b)/2)
+	for i := range pcm {
+		pcm[i] = int16(uint16(b[2*i]) | uint16(b[2*i+1])<<8)
+	}
+	select {
+	case s.ch <- queued{pcm: pcm, prime: true}:
+	default:
+		s.mu.Lock()
+		s.stats.Drops++
+		s.mu.Unlock()
+	}
 }
 
 // enqueue is the only path into the scorer, and the only place a drop can
@@ -461,6 +482,9 @@ func (s *Scorer) run() {
 		s.stats.Threshold = threshold
 		s.mu.Unlock()
 
+		if q.prime {
+			reset = true
+		}
 		if reset {
 			s.det.Reset()
 			s.mu.Lock()
@@ -469,6 +493,20 @@ func (s *Scorer) run() {
 			s.runAts = s.runAts[:0]
 			s.hist, s.trace = nil, nil
 			s.mu.Unlock()
+		}
+
+		if q.prime {
+			for len(pcm) >= 1280 {
+				if _, err := s.det.Push(pcm[:1280]); err != nil {
+					s.recordErr(err)
+					break
+				}
+				pcm = pcm[1280:]
+			}
+			s.mu.Lock()
+			s.ready = s.det.Ready()
+			s.mu.Unlock()
+			continue
 		}
 
 		t0 := time.Now()

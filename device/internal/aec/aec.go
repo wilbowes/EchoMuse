@@ -693,8 +693,38 @@ func (c *Canceller) noteAttLocked(micRMS, outRMS, refRMS float64, useHW bool, mi
 // Anything it cannot handle goes the same way and is logged there, never
 // silently bypassed.
 func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []byte {
+	out, _ := c.processMics(mics, active, ref, nil)
+	return out
+}
+
+// ProcessMicsWithRefTaps is ProcessMicsWithRef that also returns the cancelled
+// audio of the microphones in taps, in that order, for scoring them beside
+// the one in use. An entry is nil when that microphone's cancelled audio is
+// not a whole period (a tap outside the array, or the far end went quiet and
+// the idle microphones rested part of the way through).
+func (c *Canceller) ProcessMicsWithRefTaps(mics [][]byte, active int, ref []byte, taps []int) ([]byte, [][]byte) {
+	want := make([][]byte, len(mics))
+	for _, m := range taps {
+		if m >= 0 && m < len(mics) && len(mics[m]) > 0 {
+			want[m] = make([]byte, len(mics[m]))
+		}
+	}
+	out, got := c.processMics(mics, active, ref, want)
+	tapped := make([][]byte, len(taps))
+	for i, m := range taps {
+		if m >= 0 && m < len(got) {
+			tapped[i] = got[m]
+		}
+	}
+	return out, tapped
+}
+
+// processMics cancels every microphone and returns the active one's output.
+// want[m], when non-nil, receives microphone m's cancelled audio; it comes
+// back nil unless every frame of the period filled it.
+func (c *Canceller) processMics(mics [][]byte, active int, ref []byte, want [][]byte) ([]byte, [][]byte) {
 	if active < 0 || active >= len(mics) {
-		return nil
+		return nil, nil
 	}
 	if ref != nil && !c.refClean.Load() {
 		ref = c.dealias.clean(ref)
@@ -708,9 +738,10 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 		ok = ok && len(m) == len(mono)
 	}
 	if !ok {
-		return c.processLocked(mono, ref)
+		return c.processLocked(mono, ref), nil
 	}
 
+	filled := make([]int, len(want))
 	out := make([]byte, len(mono))
 	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), FrameSize)
 	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
@@ -740,13 +771,25 @@ func (c *Canceller) ProcessMicsWithRef(mics [][]byte, active int, ref []byte) []
 				mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))
 			}
 			C.speex_echo_cancellation(c.micStates[m], c.micBuf, c.refBuf, c.outBuf)
+			if m < len(want) && want[m] != nil {
+				for i := 0; i < FrameSize; i++ {
+					binary.LittleEndian.PutUint16(want[m][off+i*2:], uint16(res[i]))
+				}
+				filled[m]++
+			}
 		}
 		for i := 0; i < FrameSize; i++ {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
 		}
 		c.noteAttLocked(frameRMS(mic), frameRMS(res), frameRMS(far), true, active)
 	}
-	return out
+	frames := len(mono) / (FrameSize * 2)
+	for m := range want {
+		if want[m] != nil && filled[m] != frames {
+			want[m] = nil
+		}
+	}
+	return out, want
 }
 
 func frameRMS(s []int16) float64 {

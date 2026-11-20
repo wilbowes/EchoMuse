@@ -910,3 +910,22 @@ func TestBargeWindowReportsThePeakAtTheBargeBar(t *testing.T) {
 		t.Fatal("window not reset")
 	}
 }
+
+// A primed scorer scores the very next frame: a tap starting a reply cold was
+// deaf for its first ~1.5s (41C8, 2026-11-20). The history takes one queue
+// slot, so it cannot crowd out live frames.
+func TestPrimeLetsTheNextFrameScore(t *testing.T) {
+	inf := &fakeInferer{}
+	s := NewScorer(inf, 0.5, nil)
+	defer s.Close()
+	s.Prime(make([]byte, 25*2*wakeword.ChunkSamples))
+	waitFor(t, "primed", s.Ready)
+	if st := s.peek(); st.Frames != 0 {
+		t.Fatalf("priming counted %d frames as scored", st.Frames)
+	}
+	s.Push(frame())
+	waitFor(t, "first frame", func() bool { return s.processed() == 1 })
+	if st := s.peek(); st.NotReady != 0 {
+		t.Errorf("first frame after priming was not ready (%d)", st.NotReady)
+	}
+}

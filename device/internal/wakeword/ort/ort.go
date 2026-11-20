@@ -8,11 +8,12 @@
 // the 12.3MB library is distributed separately.
 //
 // Feeding it: the parent package owns all buffering and calls the three
-// methods here in a fixed order per 80ms chunk. Nothing in this package is
-// safe for concurrent use — one Inferer belongs to one goroutine, matching
-// wakeword.Detector's own contract. ORT sessions are not goroutine-safe with
-// the single-threaded, spin-free options used here, and adding a mutex would
-// invite exactly the concurrent use the design rules out.
+// methods here in a fixed order per 80ms chunk. One Inferer belongs to one
+// goroutine, matching wakeword.Detector's own contract. Inferers opened on the
+// same Runtime with the same files share the ORT sessions, which hold no
+// per-stream state (the streaming embedding's state is the Inferer's), so a
+// scorer per microphone does not load the models again; each shared session
+// runs one call at a time under its own mutex.
 //
 // Configuration is not a matter of taste. DefaultOptions encodes what was
 // measured on an Echo Dot Gen 2 (Cortex-A7 @ ~1GHz, one core typically
@@ -78,6 +79,10 @@ func DefaultOptions() Options {
 type Runtime struct {
 	rt      C.em_runtime
 	version string
+
+	mu      sync.Mutex
+	shared  map[string]*model
+	streams map[string]*sharedStream
 }
 
 // Open loads libonnxruntime.so from libPath (an absolute path, or a soname to
@@ -134,11 +139,89 @@ type model struct {
 	m    C.em_model
 	name string
 
-	// out is reused across calls: inference runs 12.5 times a second forever,
-	// so the steady state must not allocate per frame. Each model has its own
-	// buffer, which is what lets Melspec's result stay valid across an Embed
-	// call — the parent package interleaves them.
-	out []float32
+	// For a session shared between Inferers: run holds mu, and the last
+	// release frees it.
+	mu   sync.Mutex
+	key  string
+	refs int
+}
+
+type sharedStream struct {
+	mu   sync.Mutex
+	s    C.em_stream
+	key  string
+	refs int
+}
+
+func shareKey(path string, o Options) string {
+	return fmt.Sprintf("%s|%d|%v|%v", path, o.Threads, o.XNNPACK, o.AllowSpinning)
+}
+
+// acquire returns the session for path, loading it on first use.
+func (r *Runtime) acquire(path, name string, o Options) (*model, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := shareKey(path, o)
+	if m := r.shared[k]; m != nil {
+		m.refs++
+		return m, nil
+	}
+	m, err := r.load(path, name, o)
+	if err != nil {
+		return nil, err
+	}
+	m.key, m.refs = k, 1
+	if r.shared == nil {
+		r.shared = map[string]*model{}
+	}
+	r.shared[k] = m
+	return m, nil
+}
+
+func (r *Runtime) release(m *model) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m.refs--; m.refs > 0 {
+		return
+	}
+	delete(r.shared, m.key)
+	m.mu.Lock()
+	C.em_model_free(&m.m)
+	m.mu.Unlock()
+}
+
+func (r *Runtime) acquireStream(path string, o Options) (*sharedStream, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := shareKey(path, o)
+	if s := r.streams[k]; s != nil {
+		s.refs++
+		return s, nil
+	}
+	cPath := C.CString(path)
+	defer C.free(unsafe.Pointer(cPath))
+	s := &sharedStream{key: k, refs: 1}
+	if err := goErr(C.em_stream_load(&r.rt, cPath, C.int(o.Threads), cBool(o.XNNPACK),
+		cBool(o.AllowSpinning), &s.s)); err != nil {
+		return nil, err
+	}
+	if r.streams == nil {
+		r.streams = map[string]*sharedStream{}
+	}
+	r.streams[k] = s
+	return s, nil
+}
+
+func (r *Runtime) releaseStream(s *sharedStream) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if s.refs--; s.refs > 0 {
+		return
+	}
+	delete(r.streams, s.key)
+	s.mu.Lock()
+	C.em_stream_free(&s.s)
+	s.mu.Unlock()
 }
 
 func (r *Runtime) load(path, name string, o Options) (*model, error) {
@@ -159,7 +242,14 @@ func (r *Runtime) load(path, name string, o Options) (*model, error) {
 
 // Inferer runs the three models. It satisfies wakeword.Inferer.
 type Inferer struct {
+	rt            *Runtime
 	mel, emb, cls *model
+
+	// Output buffers, reused across calls: inference runs 12.5 times a second
+	// forever, so the steady state must not allocate per frame. One per model,
+	// which is what lets Melspec's result stay valid across an Embed call —
+	// the parent package interleaves them.
+	melOut, embOut, clsOut []float32
 
 	xnnpack bool
 
@@ -169,31 +259,32 @@ type Inferer struct {
 }
 
 type streamModel struct {
-	s     C.em_stream
+	sh    *sharedStream
 	state []float32
 	emb   []float32
 }
 
-// NewInferer opens the three sessions. The caller owns the result and must
-// Close it; a partially-constructed Inferer is torn down on error rather than
-// leaking sessions.
+// NewInferer opens the three sessions, or shares them with an Inferer already
+// open on the same files. The caller owns the result and must Close it; a
+// partially-constructed Inferer is torn down on error rather than leaking
+// sessions.
 func (r *Runtime) NewInferer(m Models, o Options) (*Inferer, error) {
 	if o.Threads < 1 {
 		return nil, fmt.Errorf("ort: Threads must be at least 1, got %d", o.Threads)
 	}
-	inf := &Inferer{}
+	inf := &Inferer{rt: r}
 	var err error
-	if inf.mel, err = r.load(m.Melspec, "melspectrogram", o); err != nil {
+	if inf.mel, err = r.acquire(m.Melspec, "melspectrogram", o); err != nil {
 		return nil, err
 	}
 	// XNNPACK availability is a property of the runtime build, so whether it
 	// attached to the first session settles it for all three.
 	inf.xnnpack = inf.mel.m.xnnpack != 0
-	if inf.emb, err = r.load(m.Embedding, "embedding", o); err != nil {
+	if inf.emb, err = r.acquire(m.Embedding, "embedding", o); err != nil {
 		inf.Close()
 		return nil, err
 	}
-	if inf.cls, err = r.load(m.Classifier, "classifier", o); err != nil {
+	if inf.cls, err = r.acquire(m.Classifier, "classifier", o); err != nil {
 		inf.Close()
 		return nil, err
 	}
@@ -210,18 +301,16 @@ func (i *Inferer) openStream(r *Runtime, path string, o Options) {
 		i.streamOff = "no streaming model given"
 		return
 	}
-	cPath := C.CString(path)
-	defer C.free(unsafe.Pointer(cPath))
-	sm := &streamModel{emb: make([]float32, wakeword.FeatDim)}
-	if err := goErr(C.em_stream_load(&r.rt, cPath, C.int(o.Threads), cBool(o.XNNPACK),
-		cBool(o.AllowSpinning), &sm.s)); err != nil {
+	sh, err := r.acquireStream(path, o)
+	if err != nil {
 		i.streamOff = "load: " + err.Error()
 		return
 	}
-	sm.state = make([]float32, int(sm.s.total))
+	sm := &streamModel{sh: sh, emb: make([]float32, wakeword.FeatDim)}
+	sm.state = make([]float32, int(sh.s.total))
 	i.stream = sm
 	if err := i.verifyStream(); err != nil {
-		C.em_stream_free(&sm.s)
+		r.releaseStream(sh)
 		i.stream = nil
 		i.streamOff = "self-check: " + err.Error()
 		return
@@ -318,8 +407,10 @@ func (i *Inferer) EmbedStep(frames []float32) ([]float32, error) {
 	if want := wakeword.MelStep * wakeword.MelBins; len(frames) != want {
 		return nil, fmt.Errorf("ort: embed step wants %d values, got %d", want, len(frames))
 	}
-	err := goErr(C.em_stream_run(&sm.s, (*C.float)(unsafe.Pointer(&frames[0])),
+	sm.sh.mu.Lock()
+	err := goErr(C.em_stream_run(&sm.sh.s, (*C.float)(unsafe.Pointer(&frames[0])),
 		(*C.float)(unsafe.Pointer(&sm.state[0])), (*C.float)(unsafe.Pointer(&sm.emb[0]))))
+	sm.sh.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("ort: run streaming embedding: %w", err)
 	}
@@ -335,12 +426,12 @@ func (i *Inferer) XNNPACKActive() bool { return i.xnnpack }
 func (i *Inferer) Close() error {
 	for _, m := range []*model{i.mel, i.emb, i.cls} {
 		if m != nil {
-			C.em_model_free(&m.m)
+			i.rt.release(m)
 		}
 	}
 	i.mel, i.emb, i.cls = nil, nil, nil
 	if i.stream != nil {
-		C.em_stream_free(&i.stream.s)
+		i.rt.releaseStream(i.stream.sh)
 		i.stream = nil
 		i.streamOff = "closed"
 	}
@@ -365,7 +456,7 @@ func (i *Inferer) Melspec(samples []float32) ([]float32, int, error) {
 		return nil, 0, errors.New("ort: melspec called with no samples")
 	}
 	shape := [2]C.int64_t{1, C.int64_t(len(samples))}
-	out, err := i.run(i.mel, samples, shape[:])
+	out, err := i.run(i.mel, &i.melOut, samples, shape[:])
 	if err != nil {
 		return nil, 0, err
 	}
@@ -385,7 +476,7 @@ func (i *Inferer) Embed(window []float32) ([]float32, error) {
 		return nil, fmt.Errorf("ort: embed wants %d values, got %d", want, len(window))
 	}
 	shape := [4]C.int64_t{1, wakeword.MelWindow, wakeword.MelBins, 1}
-	out, err := i.run(i.emb, window, shape[:])
+	out, err := i.run(i.emb, &i.embOut, window, shape[:])
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +496,7 @@ func (i *Inferer) Classify(feats []float32) (float32, error) {
 		return 0, fmt.Errorf("ort: classify wants %d values, got %d", want, len(feats))
 	}
 	shape := [3]C.int64_t{1, wakeword.FeatWindow, wakeword.FeatDim}
-	out, err := i.run(i.cls, feats, shape[:])
+	out, err := i.run(i.cls, &i.clsOut, feats, shape[:])
 	if err != nil {
 		return 0, err
 	}
@@ -417,18 +508,20 @@ func (i *Inferer) Classify(feats []float32) (float32, error) {
 
 // run is the single path into C: it hands ORT a pointer to Go memory (read
 // only for the duration of the call, which cgo permits for a slice of
-// non-pointer data) and copies the malloc'd output into the model's reusable
+// non-pointer data) and copies the malloc'd output into the caller's reusable
 // buffer before returning, so no C allocation outlives this function and the
 // steady state does not allocate.
-func (i *Inferer) run(m *model, in []float32, shape []C.int64_t) ([]float32, error) {
+func (i *Inferer) run(m *model, buf *[]float32, in []float32, shape []C.int64_t) ([]float32, error) {
 	var (
 		outPtr *C.float
 		outN   C.size_t
 	)
+	m.mu.Lock()
 	err := goErr(C.em_model_run(&m.m,
 		(*C.float)(unsafe.Pointer(&in[0])), C.size_t(len(in)),
 		&shape[0], C.size_t(len(shape)),
 		&outPtr, &outN))
+	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("ort: run %s: %w", m.name, err)
 	}
@@ -436,8 +529,8 @@ func (i *Inferer) run(m *model, in []float32, shape []C.int64_t) ([]float32, err
 		return nil, fmt.Errorf("ort: run %s: no output", m.name)
 	}
 	defer C.free(unsafe.Pointer(outPtr))
-	m.out = append(m.out[:0], unsafe.Slice((*float32)(unsafe.Pointer(outPtr)), int(outN))...)
-	return m.out, nil
+	*buf = append((*buf)[:0], unsafe.Slice((*float32)(unsafe.Pointer(outPtr)), int(outN))...)
+	return *buf, nil
 }
 
 // goErr converts the shim's malloc'd char* convention into a Go error, freeing

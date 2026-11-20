@@ -248,6 +248,7 @@ type DataClient struct {
 	// goroutine is pushing frames into it.
 	shadowMu     sync.Mutex
 	shadowScorer *shadow.Scorer
+	taps         tapScoring // the other mics' scorers during a reply (taps.go)
 
 	// listenGate decides what of the wake stream may leave the device when
 	// listenState is ListenLocal. Always present; idle in the other states.
@@ -550,6 +551,9 @@ func (d *DataClient) SetShadowScorer(s *shadow.Scorer) {
 	d.shadowMu.Unlock()
 	if old != nil {
 		old.Close()
+	}
+	if s == nil {
+		d.SetTapScorers(nil, nil)
 	}
 }
 
@@ -1437,7 +1441,18 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				// the echo path differs per microphone and a turn locks to
 				// a different one each time (#814).
 				sel := d.beam.OutputChannel(beamAngle)
-				mono = d.aec.ProcessMicsWithRef(d.beam.MicChannels(raw, extractGain, sel, mono), sel, echoRef)
+				if taps := d.tapPlan(sel); taps != nil {
+					var tapped [][]byte
+					mono, tapped = d.aec.ProcessMicsWithRefTaps(d.beam.MicChannels(raw, extractGain, sel, mono), sel, echoRef, taps)
+					for _, t := range tapped {
+						if t != nil && aecArmed {
+							applyMakeup(t, d.aecHeadroomGain())
+						}
+					}
+					d.pushTaps(tapped)
+				} else {
+					mono = d.aec.ProcessMicsWithRef(d.beam.MicChannels(raw, extractGain, sel, mono), sel, echoRef)
+				}
 			} else {
 				mono = d.aec.Process(mono)
 			}
@@ -1564,7 +1579,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					// out of a 160ms-deep ring. Re-read per frame: a config
 					// push can swap the scorer mid-stream and close the old one.
 					if sc := d.ShadowScorer(); sc != nil {
+						if ScorerTap != nil {
+							ScorerTap("s", chunk)
+						}
 						sc.PushBytesAt(chunk, at)
+						d.noteStream(chunk)
 					}
 					d.routeWakeFrame(state, chunk, at, sendFrame, sendListenFrame)
 				}

@@ -2,6 +2,7 @@ package ort_test
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -332,5 +333,48 @@ func TestAWrongStreamModelFailsTheSelfCheck(t *testing.T) {
 	// And the stock path still reproduces Python.
 	if rep := fixture.Verify(inf, loadFixture(t)); !rep.Ok() || rep.Streaming {
 		t.Fatalf("stock path after a refused streaming model: ok=%v streaming=%v", rep.Ok(), rep.Streaming)
+	}
+}
+
+// TestInferersShareSessions: a scorer per microphone opens an Inferer each on
+// the same files, and they share the ORT sessions. Each must still reproduce
+// Python while the others run on other goroutines, and closing one must leave
+// the rest working.
+func TestInferersShareSessions(t *testing.T) {
+	lib, m := models(t)
+	rt, err := ort.Open(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx := loadFixture(t)
+	infs := make([]*ort.Inferer, 3)
+	for k := range infs {
+		if infs[k], err = rt.NewInferer(m, ort.DefaultOptions()); err != nil {
+			t.Fatalf("NewInferer %d: %v", k, err)
+		}
+	}
+	errs := make(chan error, len(infs))
+	for k, inf := range infs {
+		go func(k int, inf *ort.Inferer) {
+			if rep := fixture.Verify(inf, fx); !rep.Ok() {
+				errs <- fmt.Errorf("inferer %d diverged from Python while sharing", k)
+				return
+			}
+			errs <- nil
+		}(k, inf)
+	}
+	for range infs {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	infs[0].Close()
+	infs[1].Close()
+	if rep := fixture.Verify(infs[2], fx); !rep.Ok() {
+		t.Fatal("the last inferer stopped reproducing Python after the others closed")
+	}
+	infs[2].Close()
+	if _, err := infs[2].Classify(make([]float32, wakeword.FeatWindow*wakeword.FeatDim)); !errors.Is(err, ort.ErrClosed) {
+		t.Fatalf("Classify after Close: %v, want ErrClosed", err)
 	}
 }
