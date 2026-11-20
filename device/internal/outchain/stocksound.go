@@ -117,15 +117,25 @@ func newHoldMin(ms, fs float64) *holdMin {
 	return &holdMin{n: n, idx: make([]int, n), val: make([]float64, n)}
 }
 
+// wrap folds an index below 2n back into the ring. A compare, not `%`: the
+// 32-bit ARM build has no divide instruction and the modulo was a runtime
+// call (runtime.udiv) three times per sample.
+func (h *holdMin) wrap(i int) int {
+	if n := len(h.val); i >= n {
+		return i - n
+	}
+	return i
+}
+
 func (h *holdMin) push(v float64) float64 {
-	c := len(h.val)
-	for h.size > 0 && h.val[(h.head+h.size-1)%c] >= v {
+	for h.size > 0 && h.val[h.wrap(h.head+h.size-1)] >= v {
 		h.size--
 	}
-	h.idx[(h.head+h.size)%c], h.val[(h.head+h.size)%c] = h.t, v
+	at := h.wrap(h.head + h.size)
+	h.idx[at], h.val[at] = h.t, v
 	h.size++
 	for h.idx[h.head] <= h.t-h.n {
-		h.head = (h.head + 1) % c
+		h.head = h.wrap(h.head + 1)
 		h.size--
 	}
 	h.t++
