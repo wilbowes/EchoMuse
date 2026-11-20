@@ -677,7 +677,7 @@ func main() {
 	// The depth is read at duck time rather than latched, so a config change
 	// takes effect on the next turn without a restart.
 	controlClient.OnDuck(func(on bool) {
-		localDuck.Confirm()
+		localDuck.Confirm(on)
 		if on {
 			pcmSpeaker.SetDuck(config.Get().DuckDb)
 		} else {

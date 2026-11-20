@@ -16,12 +16,20 @@ import (
 // controller never answers for this device — the wake was ceded to another
 // Echo, or the link is gone — so a local duck must end by itself: when the
 // session closes unconfirmed, or after LocalDuckHold, whichever comes first.
+//
+// While the controller's own duck is on, a wake crossing changes nothing here.
+// That is a barge-in: the reply is being talked over, the music is already
+// ducked, and the controller sends no second `duck` for the interrupting turn
+// because for it the duck never ended. A local duck started there was never
+// confirmed, so its timer (or the barged session closing) put the music back
+// to full under the second reply.
 type LocalDuck struct {
 	set  func(db float64) // PcmSpeaker.SetDuck
 	hold time.Duration
 
 	mu    sync.Mutex
 	timer *time.Timer // non-nil while ducked locally and unconfirmed
+	held  bool        // the controller's duck is on: the music is its to release
 }
 
 // LocalDuckHold bounds an unconfirmed local duck. Far above a normal
@@ -37,6 +45,9 @@ func NewLocalDuck(set func(db float64), hold time.Duration) *LocalDuck {
 func (d *LocalDuck) Start(db float64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.held {
+		return
+	}
 	if d.timer != nil {
 		d.timer.Stop()
 	}
@@ -55,10 +66,12 @@ func (d *LocalDuck) Start(db float64) {
 	d.timer = t
 }
 
-// Confirm hands the duck to the controller: its own on/off follows.
-func (d *LocalDuck) Confirm() {
+// Confirm hands the duck to the controller: its own on/off follows. on is
+// what the controller said, and is remembered until it says otherwise.
+func (d *LocalDuck) Confirm(on bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.held = on
 	if d.timer != nil {
 		d.timer.Stop()
 		d.timer = nil
