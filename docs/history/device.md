@@ -373,6 +373,26 @@ own files that informed it stay off the repo (Amazon's).
   - Lock()'s baseline smoother (`baselineAlpha` 0.995) advances once per
     Process call, a 160ms batch, so its time constant is ~32s, not the ~10s
     its comment says.
+- **2026-11-17, the non-linear residual is the speaker's EVEN-order
+  distortion, and x² as a second far-end channel removes it** (Fable, offline,
+  same captures; `/root/em-diag/fable-2026-11-17-residual/REPORT.md`, local
+  only). speex K=2 with [x, x²/32768]: +5-7dB on every capture (story ch6
+  16.8 -> 23.5dB, run3 17.3 -> 23.8, music 20.9 -> 22.2), the 300Hz-1kHz
+  residual down 5-9dB, the talker's 2-7kHz unchanged to 0.1dB. Barge recall,
+  ch6 warm, at 1280/80: 0.56/0.11/0.29 -> 0.69/0.36/0.17 (n = 6/8/3; all 17
+  0.30 -> 0.44); K=3 beams + ch6 0.53 -> 0.62. Odd terms (x³, clipping),
+  x⁴, memory terms and time-varying refits add at most 0.4dB to the per-bin
+  ceiling; the 1-2kHz residual is out of reach of any reference model on
+  these captures. +39% per canceller (x86 ratio). Cold start 4-6dB slower in
+  seconds 2-4; a saved path carries the x² weights.
+  - In the firmware's own test the gain depends on level: at -24dBFS (x² 20dB
+    under x) it was 1.1dB, because speex normalises the step by the channels'
+    summed power and the weak channel learns slowly; at reply level 34 vs
+    15dB. Every capture is at volume 89; the volume sweep (RUN.md there) is
+    owed before shipping.
+  - A mild residual gain on the x² output (beams only) and a learnt model were
+    not pursued: the first is +0.12 on n=17 and kills one wake in another
+    variant, the second has no data that would not overfit.
 
 ## Key Go packages
 
