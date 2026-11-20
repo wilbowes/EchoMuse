@@ -258,6 +258,10 @@ var biscuitMics = MicArray{
 	},
 	Centre:  6,
 	EchoRef: 8,
+	// Three evenly spaced edge mics beside the centre's wake stream: at 3 m
+	// over full-volume replies ch6 caught 4.25 of 11 barge-ins and ch0/2/4
+	// 8.25 (15LE, 2026-11-20). Radar shares the array.
+	ReplyTaps: 3,
 }
 
 // BiscuitMics is biscuit's array, for tools that read biscuit's captures.
