@@ -53,6 +53,43 @@ LISTEN_TAIL_MS = 200
 _QUIET_DB = -40.0
 _TAIL_FRAME_MS = 10
 
+# How long a wake waits for the announcement it cut to unwind before its turn
+# starts. The Echo has flushed the audio itself, so its playback_stats is
+# normally tens of ms away (41C8, 2026-11-20); inside the Echo's 3s ack limit.
+STOP_FOR_WAKE_S = 1.0
+
+
+def wake_takes_turn(ev: dict, barge_in_enabled: bool) -> bool:
+    """Whether a private wake over an announcement no turn owns starts a turn.
+
+    Yes exactly when the Echo cut the announcement itself: heard over its own
+    playback with barge-in on (device listen.CutReplyOnBarge). Declining that
+    one left the announcement dead and nothing listening (41C8, 2026-11-20).
+    Any other wake leaves the announcement playing and is declined, as before.
+    """
+    return bool(ev.get("barge")) and bool(barge_in_enabled)
+
+
+async def stop_then_turn(device, ev: dict, turn: Callable[..., Awaitable[None]],
+                         timeout: float = STOP_FOR_WAKE_S, poll: float = 0.02) -> None:
+    """Stop the announcement a wake cut, then run that wake's turn.
+
+    cancel_event ends the playback even if the Echo's report is late, and HA
+    is told the announcement did not finish. The turn clears cancel_event, so
+    it must not start before the playback has seen it: waited on `speaking`,
+    which the playback clears in its finally. Past the timeout the turn runs
+    anyway; the person asked for it.
+    """
+    device.cancel_event.set()
+    loop = asyncio.get_event_loop()
+    end = loop.time() + timeout
+    while device.speaking and loop.time() < end:
+        await asyncio.sleep(poll)
+    if device.speaking:
+        log.warning(f"[{device.device_id}] announcement still playing {timeout:.1f}s "
+                    f"after the wake that cut it — starting the turn anyway")
+    await turn(device, ev)
+
 
 def set_trailing_quiet(pcm: bytes, rate: int, tail_ms: int = LISTEN_TAIL_MS) -> bytes:
     """

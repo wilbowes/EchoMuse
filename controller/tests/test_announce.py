@@ -460,3 +460,86 @@ def test_only_a_message_the_echo_listens_after_is_trimmed():
     call = ESPHOME_SRC.split("await em_announce.run(")[1].split("\n        )")[0]
     assert "set_trailing_quiet" in call
     assert "if start_conversation else None" in call
+
+
+# ── A wake the Echo acted on over an announcement takes the turn ─────────────
+# The Echo flushes its own speaker at a barge crossing (listen.CutReplyOnBarge),
+# announcements included. The controller used to decline every wake over an
+# announcement no turn owned, so the announcement died and nothing listened
+# (41C8, 2026-11-20: three wakes, three dead announcements, no turn).
+
+class FakeDevice:
+    def __init__(self, speaking=True):
+        self.device_id = "dev"
+        self.speaking = speaking
+        self.cancel_event = asyncio.Event()
+
+
+def test_a_turn_only_when_the_echo_cut_the_announcement():
+    take = em_announce.wake_takes_turn
+    assert take({"barge": True}, True)
+    # Barge-in off: the Echo does not cut, the announcement plays on.
+    assert not take({"barge": True}, False)
+    # Not heard over playback: the Echo did not cut either.
+    assert not take({"barge": False}, True)
+    assert not take({}, True)
+    assert not take({"barge": None}, True)
+
+
+def test_the_turn_starts_after_the_announcement_has_unwound():
+    dev = FakeDevice()
+    seen = []
+
+    async def turn(d, ev):
+        # The turn clears cancel_event; the playback must have seen it first.
+        seen.append((d.speaking, d.cancel_event.is_set(), ev))
+
+    async def main():
+        async def playback_unwinds():
+            await dev.cancel_event.wait()
+            await asyncio.sleep(0.05)
+            dev.speaking = False
+        unwind = asyncio.create_task(playback_unwinds())
+        await em_announce.stop_then_turn(dev, {"session": 7}, turn, timeout=0.3, poll=0.005)
+        unwind.cancel()
+
+    asyncio.run(main())
+    assert seen == [(False, True, {"session": 7})]
+
+
+def test_the_turn_still_runs_when_the_announcement_will_not_stop(caplog):
+    dev = FakeDevice()
+    seen = []
+
+    async def turn(d, ev):
+        seen.append(ev)
+
+    asyncio.run(em_announce.stop_then_turn(dev, {"session": 8}, turn, timeout=0.03, poll=0.005))
+    assert seen == [{"session": 8}]
+    assert dev.cancel_event.is_set()
+    assert "starting the turn anyway" in caplog.text
+
+
+def test_nothing_waits_when_the_announcement_already_ended():
+    dev = FakeDevice(speaking=False)
+    seen = []
+
+    async def turn(d, ev):
+        seen.append(ev)
+
+    async def main():
+        t0 = asyncio.get_event_loop().time()
+        await em_announce.stop_then_turn(dev, {"session": 9}, turn, timeout=5.0)
+        return asyncio.get_event_loop().time() - t0
+
+    assert asyncio.run(main()) < 0.5
+    assert seen == [{"session": 9}]
+
+
+def test_the_private_listener_uses_the_rule():
+    import _sources
+    body = _sources.code_only(_sources.def_source("_private_listen"))
+    assert "em_announce.wake_takes_turn(ev, device.barge_in_enabled)" in body
+    assert "em_announce.stop_then_turn(device, ev, _private_wake_turn)" in body
+    # Still declined when the rule says no.
+    assert "listen_close(ev['session'], 'speaking')" in body

@@ -108,6 +108,7 @@ import em_wake_samples
 import em_oww_warmup
 import em_barge
 import em_listen
+import em_announce
 import em_ble_gatt
 import em_wakelevel
 import em_button
@@ -3298,9 +3299,8 @@ async def _private_listen(device: Device) -> None:
     a session its wake opened. mic_start still matters — it is what runs the
     Echo's local wake stream, which feeds its scorer.
 
-    A wake while a turn is running is a barge-in (or words inside the turn),
-    and is decided at once rather than queued behind the turn: the turn is a
-    task, never awaited here, so this loop stays free to hear the interruption.
+    A wake during a turn is a barge-in (or words inside the turn), decided at
+    once: the turn is a task, never awaited here, so this loop stays free.
     """
     log.info(f"[{device.device_id}] listening privately — the Echo detects its "
              f"own wake word and streams nothing until it does")
@@ -3311,10 +3311,9 @@ async def _private_listen(device: Device) -> None:
         except asyncio.TimeoutError:
             continue
         if device.listen_router.is_closed(ev["session"]):
-            # The Echo gave up on it first (listen_end), so no audio will
-            # come: a wake delayed in flight past the ack timeout arrives
-            # alongside its own close. Acting on it ran a turn that could
-            # only end no_speech, and claimed the arbiter for it.
+            # The Echo gave up on it first (listen_end): a wake delayed past
+            # the ack timeout arrives with its own close, and acting on it ran
+            # a turn that could only end no_speech, holding the arbiter.
             log.info(f"[{device.device_id}] wake for session {ev['session']} "
                      f"ignored — already closed on the Echo "
                      f"({(asyncio.get_event_loop().time() - ev['arrived']) * 1000:.0f}ms "
@@ -3329,12 +3328,13 @@ async def _private_listen(device: Device) -> None:
             finally:
                 device.barge_decided.set()
             continue
-        if device.speaking and not device.timer_alarm_ringing:
-            # An announcement is playing and no turn owns it — the stream path
-            # skips its own frames here too, so a wake over it is not acted on.
+        over = device.speaking and not device.timer_alarm_ringing  # an unowned announcement
+        if over and not em_announce.wake_takes_turn(ev, device.barge_in_enabled):
             await device.listen_close(ev["session"], "speaking")
             continue
-        device.private_turn_task = asyncio.create_task(_private_wake_turn(device, ev))
+        device.private_turn_task = asyncio.create_task(
+            em_announce.stop_then_turn(device, ev, _private_wake_turn) if over
+            else _private_wake_turn(device, ev))
         device.private_turn_task.add_done_callback(_log_task_exception)
     log.info(f"[{device.device_id}] no longer listening privately")
 
