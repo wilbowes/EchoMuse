@@ -47,9 +47,12 @@ ALSA write (ducking: `controller/CLAUDE.md` → "Ducking"). Each mic buffer:
 raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beamformer (a mic selector) + fixed mic gain (micGainDb, applied to 24-bit samples) → mono S16_LE → [AEC] → [AGC] → [VAD gate] → /data WebSocket
 ```
 
-- **Batches are 160ms (2560 samples)**, not 32ms periods: `GetAudioStream`
-  reads the whole ALSA buffer (512 × 5). Anything assuming 512-sample buffers
-  must handle multiples (see `aec.Process`).
+- **Batches are 160ms (2560 samples)**, read a 512-frame period at a time
+  (`GetAudioStreamChunked`) and only once the ring holds `AvailMin` (two
+  periods): the reader stays a period BEHIND the hardware pointer (#1238).
+  Reading at the pointer returned audio the DMA had not yet written, with no
+  error. Anything assuming 512-sample buffers must handle multiples (see
+  `aec.Process`).
 - **The always-on wake stream (`mic_start` without `lock_mic`) is ungated and
   AGC-free**, sent continuously in 80ms frames. VAD gate and AGC apply only to
   `lock_mic` turns, with a fresh `ResetAGC()` per stream.
@@ -103,11 +106,17 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
     sw` forces the software tap. **Test the lead against first principles,
     never the code's own derivation** (an inverted lead passed its own test).
   - **That loopback is read a period at a time** (`GetAudioStreamChunked`,
-    #1139): a whole-ring read is lapped by a late reader and MediaTek's memif
-    repeats stale audio with no error. The mic streams still read whole rings
-    (cost unmeasured).
+    #1139), 768-frame periods, `AvailMin` two periods behind the pointer
+    (#1238): a whole-ring or at-the-pointer read gets stale audio from
+    MediaTek's memif with no error. With both PCMs read this way, mics and
+    loopback share one clock (0 ppm) and the aligner should not move.
   - `[aec] far:` logs only while `aecEnabled`; read `mean` beside `rms`
     (`mean≈±rms` is a DC offset, not audio).
+- **Reply taps** (`client/taps.go`, #1240/#1241): while a reply plays,
+  `MicArray.ReplyTaps` other mics, spaced evenly from the last lock and never
+  the wake stream's own, each get a wake scorer at the barge bar; a crossing is
+  the stream's. Evenly, because the lock is not trustworthy (it wandered across
+  three directions for one still talker, 15LE 2026-11-20). Each costs a scorer.
 - **Barge-in** (controller `_barge_watcher`): device `speaker_flush` drains and
   discards until EOS. `bargeInThreshold` (0.05–0.10) sits below `owwThreshold`
   by design (echo depresses speech-over-TTS scores). **A barge must abort HA's
@@ -137,6 +146,50 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
 - Python (`em_eq`, `em_mbc`, `em_volume`) is the reference; Go is bit-exact to
   `outchain/testdata` — regenerate with `gen_vectors.py` after changing either.
   Stock's files and captures stay off the repo (Amazon's).
+
+## Building the listening layer: how we work (Wil, 2026-11-20)
+
+The capture fix (#1238) showed that a week of compensating stages was built
+on a fault two layers down. These rules carry that lesson up through cancel,
+beam, scoring and session. They bind new work in `internal/aec`, `echoref`,
+`beamformer`, `client` (data/taps), `wakeword` and `bindings/mic|speaker`.
+
+- **Measure at the source before building a compensator.** A timing,
+  drift or level symptom gets a reading at the layer that produces it
+  (hardware timestamps via `pcm_get_htimestamp`, the `[mic] clock` ledger,
+  raw capture) before any aligner, follower, governor or threshold is added
+  or tuned above it. A compensator needs a named cause it compensates for,
+  written beside it.
+- **One truth per signal.** One clock, one reference, one direction estimate;
+  a second estimate of the same thing is a bug report, not a feature.
+- **Every stage has an observable at its boundary** (skew, `att` dB, barge
+  window peak, scorer max, drops), cheap enough to stay on in release, and a
+  replay path (`tools/aec_replay`, raw tap) that runs the real code on a
+  recorded capture.
+- **A port or rewrite proves parity with the real implementation** on real
+  captures (native melspec vs ORT bit-identical; echonull vs numpy), not with
+  its own derivation.
+- **Judge listening by attempts on a fixed protocol**, never by catches or by
+  announcements cut. A result learnt and tested on one unit, room and talker
+  is labelled as such until it holds on a second.
+- **Do not depend on a stage that has not proven itself; design so it can be
+  wrong.** Today that is the beam lock: taps spread evenly instead of
+  trusting it, and nothing that gates privacy or a turn reads it.
+- **CPU is a budget per board, stated before the feature.** Any new scorer,
+  filter or stage is measured on the weakest board it targets (server % of a
+  core idle and during a reply, the fixed-announcement A/B), and the number
+  goes in the PR. Something running per channel or per scorer must share what
+  can be shared (ORT sessions now; features next).
+- **Stages, not branches.** The target shape is capture → cancel →
+  per-channel features → scorers → session, each its own type with its own
+  test seam. New work plugs in at a stage; it does not add another path
+  behind `pipeMu` in `client/data.go` or another hook in `cmd/server.go`,
+  both past the 1,500 lines the controller's size ratchet allows (no ratchet
+  covers Go yet).
+- **Bench code stays out of production paths**: `*_bench.go` behind a build
+  tag and a nil-by-default hook var (`ScorerTap`). A bench tree is one
+  experiment off current main; findings go to `docs/history` the day they
+  land, and a tree with no ledger row is deleted, not carried.
 
 ## Key Go packages
 

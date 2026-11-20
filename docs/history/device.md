@@ -374,6 +374,32 @@ own files that informed it stay off the repo (Amazon's).
     Process call, a 160ms batch, so its time constant is ~32s, not the ~10s
     its comment says.
 
+## Building the listening layer: how we work (Wil, 2026-11-20)
+
+- **2026-11-20, why the rules exist.** For a week the donut and Dot 2 showed
+  "200 ppm" loopback drift, 16 ms slips, stale echoref locks and a mic clock
+  running 176-270 ppm fast. Each got a compensator or a tuning pass (aligner
+  follow, re-centre, governor, SCHED_FIFO readers). Hardware timestamps then
+  showed one cause: readers took audio at the hardware pointer, before the DMA
+  had written it. Reading a period behind (#1238) made both PCMs exactly
+  nominal and the aligner made 0 moves; SCHED_FIFO had made it worse (stale
+  reads every ~2 s). Measured at the source first, it was a day.
+- **2026-11-20, the lock as the stage that cannot be trusted.** One still
+  talker at 3 m on 15LE: the lock went ch4, ch0, then the ch1/3/5 side across
+  six tries. Adjacent taps beside it would have bet on a wrong side; evenly
+  spaced taps caught every announcement. The LED arc reads the same lock.
+- **2026-11-20, catches versus attempts.** The second 15LE round cut 6 of 6
+  announcements but took about 10 attempts. The first round's attempt count
+  was never taken. A protocol records each attempt.
+- **2026-11-20, CPU grows per idea.** Three reply taps took a Dot 2 reply
+  from 69% to 97% of a core (peak 126%); on the donut three taps plus four
+  filters were 107%, 149% peak. Each scorer runs its own melspec and
+  embedding; native melspec (#1216) took ~20 points off a donut reply on the
+  bench and is not merged.
+- **2026-11-20, sprawl.** Six worktrees held uncommitted bench code, one of
+  them ~1,000 lines across 33 files on a base a week old; `client/data.go`
+  1,669 lines, `cmd/server.go` 1,982.
+
 ## Key Go packages
 
 | Package | Role |
