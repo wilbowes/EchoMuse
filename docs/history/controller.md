@@ -2440,6 +2440,25 @@ flashes, verified against the partition, and the device booted. It needs ADB,
 so it only helps while the device is in TWRP — which is where both the flash
 failure and the first-boot failure leave it.
 
+- **2026-11-15, biscuit TWRP (`omni_biscuit`, 15LE), dry run of a user's
+  recovery commands for #1163.** TWRP mounts `/data` on its own here, so a
+  bare `mount /data` prints `Device or resource busy`. After `umount /data`,
+  **`twrp mount data` printed "Mounted '/data'" and mounted nothing**:
+  `/proc/mounts` had no `/data` line and its files were absent (TWRP's own
+  bookkeeping still thought it mounted). `mount -t ext4
+  /dev/block/by-name/userdata /data` worked; both `by-name` and
+  `platform/bootdevice/by-name` exist, `bootdevice/by-name` does not. So
+  `prepareTwrpForInstall`'s by-name fallback is the step that actually
+  works when TWRP has unmounted it, and its `mounted()` check, not the
+  command's output, is what tells. `grep ' /data ' /proc/mounts` through
+  `adb shell "..."` is the portable check (a host-side `| grep` fails on
+  Windows). Also seen: a wizard-provisioned emOS Echo keeps its WiFi in
+  Android's `/data/misc/wifi/wpa_supplicant.conf` with no
+  `/data/emos/wpa.conf`; a controller WiFi change writes the latter and its
+  `.echomuse-bak` beside it. `/data/emos/trail` records `stage 8 reached`
+  and the USB gadget state after it (`state=CONFIGURED`): the record of
+  whether the console came up.
+
 ### The one partition the wizard writes
 
 Patch Boot Image is the only partition write in the whole wizard, and the only
