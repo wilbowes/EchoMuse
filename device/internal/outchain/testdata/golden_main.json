@@ -1,0 +1,57 @@
+{
+  "all_bypassed": {
+    "process": "04b43321b92072168ae7117d83721e974492c0c866781151c3591c2e88bb88c6",
+    "processFloat": "cedd8f047605aeb62eabea4a769dfee6e42e044e0b9956de510897745267a6e1",
+    "processWide": "2ada2936f81a970187f0ca47a7251fbfc82a05bfa15924ef0a3fdf2282275f4c"
+  },
+  "boost_all_limited": {
+    "process": "326b653e6db6f82d84f890dd5272cab0e67a22c42f6ee3eee45fc856fab60d3a",
+    "processFloat": "cee580c9cffb8ab8c505fc23d7a9307965ae3a69503e6354d291d27e259b26c3",
+    "processWide": "16ed23592ea08f8a30e931c23c45fa6c57aeb3f886fc43260871d21f1694c553"
+  },
+  "bursts_silence": {
+    "process": "1c8437b92c28783a6dc7dc737eca0669ae6f7725667ca751f9228ae594929b00",
+    "processFloat": "254b7551699e52a712af2f0f81b181bbdcd88195ec1d07ed242e2186dec6a22b",
+    "processWide": "fa1e00eb35bee298b4f55ff29be04dc0ffb2c13bb666de39eaa640cfca9b3757"
+  },
+  "defaults_speech": {
+    "process": "c8079da48b76ab20d24c344da5ee7146bfb630059b750b8bbbda248f3d3ccb05",
+    "processFloat": "6cef140acd6f9ea96b079a666c220dbe73a9f12d0f528405732b7794b4695d50",
+    "processWide": "e9854cde724b2da6662a7532ebddb8b527b980f7d8694bcf41fddb35be282d11"
+  },
+  "limiter_reenable": {
+    "process": "25bafa20f0b09be633d14a000f3d895c2483ca4381d2b43c3bfa6c78332fd1cf",
+    "processFloat": "3ac88f4f4cdd17ca587785847938ba71dc61b7bf87d42af5b0d358faba23304a",
+    "processWide": "748f2d95f7e39d9a7f063be83018bb75525fa7821082786b2e684d7350632176"
+  },
+  "live_changes": {
+    "process": "52771677d23ee702e77ccd4f2771c2c055cc6d860d482b21947714fe17ea0987",
+    "processFloat": "3a88a9cf5f1e070cbf23f03f4bd95cbce03a5549c9f8340b6a221c617a1ca8d8",
+    "processWide": "f22c4a4edc2b7662e71eb87ccb700c047443c27ad888f6a7d780ebac510a5b03"
+  },
+  "mixed_curve": {
+    "process": "d403f302bc5a81f13d33a4f69ed914041e497d636368cd3b028863a0adb8ad84",
+    "processFloat": "8b19a032ec05d1d4226dd87dff5d60c5bea2eeb14d3aa2fb8f6a2fe4aeeb8cef",
+    "processWide": "a5e21222c7b64be4418b09e9e3ecbbd514810cf00beeb8ee58c948b1b5c069ff"
+  },
+  "square_bypassed_clips": {
+    "process": "226b8ced879d610e6f74f7dd1a86b5aa4f5792d48cb2bba110f7042528c398df",
+    "processFloat": "b7e76fe5fbd045858f407021908ddc72506bef8bdd53fe5b77802cc50d7052e1",
+    "processWide": "5710cc95b9637fbc587d5a236313aac8229fcbf7af4cb5257626044e35a0121a"
+  },
+  "stock_bursts_silence": {
+    "process": "577b2141601bb4acf55c2d211bc02b6c66ab53fe006ed42adac4f781e3accc27",
+    "processFloat": "a023c36820a58930577159db63f06c14a259e27d975201fd5fcd963a690bf924",
+    "processWide": "264d97e0b4b1cfb04dbcde2a88d1a97187f56a6c83adbe1cea88f6dc4ab325f6"
+  },
+  "stock_bypassed": {
+    "process": "7b6b9b34a7cbed2252b2ebd92355d83ecb0e488322c59926c92f8408ea029b92",
+    "processFloat": "5623b7f44895a6185ba9d8cf35774ef70737e57901d9321e952508d0c965880c",
+    "processWide": "b652261cb7f660629b873ae1d3cad021224874ccb29aca77d3d602a3a2e8f418"
+  },
+  "stock_speech": {
+    "process": "b5000e18fa1c6aacd4b821b9ab33f3c1462c13e862b56169f4abe3e6edf1ee29",
+    "processFloat": "edda75906da558ecdeae6e42cfad646a13d19bba93afb40a110627d940d1ad1c",
+    "processWide": "562ef519dda991710da57e796df18dd2f6c460864aaf97dbac6a0e9567da1bce"
+  }
+}
