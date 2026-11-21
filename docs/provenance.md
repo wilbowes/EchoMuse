@@ -56,7 +56,7 @@ Last full pass: 2026-11-22.
 |---|---|---|---|---|
 | Wake word scored on the cancelled mic during playback; playback stops when it fires | `em_barge`, `listen/barge.go` | IVR barge-in over an echo canceller (telephony practice, 1990s) | old | — |
 | Lower bar during playback, two consecutive frames to fire | `em_barge` | threshold plus M-of-N debounce (detection theory) | old | — |
-| **Several other mics scored during a reply; any one may fire** | `client/taps.go` (#1240; biscuit 3 taps, donut all) | product practice | **none on file** | score the wake stream only (pre-#1240). The mic facing the talker heard barges at about twice the rate of one facing away (C95, 41C8, 15LE at 3 m) |
+| **Several other mics scored during a reply; any one may fire** | `client/taps.go` (#1240; biscuit 3 taps, donut all) | product practice | **none on file** | score one stream only. C95, 37 attempts at 3 m: ch6 alone 6.75, one mic locked by SRP-PHAT at the wake 7.0, ch6 + 3 taps 16.0 (2026-11-22) |
 
 ## Speech gate and end of turn
 

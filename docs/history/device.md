@@ -1244,6 +1244,21 @@ enabled it and nothing happened" this removes.
   established why: a longer or more diffuse echo path on the donut needing
   the finer partition is the guess. Captures in
   em-diag/donut-lounge-2026-11-21 (local).
+- 2026-11-22, reply taps vs ONE locked mic, offline, Hey_Verona, rule = two
+  frames >= 0.25 or one >= 0.5, mean of the capture's frame phases. C95 11-18
+  (4 rounds, 37 attempts over replies, talker still): ch6 alone 6.75, the
+  single mic SRP-PHAT picked at the preceding wake 7.0, energy-burst pick
+  5.5, best-scoring mic at the wake 4.6; ch6 + 3 taps 16.0, all seven 18.9.
+  41C8 11-20 (8 tries): fixed mics 4.25-6.0, locked from the previous try
+  3.5-4.25, all four 6.25. So the taps win by scoring several looks at a
+  near-threshold score, not by finding the talker's side: the best-scoring
+  mic moved between opposite mics from try to try with the talker standing
+  still, on both boards. SRP-PHAT (300-4000 Hz, 7 mics, 5 degree grid) was
+  the only stable direction: 20-30 degrees on all 15 quiet wakes across the
+  4 C95 rounds, where the energy-burst pick landed on 5 different mics.
+  During playback both estimators failed on 15LE (0/7 agreement with the
+  best mic; residual echo dominates), so direction must be taken before the
+  reply. Scripts: scratchpad lockreplay.py, c95lock.py (not kept).
 
 ## The external audio jack
 
