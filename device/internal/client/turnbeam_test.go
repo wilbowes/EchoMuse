@@ -172,3 +172,29 @@ func TestTheCommandGoesOutWhole(t *testing.T) {
 		}
 	}
 }
+
+// A late lock (a second look ~1.5s after the wake word) starts with a
+// backlog; the session catches up over known silence, so the command goes out
+// no later than SegDelayS behind the room plus the remaining backlog, and the
+// stream ends up SegDelayS behind.
+func TestALateLockCatchesUp(t *testing.T) {
+	t.Setenv("EM_TURNBEAM", "on")
+	tb := newTurnBeam(4)
+	tb.newVAD = func() speechScorer { return loudScorer{} }
+	r := rand.New(rand.NewSource(4))
+	batch := 2560
+	for i := 0; i < 80; i++ {
+		tb.step(noiseChans(r, 4, batch, 100), make([]byte, 2*batch), false)
+	}
+	tb.requestLock(time.Now().Add(-1500 * time.Millisecond))
+	for i := 0; i < 30; i++ {
+		tb.step(noiseChans(r, 4, batch, 100), make([]byte, 2*batch), true)
+	}
+	if !tb.active {
+		t.Fatal("a lock 1.5s after the crossing was refused")
+	}
+	lag := float64(len(tb.fifo)) / 16000
+	if lag > 0.64+0.2 {
+		t.Fatalf("the session is %.2fs behind after catching up, want ~%.2fs", lag, 0.64)
+	}
+}

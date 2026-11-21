@@ -55,7 +55,9 @@ const (
 	ReplayS  = 3.0
 	OutLeadS = 0.3
 	floorTo  = -1.6 // pre-wake floor over [-ReplayS, floorTo] around the crossing
-	maxLeadS = 0.6  // crossing to Lock, at most
+	// MaxLeadS is the oldest crossing the stage can still lock or probe: a
+	// second look confirms a wake ~1-2s after its crossing.
+	MaxLeadS = 2.5
 	// FloorFrame is the frame the floor is measured over: the device's Silero
 	// step, so the Segmenter compares like with like.
 	FloorFrame = 640
@@ -65,7 +67,12 @@ const (
 type Config struct {
 	Mics   int     // cancelled microphone channels, in the board's order
 	NoiseS float64 // pre-wake noise window (default 6.5s)
-	WakeS  float64 // window before the crossing that holds the wake word (default 1.6s)
+	WakeS  float64 // window that holds the wake word (default 1.6s)
+	// WakeEndS is how far past the crossing that window ends (default 0.1s).
+	// The crossing is the score's peak, about where the word ends, and the
+	// window must hold all of it: ending it 64ms early took a faint wake
+	// word's second look from 0.85 to 0.07 (41C8, cap3 86.56s, 2026-11-21).
+	WakeEndS float64
 	Load   float64 // diagonal loading, share of the mean noise power (default 1e-3)
 }
 
@@ -78,6 +85,9 @@ func (c *Config) defaults() {
 	}
 	if c.Load <= 0 {
 		c.Load = 1e-3
+	}
+	if c.WakeEndS == 0 {
+		c.WakeEndS = 0.1
 	}
 }
 
@@ -99,7 +109,7 @@ type Stage struct {
 	cur    []complex64
 	curN   int
 
-	// The consumed input of the last ReplayS+maxLeadS (+ one hop), per mic,
+	// The consumed input of the last ReplayS+MaxLeadS (+ one hop), per mic,
 	// as a circular buffer of whole hops.
 	in      [][]int16
 	inHead  int // next write position (samples)
@@ -133,7 +143,7 @@ func New(cfg Config) *Stage {
 	for i := range s.win {
 		s.win[i] = math.Sqrt(0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/frameN))
 	}
-	nBlocks := int(math.Ceil((cfg.NoiseS+cfg.WakeS+maxLeadS)/blockS)) + 2
+	nBlocks := int(math.Ceil((cfg.NoiseS+cfg.WakeS+MaxLeadS)/blockS)) + 2
 	s.ring = make([][]complex64, nBlocks)
 	for i := range s.ring {
 		s.ring[i] = make([]complex64, bins*m*m)
@@ -143,7 +153,7 @@ func New(cfg Config) *Stage {
 	s.pend = make([][]float64, m)
 	s.re = make([][]float64, m)
 	s.im = make([][]float64, m)
-	inN := (int((ReplayS+maxLeadS)*sampleRate)/hopH + 2) * hopH
+	inN := (int((ReplayS+MaxLeadS)*sampleRate)/hopH + 2) * hopH
 	s.in = make([][]int16, m)
 	for i := 0; i < m; i++ {
 		s.tail[i] = make([]float64, hopH)
@@ -372,76 +382,114 @@ func (s *Stage) sumBlocks(from, count int) [][]complex128 {
 
 var errTooEarly = errors.New("turnbeam: not enough audio before the wake word")
 
-// Lock is called once a wake opens a session, leadS after the crossing (the
-// scorer's and the session's latency; clamped to [0, 0.6]s). The WakeS
-// before the crossing is the talker, the NoiseS before that the room. It
-// computes the beam, replays it over the last ReplayS before the crossing,
-// and returns the cleaned beam from LockStart() up to now; Push then
-// continues it sample for sample.
-func (s *Stage) Lock(leadS float64) ([]int16, error) {
+// beamSet is a beam computed from the covariance blocks for one crossing.
+type beamSet struct {
+	h    [][]complex128 // [bin][mic] MVDR weights
+	whL  [][]complex128 // [bin] Cholesky of the loaded noise covariance (nil: dead bin)
+	whU  [][]complex128 // [bin] whitened unit steering
+	phiS []float64      // [bin] static residual noise PSD
+	ref  int
+	// norm is ‖d‖/√m per bin, d distortionless on ref: scaling the output by
+	// it gives the talker at the mics' average gain instead of as ref hears
+	// it, so nothing depends on which mic is the reference (Probe).
+	norm []float64
+}
+
+// beamFor computes the beam for a crossing leadS ago: the WakeS before the
+// crossing is the talker, the NoiseS before that the room. Steering by
+// covariance subtraction, MVDR with diagonal loading.
+func (s *Stage) beamFor(leadS float64) (*beamSet, error) {
 	m := s.m
-	leadS = math.Max(0, math.Min(maxLeadS, leadS))
-	skipB := int(math.Round(leadS / blockS))
+	// Blocks are counted back from the newest COMPLETE one, which ended the
+	// current partial block's length ago (up to 128ms): without that the
+	// wake window sat up to ~190ms early, which a faint wake word (a second
+	// look's) cannot afford.
+	skipB := int(math.Round((leadS - math.Max(0, s.cfg.WakeEndS) - float64(s.curN*hopH)/sampleRate) / blockS))
+	if skipB < 0 {
+		skipB = 0
+	}
 	wakeB := int(math.Round(s.cfg.WakeS / blockS))
 	noiseB := int(math.Round(s.cfg.NoiseS / blockS))
 	if avail := s.filled - skipB - wakeB; avail < noiseB {
 		noiseB = avail
 	}
-	replayN := (int((leadS+ReplayS)*sampleRate) + hopH - 1) / hopH * hopH
-	if float64(noiseB)*blockS < 1 || s.inCount < replayN+hopH {
+	if float64(noiseB)*blockS < 1 {
 		return nil, errTooEarly
 	}
 	rx := s.sumBlocks(skipB, wakeB)
 	rn := s.sumBlocks(skipB+wakeB, noiseB)
 	lo, hi := bandLoHz*frameN/sampleRate, bandHiHz*frameN/sampleRate
-
+	b := &beamSet{h: make([][]complex128, bins), whL: make([][]complex128, bins),
+		whU: make([][]complex128, bins), phiS: make([]float64, bins), norm: make([]float64, bins)}
 	// Reference mic: most talker over noise in the speech band.
 	best := math.Inf(-1)
 	for c := 0; c < m; c++ {
-		var a, b float64
+		var a, bb float64
 		for k := lo; k <= hi; k++ {
 			a += real(rx[k][c*m+c])
-			b += real(rn[k][c*m+c])
+			bb += real(rn[k][c*m+c])
 		}
-		if r := a / (b + 1e-12); r > best {
-			best, s.ref = r, c
+		if r := a / (bb + 1e-12); r > best {
+			best, b.ref = r, c
 		}
 	}
-
-	s.h = make([][]complex128, bins)
-	s.whL = make([][]complex128, bins)
-	s.whU = make([][]complex128, bins)
-	s.phiS = make([]float64, bins)
 	for k := 0; k < bins; k++ {
-		s.h[k] = make([]complex128, m)
-		s.h[k][s.ref] = 1 // a dead bin (DC, silence) passes the reference mic through
+		b.h[k] = make([]complex128, m)
+		b.h[k][b.ref] = 1 // a dead bin (DC, silence) passes the reference mic through
 		n := loaded(rn[k], m, s.cfg.Load)
 		l, err := cholesky(n, m)
 		if err != nil {
 			continue
 		}
 		d := subtractSteer(rx[k], rn[k], m)
-		if d == nil || cmplx.Abs(d[s.ref]) < 1e-12 {
+		if d == nil || cmplx.Abs(d[b.ref]) < 1e-12 {
 			continue
 		}
-		r := d[s.ref]
+		r := d[b.ref]
 		for i := range d {
 			d[i] /= r
 		}
+		b.norm[k] = math.Sqrt(real(dot(d, d)) / float64(m))
 		x := solveUpperH(l, m, solveLower(l, m, d)) // n⁻¹·d
 		den := real(dot(d, x))
 		if den <= 0 {
 			continue
 		}
 		for i := range x {
-			s.h[k][i] = x[i] / complex(den, 0)
+			b.h[k][i] = x[i] / complex(den, 0)
 		}
 		u := solveLower(l, m, d) // whitened steering, unit
 		if normalise(u) == 0 {
 			continue
 		}
-		s.whL[k], s.whU[k], s.phiS[k] = l, u, 1/den
+		b.whL[k], b.whU[k], b.phiS[k] = l, u, 1/den
 	}
+	return b, nil
+}
+
+var errTooLate = errors.New("turnbeam: the crossing is older than the stage keeps")
+
+// Lock is called once a wake opens a session, leadS after the crossing (the
+// scorer's and the session's latency, or a second look's; at most
+// MaxLeadS). It computes the beam for that crossing, replays it over the
+// last ReplayS before the crossing, and returns the cleaned beam up to now
+// with the time (around the crossing) of its first sample, about -ReplayS;
+// Push then continues it sample for sample.
+func (s *Stage) Lock(leadS float64) ([]int16, float64, error) {
+	m := s.m
+	leadS = math.Max(0, leadS)
+	if leadS > MaxLeadS {
+		return nil, 0, errTooLate
+	}
+	replayN := (int((leadS+ReplayS)*sampleRate) + hopH - 1) / hopH * hopH
+	if s.inCount < replayN+hopH {
+		return nil, 0, errTooEarly
+	}
+	b, err := s.beamFor(leadS)
+	if err != nil {
+		return nil, 0, err
+	}
+	s.h, s.whL, s.whU, s.phiS, s.ref = b.h, b.whL, b.whU, b.phiS, b.ref
 
 	// Replay the recent input through the locked beam.
 	s.pz, s.prev, s.pzWarm = make([]float64, bins), make([]float64, bins), false
@@ -495,13 +543,10 @@ func (s *Stage) Lock(leadS float64) ([]int16, error) {
 		s.floorDB = lv[len(lv)/2]
 	}
 	// Everything from the replay's second hop (the first is half-windowed):
-	// the caller warms its speech detector on it up to -OutLeadS.
-	return y[hopH:], nil
+	// y[hopH] is replay-input sample 0. The caller warms its speech detector
+	// on it up to -OutLeadS.
+	return y[hopH:], -float64(cross) / sampleRate, nil
 }
-
-// LockStart is the time, around the crossing, of the first sample Lock
-// returns.
-func LockStart() float64 { return -ReplayS + float64(hopH)/sampleRate }
 
 // LevelDB is the mean-square level of S16 samples in dB.
 func LevelDB(x []int16) float64 {

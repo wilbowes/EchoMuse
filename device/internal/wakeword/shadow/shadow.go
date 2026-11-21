@@ -106,6 +106,15 @@ type Scorer struct {
 	refract        time.Duration
 	onCross        func(score, threshold float32, at time.Time)
 
+	// Near-misses (SetNearMiss): a run of frames at nearBar or above, at the
+	// normal bar, that ends without a crossing. Scorer goroutine only.
+	nearBar     float32
+	onNear      func(peak float32, at time.Time)
+	nearOn      bool
+	nearPeak    float32
+	nearAt      time.Time
+	nearCrossed bool
+
 	ch   chan queued
 	done chan struct{}
 	stop sync.Once
@@ -348,6 +357,39 @@ type queued struct {
 	pcm   []int16
 	at    time.Time
 	prime bool // reset, then take pcm as history only: no scores
+	// clip: reset, score pcm on its own, reply with every frame's score;
+	// the live stream's state is lost (ScoreClip).
+	clip  chan []float32
+}
+
+// SetNearMiss calls onNear (from the scorer goroutine; it must not block)
+// when a run of frames at bar or above ends without a crossing, with the
+// run's peak score and the capture time of its peak frame. Only at the
+// normal wake bar: frames scored at the barge bar end any run. bar <= 0
+// turns it off. Call before audio flows.
+func (s *Scorer) SetNearMiss(bar float32, onNear func(peak float32, at time.Time)) {
+	s.mu.Lock()
+	s.nearBar, s.onNear = bar, onNear
+	s.mu.Unlock()
+}
+
+// ScoreClip scores pcm (16kHz S16) on its own, from a clean state, and
+// returns one score per whole 80ms frame (0 for frames before the detector
+// is ready). For a scorer kept for this alone: the live stream it may be
+// fed is reset. Blocks until done.
+func (s *Scorer) ScoreClip(pcm []int16) []float32 {
+	reply := make(chan []float32, 1)
+	select {
+	case s.ch <- queued{pcm: append([]int16(nil), pcm...), clip: reply}:
+	case <-s.quit:
+		return nil
+	}
+	select {
+	case r := <-reply:
+		return r
+	case <-s.quit:
+		return nil
+	}
 }
 
 // Prime resets the scorer and gives it pcm (S16LE, any multiple of 80ms) as
@@ -482,6 +524,25 @@ func (s *Scorer) run() {
 		s.stats.Threshold = threshold
 		s.mu.Unlock()
 
+		if q.clip != nil {
+			s.det.Reset()
+			var out []float32
+			for pcm := q.pcm; len(pcm) >= 1280; pcm = pcm[1280:] {
+				var sc float32
+				if _, err := s.det.Push(pcm[:1280]); err == nil && s.det.Ready() {
+					if v, err := s.det.Score(); err == nil {
+						sc = v
+					}
+				}
+				out = append(out, sc)
+			}
+			s.det.Reset()
+			s.mu.Lock()
+			s.ready = false
+			s.mu.Unlock()
+			q.clip <- out
+			continue
+		}
 		if q.prime {
 			reset = true
 		}
@@ -595,10 +656,38 @@ func (s *Scorer) run() {
 			s.lastCross = now
 		}
 		s.traceFrame(score, threshold, crossed)
+		var nearFire bool
+		var nearPeak float32
+		var nearAt time.Time
+		if s.onNear != nil && s.nearBar > 0 {
+			switch {
+			case lowBar:
+				s.nearOn = false
+			case score >= s.nearBar:
+				if !s.nearOn {
+					s.nearOn, s.nearPeak, s.nearCrossed = true, 0, false
+				}
+				if score > s.nearPeak {
+					s.nearPeak, s.nearAt = score, q.at
+				}
+				if crossed {
+					s.nearCrossed = true
+				}
+			case s.nearOn:
+				s.nearOn = false
+				if !s.nearCrossed && s.nearPeak < threshold {
+					nearFire, nearPeak, nearAt = true, s.nearPeak, s.nearAt
+				}
+			}
+		}
+		onNear := s.onNear
 		s.mu.Unlock()
 
 		if crossed && s.onCross != nil {
 			s.onCross(score, threshold, at)
+		}
+		if nearFire {
+			onNear(nearPeak, nearAt)
 		}
 	}
 }

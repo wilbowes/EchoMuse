@@ -108,6 +108,23 @@ func (g *Segmenter) Bounds() (start, end float64, ok bool) {
 	return 0, 0, false
 }
 
+// FinalZero reports that the sample at time t is outside the segment and
+// will stay so whatever comes next: before an onset that can no longer reach
+// back to it, or after the segment's end. A caller running behind (a late
+// lock) may drop such samples to catch up.
+func (g *Segmenter) FinalZero(t float64) bool {
+	switch g.state {
+	case segNone:
+		return true
+	case segWaiting:
+		// The earliest a future onset can start is segNeed frames before the
+		// newest one fed, less the preroll.
+		return t < g.t-float64(segNeed)*g.FrameS-segPreS
+	}
+	a, b, _ := g.Bounds()
+	return t < a || (g.state == segEnded && t >= b)
+}
+
 // Gain is the weight of the sample at time t: 0 outside the segment, 1
 // inside, with segRampS ramps at both edges. Only final for t at least
 // SegDelayS behind the newest frame fed.

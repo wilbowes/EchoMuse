@@ -143,15 +143,18 @@ func TestTheBeamFavoursTheTalker(t *testing.T) {
 	var out []int16
 	for i := 0; i+batch <= n; i += batch {
 		if i == lockAt {
-			y, err := s.Lock(lead)
+			y, t0, err := s.Lock(lead)
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := int((lead-LockStart())*sampleRate) - hopH
-			if d := len(y) - want; d < -hopH || d > hopH {
-				t.Fatalf("Lock returned %d samples, want ~%d (from %.2fs around the crossing)", len(y), want, LockStart())
+			if t0 > -ReplayS+1e-9 || t0 < -ReplayS-float64(hopH)/sampleRate {
+				t.Fatalf("Lock's output starts at %.4fs, want within a hop before -%.1fs", t0, ReplayS)
 			}
-			out = append(out, y[int(math.Round((-OutLeadS-LockStart())*sampleRate)):]...)
+			want := int((lead-t0)*sampleRate) - hopH
+			if d := len(y) - want; d < -hopH || d > hopH {
+				t.Fatalf("Lock returned %d samples, want ~%d (from %.2fs around the crossing)", len(y), want, t0)
+			}
+			out = append(out, y[int(math.Round((-OutLeadS-t0)*sampleRate)):]...)
 		}
 		chunk := make([][]int16, 4)
 		for c := range chunk {
@@ -193,7 +196,7 @@ func TestTheBeamFavoursTheTalker(t *testing.T) {
 func TestLockRefusesWithoutEnoughRoom(t *testing.T) {
 	s := New(Config{Mics: 4})
 	s.Push([][]int16{make([]int16, 8000), make([]int16, 8000), make([]int16, 8000), make([]int16, 8000)})
-	if _, err := s.Lock(0); err == nil {
+	if _, _, err := s.Lock(0); err == nil {
 		t.Fatal("locked with half a second of audio")
 	}
 }
@@ -264,5 +267,57 @@ func TestHermEigMaxFindsTheLargestEigenvalue(t *testing.T) {
 				t.Fatalf("m=%d: a vector has Rayleigh quotient %.4f over λ=%.4f", m, q, lam)
 			}
 		}
+	}
+}
+
+// A probe at a crossing leadS ago: its beam must start where Start says and
+// favour the talker as the turn's beam does.
+func TestAProbeBeamsTheNearMissTalker(t *testing.T) {
+	r := rand.New(rand.NewSource(7))
+	const pre, wake, after = 7.0, 1.6, 2.0
+	n := int((pre + wake + after) * sampleRate)
+	talkFrom, talkTo := int(pre*sampleRate), int((pre+wake)*sampleRate)
+	sc := makeScene(r, n, func(i int) bool { return i >= talkFrom && i < talkTo })
+	all := sc.mics(r, 0, n, true)
+	s := New(Config{Mics: 4})
+	batch := 2560
+	cross := talkTo
+	at := ((cross+int(1.2*sampleRate))/batch + 1) * batch // ~1.2s later, as a second look comes
+	for i := 0; i+batch <= at; i += batch {
+		ch := make([][]int16, 4)
+		for c := range ch {
+			ch[c] = all[c][i : i+batch]
+		}
+		s.Push(ch)
+	}
+	lead := float64(at-cross) / sampleRate
+	p, err := s.Probe(lead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	y := p.Beam()
+	// Sample j of y is at p.Start()+j/sr around the crossing: the talker
+	// stops at 0 and started 1.6s before.
+	idx := func(t float64) int { return int((t - p.Start()) * sampleRate) }
+	if idx(-wake) < 0 || idx(0.5) > len(y) {
+		t.Fatalf("probe covers %.2f..%.2fs, want -1.6..0.5", p.Start(), p.Start()+float64(len(y))/sampleRate)
+	}
+	talk := LevelDB(y[idx(-1.4):idx(-0.2)])
+	tv := LevelDB(y[idx(0.2):idx(1.0)])
+	ref := all[0]
+	off := cross - int(-p.Start()*sampleRate) // input index of y[0]
+	rTalk := LevelDB(ref[off+idx(-1.4) : off+idx(-0.2)])
+	rTV := LevelDB(ref[off+idx(0.2) : off+idx(1.0)])
+	t.Logf("talker over TV: mic %.1f dB, probe beam %.1f dB", rTalk-rTV, talk-tv)
+	if (talk-tv)-(rTalk-rTV) < 8 {
+		t.Errorf("the probe's beam gained %.1f dB of talker over TV, want 8", (talk-tv)-(rTalk-rTV))
+	}
+	// The edge: the talker's stop lands at 0 within a hop.
+	pre0, post0 := LevelDB(y[idx(-0.05):idx(-0.01)]), LevelDB(y[idx(0.03):idx(0.07)])
+	if pre0-post0 < 6 {
+		t.Errorf("no step at the talker's stop: %.1f dB before, %.1f after (Start misplaced)", pre0, post0)
+	}
+	if _, err := s.Probe(MaxLeadS + 0.1); err == nil {
+		t.Error("probed a crossing older than the stage keeps")
 	}
 }

@@ -15,4 +15,9 @@ func init() {
 		_, err := os.Stat("/data/local/tmp/em-turnbeam")
 		return err == nil
 	}
+	// The second look on wake near-misses: while em-secondlook exists.
+	SecondLookBenchOn = func() bool {
+		_, err := os.Stat("/data/local/tmp/em-secondlook")
+		return err == nil
+	}
 }
