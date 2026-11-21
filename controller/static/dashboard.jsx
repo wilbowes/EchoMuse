@@ -4869,13 +4869,24 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
       const u = await c.shell(
         'P=""; for u in /sys/block/mmcblk0/mmcblk0p*/uevent; do '
         + 'grep -qx "PARTNAME=lk_a" "$u" 2>/dev/null && { d=${u%/uevent}; P="/dev/block/${d##*/}"; }; done; '
-        + 'echo "LK=$([ -n "$P" ] && dd if="$P" bs=8 count=1 2>/dev/null | od -An -tx1 | tr -d \' \\n\')"; '
+        + 'echo "LKDEV=$P"; '
         + 'echo "TWRP=$(getprop ro.twrp.version)"; '
         + 'echo "TWRPLOG=$(grep -m1 -o \'Starting TWRP [0-9][^ ]*\' /tmp/recovery.log 2>/dev/null)"; '
         + 'echo _UNLOCKCHK');
       if (u.includes('_UNLOCKCHK')) {
         const pick = k => ((u.match(new RegExp('^' + k + '=(.*)$', 'm')) || [])[1] || '').trim();
-        lk   = pick('LK');
+        // lk_a's first eight bytes are pulled and decoded in the browser, the
+        // way the emOS donor check reads them: TWRP 3.2.3's BusyBox od has no
+        // -A, so no `od` may run on the device here (#903).
+        const lkDev = pick('LKDEV');
+        if (lkDev) {
+          await c.shell(`dd if=${lkDev} of=/tmp/em_lk.bin bs=8 count=1 2>/dev/null`);
+          const e = await c.pull('/tmp/em_lk.bin');
+          await c.shell('rm -f /tmp/em_lk.bin');
+          if (e && e.length >= 8) {
+            lk = [...e.subarray(0, 8)].map(b => b.toString(16).padStart(2, '0')).join('');
+          }
+        }
         twrp = pick('TWRP') || pick('TWRPLOG').replace(/^Starting TWRP /, '');
       }
       addLog(`Unlock check: TWRP ${twrp || 'unknown'}, lk_a ${lk || 'unreadable'}`);
