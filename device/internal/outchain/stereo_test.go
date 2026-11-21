@@ -395,3 +395,68 @@ func TestProcessFloatStereoMatchesProcessAtUnity(t *testing.T) {
 		}
 	}
 }
+
+// boostScales is a response boost that moves within the period and between
+// periods, the multipliers ProcessFloat is given for a reply above the music.
+func boostScales(frames, period int) []float64 {
+	s := make([]float64, frames)
+	for i := range s {
+		s[i] = 1 + 0.75*float64((i+period*37)%frames)/float64(frames)
+	}
+	return s
+}
+
+// A boosted reply over stereo music (ProcessFloat with multipliers above 1)
+// keeps the sides apart: what is only in the left stays out of the right.
+func TestProcessFloatBoostedKeepsTheChannelsApart(t *testing.T) {
+	c := shaped()
+	l := sum(tone(20000, 60), tone(5000, 2500))
+	var peak float64
+	for k := 0; k < 6; k++ {
+		fb := interleaveFloat(2048, k*2048, l, silence)
+		c.ProcessFloat(fb, boostScales(2048, k))
+		if !c.stereo {
+			t.Fatalf("period %d: not per channel on L != R", k)
+		}
+		for i := 0; i < 2048; i++ {
+			if fb[i*2+1] != 0 {
+				t.Fatalf("period %d frame %d: right=%v, want silence", k, i, fb[i*2+1])
+			}
+			peak = math.Max(peak, math.Abs(fb[i*2]))
+		}
+	}
+	if peak < 1000 {
+		t.Fatalf("left peak %v: the left channel did not come through", peak)
+	}
+}
+
+// Under the same boost, dual-mono audio through the per-channel path is the
+// mono path bit for bit, whether the chain never split, was split from the
+// start, or was never permitted.
+func TestProcessFloatBoostedDualMonoIsBitExact(t *testing.T) {
+	lazy, forced, never := shaped(), shaped(), shaped()
+	never.SetStereo(false)
+	for _, c := range []*Chain{lazy, forced, never} {
+		c.ProcessFloat(make([]float64, 2048*2), nil)
+	}
+	forced.engage()
+
+	bass := sum(tone(20000, 60), tone(6000, 3000))
+	for k := 0; k < 6; k++ {
+		a := interleaveFloat(2048, (k+1)*2048, bass, bass)
+		b := append([]float64(nil), a...)
+		n := append([]float64(nil), a...)
+		s := boostScales(2048, k)
+		lazy.ProcessFloat(a, s)
+		forced.ProcessFloat(b, s)
+		never.ProcessFloat(n, s)
+		if lazy.stereo || !forced.stereo {
+			t.Fatalf("period %d: lazy stereo=%v forced stereo=%v", k, lazy.stereo, forced.stereo)
+		}
+		for i := range a {
+			if a[i] != b[i] || a[i] != n[i] {
+				t.Fatalf("period %d sample %d: lazy %v, per channel %v, mono %v", k, i, a[i], b[i], n[i])
+			}
+		}
+	}
+}
