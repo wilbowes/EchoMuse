@@ -1267,6 +1267,48 @@ enabled it and nothing happened" this removes.
   a second try a couple of times (separate). Unsolved: in line with a TV
   speaker at ~4 m (no spatial separation, and the command was unintelligible
   on the raw mics). One talker, one TV, one unit so far.
+- 2026-11-21 evening, the in-turn presence gate (-26 dB, 0.3 s hold) spliced
+  a quiet-room command: Parakeet got "What's going on?" for "what's the
+  time" (41C8 turn 1478; the clip drops to -62 dBFS between pieces and a
+  bystander's word sits inside a hold). Softening it to -10 dB / 0.8 s let
+  more TV through (46% against 28% WER on 12 lounge TV commands). Replaced
+  (feat/turn-segment) by one segment per turn from Silero on the cleaned beam
+  plus energy over the beam's own pre-wake floor, with a Wiener post-filter;
+  every method chosen from old published practice (Wil: fallbacks only, no
+  patent discussion). Scored as the device would: 6-7/12 exact, and 0/6
+  wake-only TV windows with words against 3/6 for the gates. The command
+  count moves 2-3 on a 20 ms boundary shift or the detector's frame phase:
+  Parakeet is twitchy on these clips and 12 commands cannot show a
+  recognition gain. Silero is the weak cue on processed audio (masked
+  commands peak 0.4-0.5 at +16..+29 dB over the floor) and energy alone
+  lets TV through (5/6), so the bar stays at Silero's 0.5 until a corpus sets
+  it. Power-iteration steering with the shift covariance subtraction needs
+  had not converged after 300 steps on a weak talker (|cos| 0.96): Jacobi.
+  The talker window sat up to ~190 ms early (blocks counted from the newest
+  complete one) and must end past the crossing: a faint wake word's beam
+  scored 0.85 ending at the crossing, 0.60 ending 32 ms early, 0.07 at 64 ms.
+- 2026-11-21 evening, wake under the TV, mics only (the Echo has no other
+  input), 37 lounge attempts, raw best-of-4 18, ~6 min of TV-only audio, 10
+  quiet takes. Several spatial streams scored at once (online AuxIVA 30-31,
+  fixed MVDR beams against an 8 s running covariance 25-29, learnt seat
+  beams 27) were shelved under the fallback rule (per-stream wake scoring
+  was flagged as needing a patent check; the shipped barge taps raise the
+  same question), with 2-3 TV false wakes per ~10 min on them (raw 0) and
+  three extra scorers at ~60-70% of a core still open. One stream, one
+  scorer: mic 0 minus the steady loudest separated stream 23/37 but quiet
+  6-7/10 (the separation leaks the talker into the removed stream; a
+  steadiness rule did not fix it); per-mic noise-floor suppression (minimum
+  statistics + Wiener) 18/37, no change (the floor between TV words is not
+  what masks the wake word: failed attempts score a median 0.04 raw); LCMV
+  (Frost 1972) protecting 2 or 3 directions away from the TV 16 and 12/37
+  (a 7 cm, 4-mic array cannot hold several directions and null a
+  reverberant TV); a second look (the turn beam aimed at a 0.1-0.5
+  near-miss's own wake window, re-scored) 21/37 in Python with no false
+  wakes, but its verdict flips with the reference mic (0.02-0.84 on one
+  near-miss) or a 32 ms window shift, and the Go version confirms 1 of 8:
+  built behind em-secondlook, off. Wake dialogue share tracks failures
+  only loosely (66%: 9/10; 91-96%: 1/4..4/7; but 93%: 3/4). Review:
+  scratchpad review/REVIEW.md, published as an artifact.
 
 ## The external audio jack
 
