@@ -158,7 +158,11 @@ static int mknodes(void)
     mode_t old = umask(0);
     for (int k = 0; k < 2; k++) {
         char dir[64];
-        snprintf(dir, sizeof dir, "%s/%s", SYSDEV, kinds[k]);
+        /* Fits as "/sys/dev"; checked because devcheck.c points SYSDEV at a
+         * temporary directory, and a truncated one is some other directory. */
+        int dn = snprintf(dir, sizeof dir, "%s/%s", SYSDEV, kinds[k]);
+        if (dn < 0 || (size_t)dn >= sizeof dir)
+            continue;
         DIR *d = opendir(dir);
         if (!d)
             continue;
@@ -167,7 +171,11 @@ static int mknodes(void)
             if (de->d_name[0] == '.')
                 continue;
             char p[160], ev[512], path[160];
-            snprintf(p, sizeof p, "%s/%s/uevent", dir, de->d_name);
+            /* A truncated path is a wrong path: skip the entry. GCC 13 flags
+             * it unchecked. */
+            int pn = snprintf(p, sizeof p, "%s/%s/uevent", dir, de->d_name);
+            if (pn < 0 || (size_t)pn >= sizeof p)
+                continue;
             int fd = open(p, O_RDONLY);
             if (fd < 0)
                 continue;
@@ -176,7 +184,9 @@ static int mknodes(void)
             if (n <= 0)
                 continue;
             ev[n] = 0;
-            unsigned ma, mi;
+            /* Set by uevent_node whenever it returns 0; zeroed only because
+             * GCC cannot see that (-Wmaybe-uninitialized). */
+            unsigned ma = 0, mi = 0;
             mode_t mode;
             if (uevent_node(ev, k, path, sizeof path, &ma, &mi, &mode))
                 continue;
@@ -257,7 +267,9 @@ static const char *led_dir(void)
     struct dirent *e;
     while (d && (e = readdir(d))) {
         char p[256], name[64];
-        snprintf(p, sizeof p, "/sys/bus/i2c/devices/%s/name", e->d_name);
+        int pn = snprintf(p, sizeof p, "/sys/bus/i2c/devices/%s/name", e->d_name);
+        if (pn < 0 || (size_t)pn >= sizeof p)
+            continue;
         int fd = open(p, O_RDONLY);
         if (fd < 0)
             continue;
@@ -267,9 +279,13 @@ static const char *led_dir(void)
             continue;
         name[n] = 0;
         name[strcspn(name, "\n")] = 0;
-        if (strcmp(name, LED_DRIVER) == 0 && !found++)
-            snprintf(led_dir_buf, sizeof led_dir_buf,
-                     "/sys/bus/i2c/devices/%s", e->d_name);
+        if (strcmp(name, LED_DRIVER) == 0 && !found++) {
+            int ln = snprintf(led_dir_buf, sizeof led_dir_buf,
+                              "/sys/bus/i2c/devices/%s", e->d_name);
+            /* Truncated, it names some other directory: use the fallback. */
+            if (ln < 0 || (size_t)ln >= sizeof led_dir_buf)
+                found = 2;
+        }
     }
     if (d)
         closedir(d);
@@ -2257,7 +2273,12 @@ static int wmt_answer_patches(int fd, const char *dir)
          * higher-numbered file is downloaded first. Observed live; assigning
          * 1,2 in name order sends them in the wrong order. */
         pi.seq = n - i;
-        snprintf(full, sizeof full, "%s%s", dir, names[i]);
+        /* Checked for the same reason as pi.name below: a truncated path is
+         * opened exactly as given. GCC 13 flags it unchecked. */
+        int fn = snprintf(full, sizeof full, "%s%s", dir, names[i]);
+        if (fn < 0 || (size_t)fn >= sizeof full)
+            netlog("wmt: patch path too long (%d bytes, max %d): %s%s\n",
+                   fn, (int)sizeof full - 1, dir, names[i]);
         if (wmt_patch_addr(full, pi.addr))
             netlog("wmt: no header address in %s\n", names[i]);
         /* FULL PATH, not a bare name. wmt_dev_patch_get does not use
@@ -3804,7 +3825,7 @@ static void console_banner(void)
                 char *q = strchr(l + 9, '"');
                 if (q) {
                     *q = 0;
-                    snprintf(ver, sizeof ver, "emOS %s", l + 9);
+                    snprintf(ver, sizeof ver, "emOS %.58s", l + 9); /* 64 less "emOS " and NUL */
                 }
                 break;
             }
