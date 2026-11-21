@@ -12,9 +12,10 @@ switching to it costs, measured where we have the number.
 Status:
 
 - **old**: published in 2006 or earlier.
-- **recent**: published after 2006; the source and its licence are given.
+- **recent**: published after 2006 under an open licence, given in the
+  source column. Date only; not a flag.
 - **none on file**: we have no published source for it. The fallback column
-  says what would replace it.
+  says what would replace it. This is the only status that asks for action.
 
 Scope: the audio path on `main` (capture, cancellation, beam, wake, barge,
 speech gate, output chain) and the turn stage in flight. Transport, TLS, OTA,
