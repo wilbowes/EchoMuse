@@ -1514,6 +1514,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.makeupClipped += applyMakeup(mono, d.aecHeadroomGain())
 			}
 			tbOut := d.tb.step(tbChans, mono, sessionOpen)
+			if d.tb != nil && d.tb.iva {
+				if ys := d.tb.st.TakeIVA(); len(ys) > 0 && len(ys[0]) > 0 {
+					d.pushIVATaps(ys, d.tb.st.IVALoudest())
+				}
+			}
 			if d.tb != nil && d.tb.null {
 				if y := d.tb.st.TakeNull(); len(y) > 0 {
 					d.pushNullTap(s16ToBytes(y))

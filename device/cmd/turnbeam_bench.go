@@ -15,6 +15,17 @@ func init() {
 	if _, err := os.Stat("/data/local/tmp/em-waketaps"); err == nil {
 		wakeTapsIdle = true
 	}
+	client.IVABenchOn = func() bool {
+		_, err := os.Stat("/data/local/tmp/em-iva")
+		return err == nil
+	}
+	client.IVAShadow = func() bool { // act only once em-iva-act exists
+		_, err := os.Stat("/data/local/tmp/em-iva-act")
+		return err != nil
+	}
+	if client.IVABenchOn() {
+		wakeTapsIdle = true // the streams need the taps scoring from idle
+	}
 	client.TVNullBenchOn = func() bool {
 		_, err := os.Stat("/data/local/tmp/em-tvnull")
 		return err == nil

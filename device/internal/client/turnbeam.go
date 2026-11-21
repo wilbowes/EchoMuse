@@ -36,6 +36,7 @@ type turnBeam struct {
 	plainTail []int16
 	fade      int  // samples of crossfade left
 	null      bool // the idle TV null feeds the last tap scorer (TVNullBenchOn)
+	iva       bool // the separated streams feed every tap scorer (IVABenchOn)
 }
 
 const (
@@ -46,6 +47,12 @@ const (
 // TurnBeamBenchOn, set only by bench builds (turnbeam_bench.go), switches
 // the stage on without the env var. nil in production.
 var TurnBeamBenchOn func() bool
+
+// IVABenchOn, set only by bench builds, runs the stage's online separation
+// (turnbeam/iva.go) and scores its streams on the taps in place of the
+// microphones: every stream but the steady loudest (with the TV on, the TV).
+// IVAShadow, while true, makes the taps' crossings log and act on nothing.
+var IVABenchOn, IVAShadow func() bool
 
 // TVNullBenchOn, set only by bench builds, also runs the stage's idle TV null
 // (turnbeam/null.go) and scores it on the last tap in place of a microphone.
@@ -58,7 +65,11 @@ func newTurnBeam(mics int) *turnBeam {
 	}
 	log.Printf("[turnbeam] on: wake-anchored beam and endpoint over %d mics", mics)
 	t := &turnBeam{st: turnbeam.New(turnbeam.Config{Mics: mics})}
-	if TVNullBenchOn != nil && TVNullBenchOn() {
+	if IVABenchOn != nil && IVABenchOn() {
+		t.st.EnableIVA()
+		t.iva = true
+		log.Printf("[turnbeam] online separation on: its streams scored on the taps")
+	} else if TVNullBenchOn != nil && TVNullBenchOn() {
 		t.st.EnableNull()
 		t.null = true
 		log.Printf("[turnbeam] idle TV null on: scored on the last tap")

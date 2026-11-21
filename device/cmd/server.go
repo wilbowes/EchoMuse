@@ -1420,7 +1420,12 @@ func syncReplyTaps(dc *client.DataClient, cc *client.ControlClient, spk *speaker
 	}
 	var scs []*shadow.Scorer
 	for i := 0; i < n; i++ {
+		tap := i
 		sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
+			if client.IVAShadow != nil && client.IVABenchOn != nil && client.IVABenchOn() && client.IVAShadow() {
+				log.Printf("[iva] shadow crossing on tap %d: %.3f (bar %.2f), not acted on", tap, score, crossed)
+				return
+			}
 			onWakeCrossing(cc, dc, spk, srv, score, crossed, at)
 		})
 		if err != nil {

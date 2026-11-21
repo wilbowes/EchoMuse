@@ -27,6 +27,7 @@ type tapScoring struct {
 	chans   []int
 	bufs    [][]byte
 	recent  [][]byte // the wake stream's last primeChunks, to prime taps
+	ivaLoud int      // the stream pushIVATaps last left out
 }
 
 // primeChunks is the wake stream history a tap starts a reply with: 2s,
@@ -56,6 +57,7 @@ func (d *DataClient) SetTapScorers(sc []*shadow.Scorer, active func() bool) {
 	d.taps.mu.Lock()
 	old := d.taps.scorers
 	d.taps.scorers, d.taps.active, d.taps.was, d.taps.chans = sc, active, false, nil
+	d.taps.ivaLoud = -2 // log the first mapping
 	d.taps.bufs = make([][]byte, len(sc))
 	d.taps.mu.Unlock()
 	for _, s := range old {
@@ -81,6 +83,9 @@ func (d *DataClient) tapPlan(sel int) []int {
 	nMics := len(t.scorers)
 	if d.tb != nil && d.tb.null {
 		nMics-- // the last scorer takes the TV null (pushNullTap)
+	}
+	if d.tb != nil && d.tb.iva {
+		nMics = 0 // every scorer takes a separated stream (pushIVATaps)
 	}
 	if on && !t.was {
 		// Every microphone in turn from the last turn's direction, less the
@@ -145,6 +150,37 @@ func (d *DataClient) pushNullTap(pcm []byte) {
 		return
 	}
 	t.feedLocked(len(t.scorers)-1, pcm, time.Now())
+}
+
+// pushIVATaps feeds the separated streams to the tap scorers while they are
+// scoring: scorer i takes the i-th stream other than loudest. A change of
+// loudest re-maps the scorers, logged.
+func (d *DataClient) pushIVATaps(streams [][]int16, loudest int) {
+	t := &d.taps
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.was || len(t.scorers) == 0 {
+		return
+	}
+	if loudest != t.ivaLoud {
+		t.ivaLoud = loudest
+		var picked []int
+		for k := range streams {
+			if k != loudest && len(picked) < len(t.scorers) {
+				picked = append(picked, k)
+			}
+		}
+		log.Printf("[iva] taps score streams %v (loudest %d left out)", picked, loudest)
+	}
+	at := time.Now()
+	i := 0
+	for k, y := range streams {
+		if k == loudest || i >= len(t.scorers) {
+			continue
+		}
+		t.feedLocked(i, s16ToBytes(y), at)
+		i++
+	}
 }
 
 func (t *tapScoring) feedLocked(i int, pcm []byte, at time.Time) {

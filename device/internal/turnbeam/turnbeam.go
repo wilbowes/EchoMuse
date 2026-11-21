@@ -132,6 +132,7 @@ type Stage struct {
 	gain      float64    // smoothed gate gain
 	Trace     []float64  // per-block scores since Lock (observability; bounded by the turn)
 	nl        *nullState // idle TV null (EnableNull); nil when off
+	iv        *ivaState  // online separation (EnableIVA); nil when off
 }
 
 // New returns an unlocked stage.
@@ -219,6 +220,9 @@ func (s *Stage) hop() []int16 {
 	}
 	if s.nl != nil {
 		s.nullHop()
+	}
+	if s.iv != nil {
+		s.ivaHop()
 	}
 	// Covariance accumulation.
 	for k := 0; k < bins; k++ {
