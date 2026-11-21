@@ -38,7 +38,7 @@ type turnBeam struct {
 }
 
 const (
-	beamLagSamples = 256  // turnbeam's STFT hop
+	beamLagSamples = 256 + turnbeam.GateDelay // turnbeam's STFT hop and its gate delay
 	crossfadeN     = 1280 // 80ms
 )
 

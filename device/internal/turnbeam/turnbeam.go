@@ -18,7 +18,9 @@
 // share of power arriving along the talker's whitened steering vector
 // (Souden et al. 2010's multichannel speech presence, as a scalar). The
 // talker raises it above its recent floor (minimum statistics); the turn ends
-// HangS after the last window presenceRatio above that floor.
+// HangS after the last window presenceRatio above that floor. The same
+// decision gates the output (delayed GateDelay so it lands on the audio it
+// describes): TV-only stretches inside the turn go down 26 dB.
 //
 // Measured offline on donut 41C8, lounge, TV at 12 o'clock with speakers at 3
 // and 9 (2026-11-21, docs/history/device.md): beam +4.1 to +5.4 dB talker
@@ -49,6 +51,15 @@ const (
 	// peaked 1.3-1.9x its floor, TV-only bumps after it at most 1.2x.
 	floorS        = 2.0
 	presenceRatio = 1.3
+	// Gate: the beam's output is delayed GateDelay so each presence decision
+	// (a 256ms window ending now) lands on the audio it describes, then held
+	// at full level while the talker is present and gateRelease after, and
+	// at gateFloor otherwise. TV words between the wake and the command, and
+	// after it, reached HA through the beam (5 dB down is still words):
+	// "I was in a good place. Tell me a long story." (41C8 live 2026-11-21).
+	GateDelay   = 2 * blockFrames * hopH // samples (256ms)
+	gateRelease = 0.3
+	gateFloor   = 0.05 // -26 dB
 )
 
 // Config sets the stage's windows. Zero fields take the defaults.
@@ -116,6 +127,9 @@ type Stage struct {
 	wakeScore float64 // the detector over the wake word's own blocks
 	preP99    float64 // the 99th percentile of the pre-wake windows (observability)
 	floorHist []float64 // scores the floor is taken over: the pre-wake TV, then the turn
+	dly       []float64 // gate delay line (GateDelay samples)
+	hold      float64   // seconds of full level left
+	gain      float64   // smoothed gate gain
 	Trace     []float64 // per-block scores since Lock (observability; bounded by the turn)
 }
 
@@ -159,8 +173,9 @@ func (s *Stage) RefMic() int        { return s.ref }
 func (s *Stage) WakeScore() float64 { return s.wakeScore }
 
 // Push feeds one batch of cancelled 16kHz samples per microphone (equal
-// lengths, any size). Covariances are always updated; once locked, the beam's
-// output for every completed hop is returned (it lags the input by one hop).
+// lengths, any size). Covariances are always updated; once locked, the gated
+// beam for every completed hop is returned (it lags the input by one hop plus
+// GateDelay).
 func (s *Stage) Push(mics [][]int16) []int16 {
 	if len(mics) != s.m {
 		return nil
@@ -245,10 +260,18 @@ func (s *Stage) hop() []int16 {
 	for i := 0; i < frameN; i++ {
 		s.ola[i] += re[i] * s.win[i]
 	}
+	// Gate: push this hop into the delay line, take out the oldest hop.
+	target := gateFloor
+	if s.hold > 0 {
+		target = 1
+	}
 	out := make([]int16, hopH)
 	for i := 0; i < hopH; i++ {
-		out[i] = clip16(s.ola[i])
+		s.gain += (target - s.gain) * 0.01 // ~6ms at 16kHz
+		out[i] = clip16(s.dly[i] * s.gain)
 	}
+	copy(s.dly, s.dly[hopH:])
+	copy(s.dly[GateDelay-hopH:], s.ola[:hopH])
 	copy(s.ola, s.ola[hopH:])
 	for i := hopH; i < frameN; i++ {
 		s.ola[i] = 0
@@ -375,6 +398,8 @@ func (s *Stage) Lock() error {
 	s.wakeScore = s.windowScore(0)
 	s.Trace = s.Trace[:0]
 
+	s.dly = make([]float64, GateDelay)
+	s.hold, s.gain = gateRelease, 1 // the wake word's tail passes; the command may run on from it
 	s.locked, s.ended = true, false
 	s.sinceS, s.lastHit, s.score = 0, -1, 0
 	for i := range s.ola {
@@ -430,6 +455,11 @@ func (s *Stage) detect() {
 		floor = math.Min(floor, v)
 	}
 	s.thr = presenceRatio * floor
+	if s.score > s.thr {
+		s.hold = gateRelease
+	} else {
+		s.hold -= blockS
+	}
 	// A window that still holds the wake word's tail is the wake word, not
 	// the command: counting it would end a turn whose talker pauses for the
 	// cue before speaking.

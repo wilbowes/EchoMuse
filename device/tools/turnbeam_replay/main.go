@@ -87,7 +87,7 @@ func main() {
 			y := st.Push(chunk)
 			if st.Locked() {
 				beam = append(beam, y...)
-				ref = append(ref, chunk[st.RefMic()][:len(y)]...)
+				ref = append(ref, chunk[st.RefMic()][:len(y)]...) // (the beam is GateDelay+hop behind; dB windows are seconds long)
 				if st.Ended() && endS < 0 {
 					endS = float64(i+2560-lockAt) / rate
 				}
