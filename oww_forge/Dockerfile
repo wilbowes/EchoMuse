@@ -27,6 +27,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # packages for it; these are Intel's release debs for compute-runtime
 # 26.40.40196.8 and what its release notes pair it with, by hash (the
 # compute-runtime three match Intel's ww40.sum).
+# The debs are fetched into /tmp and installed from there inside the xpu
+# branch only; WORKDIR would move every later RUN (DL3003). The pipe only
+# feeds the hashes to `sha256sum -c`, whose status is the one that counts
+# (DL4006). The commands stay as they are: the forge's pins must not move.
+# hadolint ignore=DL3003,DL4006
 RUN if [ "$GPU" = "xpu" ]; then \
         cd /tmp \
         && for u in \
