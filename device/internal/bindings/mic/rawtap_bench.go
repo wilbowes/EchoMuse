@@ -21,7 +21,7 @@ import (
 //
 //	echo 60 > /data/local/tmp/em-rawcap-request
 //
-// writes /data/local/tmp/rawcap-<unix>.raw (mics, the board's own capture
+// writes /tmp/rawcap-<unix>.raw (mics, the board's own capture
 // format), .lb (loopback, if any) and .ts ("m|l <monotonic ns> <bytes>" per
 // chunk) for that many seconds (max 120). The audio goroutines never wait on
 // the disk: chunks go through buffered channels and are dropped, and
@@ -29,20 +29,26 @@ import (
 
 const (
 	rawcapRequest = "/data/local/tmp/em-rawcap-request"
-	rawcapDir     = "/data/local/tmp"
+	rawcapDir     = "/tmp" // RAM under emOS (rootfs): no eMMC writes; pull and delete
 	rawcapMaxSecs = 120
 )
 
 type rawChunk struct {
 	loop bool
+	tag  string // non-empty: an extra stream (RawcapExtra), written to base.<tag>
 	at   int64
 	b    []byte
 }
 
 var rawStart = time.Now()
 
+// RawcapExtra records b as stream tag beside a running capture (base.<tag>,
+// with "<tag> <ns> <bytes>" lines in .ts); a no-op when none is running.
+// Bench: the wake scorers' inputs, to set against the raw mics.
+var RawcapExtra = func(tag string, b []byte) {}
+
 func init() {
-	ch := make(chan rawChunk, 256)
+	ch := make(chan rawChunk, 1024)
 	var active atomic.Bool
 	var dropped atomic.Int64
 	push := func(loop bool, b []byte) {
@@ -57,6 +63,17 @@ func init() {
 		}
 	}
 	rawTap = func(b []byte) { push(false, b) }
+	RawcapExtra = func(tag string, b []byte) {
+		if !active.Load() {
+			return
+		}
+		c := rawChunk{tag: tag, at: int64(time.Since(rawStart)), b: append([]byte(nil), b...)}
+		select {
+		case ch <- c:
+		default:
+			dropped.Add(1)
+		}
+	}
 	rawLoopTap = func(b []byte) { push(true, b) }
 	go func() {
 		for {
@@ -83,8 +100,21 @@ func init() {
 			dropped.Store(0)
 			active.Store(true)
 			var mic, lb int64
+			extra := map[string]*os.File{}
 			write := func(c rawChunk) {
 				tag := "m"
+				if c.tag != "" {
+					f := extra[c.tag]
+					if f == nil {
+						f, _ = os.Create(base + "." + c.tag)
+						extra[c.tag] = f
+					}
+					if f != nil {
+						f.Write(c.b)
+					}
+					fmt.Fprintf(tf, "%s %d %d\n", c.tag, c.at, len(c.b))
+					return
+				}
 				if c.loop {
 					tag = "l"
 					n, _ := lf.Write(c.b)
@@ -111,6 +141,9 @@ func init() {
 			}
 			mf.Close()
 			lf.Close()
+			for _, f := range extra {
+				f.Close()
+			}
 			tf.Close()
 			log.Printf("[rawcap] done: %s, mic %d bytes, loopback %d bytes, %d chunks dropped",
 				base, mic, lb, dropped.Load())

@@ -78,13 +78,17 @@ func (d *DataClient) tapPlan(sel int) []int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	on := len(t.scorers) > 0 && t.active != nil && t.active()
+	nMics := len(t.scorers)
+	if d.tb != nil && d.tb.null {
+		nMics-- // the last scorer takes the TV null (pushNullTap)
+	}
 	if on && !t.was {
 		// Every microphone in turn from the last turn's direction, less the
 		// one the wake stream scores. Dropping the first of the spread
 		// assumed that was it, and when the stream was on another mic one
 		// tap scored the stream's own audio and one mic went unheard
 		// (41C8, 2026-11-20: a tap's scores equal the stream's to 3 places).
-		t.chans = tapChannels(d.beam.SpreadChannels(1<<30), sel, len(t.scorers))
+		t.chans = tapChannels(d.beam.SpreadChannels(1<<30), sel, nMics)
 		var hist []byte
 		for _, c := range t.recent {
 			hist = append(hist, c...)
@@ -98,6 +102,12 @@ func (d *DataClient) tapPlan(sel int) []int {
 			t.bufs[i] = t.bufs[i][:0]
 		}
 		log.Printf("[taps] scoring %s over this reply", chanList(t.chans))
+	}
+	if on && t.was && containsInt(t.chans, sel) {
+		// Always-on taps (bench): the stream moved onto a tapped mic, so
+		// re-pick the taps rather than score that mic twice.
+		t.chans = tapChannels(d.beam.SpreadChannels(1<<30), sel, nMics)
+		log.Printf("[taps] stream on mic %d: now scoring %s", sel, chanList(t.chans))
 	}
 	t.was = on
 	if !on {
@@ -121,16 +131,32 @@ func (d *DataClient) pushTaps(tapped [][]byte) {
 			t.bufs[i] = t.bufs[i][:0]
 			continue
 		}
-		t.bufs[i] = append(t.bufs[i], pcm...)
-		for len(t.bufs[i]) >= vadOwwChunkBytes {
-			chunk := make([]byte, vadOwwChunkBytes)
-			copy(chunk, t.bufs[i][:vadOwwChunkBytes])
-			t.bufs[i] = t.bufs[i][vadOwwChunkBytes:]
-			if ScorerTap != nil {
-				ScorerTap(fmt.Sprintf("t%d", i), chunk)
-			}
-			t.scorers[i].PushBytesAt(chunk, at)
+		t.feedLocked(i, pcm, at)
+	}
+}
+
+// pushNullTap feeds the idle TV null to the last tap scorer while the taps
+// are scoring (TVNullBenchOn).
+func (d *DataClient) pushNullTap(pcm []byte) {
+	t := &d.taps
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.was || len(t.scorers) == 0 {
+		return
+	}
+	t.feedLocked(len(t.scorers)-1, pcm, time.Now())
+}
+
+func (t *tapScoring) feedLocked(i int, pcm []byte, at time.Time) {
+	t.bufs[i] = append(t.bufs[i], pcm...)
+	for len(t.bufs[i]) >= vadOwwChunkBytes {
+		chunk := make([]byte, vadOwwChunkBytes)
+		copy(chunk, t.bufs[i][:vadOwwChunkBytes])
+		t.bufs[i] = t.bufs[i][vadOwwChunkBytes:]
+		if ScorerTap != nil {
+			ScorerTap(fmt.Sprintf("t%d", i), chunk)
 		}
+		t.scorers[i].PushBytesAt(chunk, at)
 	}
 }
 
@@ -154,4 +180,13 @@ func chanList(ch []int) string {
 		s += fmt.Sprintf(" ch%d", c)
 	}
 	return s[min(1, len(s)):]
+}
+
+func containsInt(xs []int, x int) bool {
+	for _, v := range xs {
+		if v == x {
+			return true
+		}
+	}
+	return false
 }

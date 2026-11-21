@@ -34,17 +34,22 @@ type turnBeam struct {
 	// command and Parakeet heard "January" for "and what time" (41C8 live,
 	// 2026-11-21; the same lock replayed without the splice was clean).
 	plainTail []int16
-	fade      int // samples of crossfade left
+	fade      int  // samples of crossfade left
+	null      bool // the idle TV null feeds the last tap scorer (TVNullBenchOn)
 }
 
 const (
 	beamLagSamples = 256 + turnbeam.GateDelay // turnbeam's STFT hop and its gate delay
-	crossfadeN     = 1280 // 80ms
+	crossfadeN     = 1280                     // 80ms
 )
 
 // TurnBeamBenchOn, set only by bench builds (turnbeam_bench.go), switches
 // the stage on without the env var. nil in production.
 var TurnBeamBenchOn func() bool
+
+// TVNullBenchOn, set only by bench builds, also runs the stage's idle TV null
+// (turnbeam/null.go) and scores it on the last tap in place of a microphone.
+var TVNullBenchOn func() bool
 
 func newTurnBeam(mics int) *turnBeam {
 	on := os.Getenv("EM_TURNBEAM") == "on" || (TurnBeamBenchOn != nil && TurnBeamBenchOn())
@@ -52,7 +57,13 @@ func newTurnBeam(mics int) *turnBeam {
 		return nil
 	}
 	log.Printf("[turnbeam] on: wake-anchored beam and endpoint over %d mics", mics)
-	return &turnBeam{st: turnbeam.New(turnbeam.Config{Mics: mics})}
+	t := &turnBeam{st: turnbeam.New(turnbeam.Config{Mics: mics})}
+	if TVNullBenchOn != nil && TVNullBenchOn() {
+		t.st.EnableNull()
+		t.null = true
+		log.Printf("[turnbeam] idle TV null on: scored on the last tap")
+	}
+	return t
 }
 
 // requestLock is called when a session opens (any goroutine).
@@ -151,4 +162,12 @@ func allChannels(n int) []int {
 		c[i] = i
 	}
 	return c
+}
+
+func s16ToBytes(v []int16) []byte {
+	b := make([]byte, 2*len(v))
+	for i, x := range v {
+		binary.LittleEndian.PutUint16(b[2*i:], uint16(x))
+	}
+	return b
 }

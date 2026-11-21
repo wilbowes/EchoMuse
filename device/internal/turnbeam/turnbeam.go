@@ -117,20 +117,21 @@ type Stage struct {
 	ref    int
 	ola    []float64
 	// Detector.
-	whL     [][]complex128 // [bin] Cholesky of the loaded noise covariance
-	whU     [][]complex128 // [bin] whitened unit steering
-	thr     float64
-	score   float64
-	sinceS  float64 // since Lock
-	lastHit float64 // time (since Lock) of the last window over thr; <0 none
-	ended   bool
-	wakeScore float64 // the detector over the wake word's own blocks
-	preP99    float64 // the 99th percentile of the pre-wake windows (observability)
-	floorHist []float64 // scores the floor is taken over: the pre-wake TV, then the turn
-	dly       []float64 // gate delay line (GateDelay samples)
-	hold      float64   // seconds of full level left
-	gain      float64   // smoothed gate gain
-	Trace     []float64 // per-block scores since Lock (observability; bounded by the turn)
+	whL       [][]complex128 // [bin] Cholesky of the loaded noise covariance
+	whU       [][]complex128 // [bin] whitened unit steering
+	thr       float64
+	score     float64
+	sinceS    float64 // since Lock
+	lastHit   float64 // time (since Lock) of the last window over thr; <0 none
+	ended     bool
+	wakeScore float64    // the detector over the wake word's own blocks
+	preP99    float64    // the 99th percentile of the pre-wake windows (observability)
+	floorHist []float64  // scores the floor is taken over: the pre-wake TV, then the turn
+	dly       []float64  // gate delay line (GateDelay samples)
+	hold      float64    // seconds of full level left
+	gain      float64    // smoothed gate gain
+	Trace     []float64  // per-block scores since Lock (observability; bounded by the turn)
+	nl        *nullState // idle TV null (EnableNull); nil when off
 }
 
 // New returns an unlocked stage.
@@ -215,6 +216,9 @@ func (s *Stage) hop() []int16 {
 		for k := 0; k < bins; k++ {
 			s.xb[k][c] = complex(re[k], im[k])
 		}
+	}
+	if s.nl != nil {
+		s.nullHop()
 	}
 	// Covariance accumulation.
 	for k := 0; k < bins; k++ {

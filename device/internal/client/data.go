@@ -1468,6 +1468,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					tbChans = turnBeamChans(mics, got[len(plan):], d.makeupFor(aecArmed))
 					if plan != nil {
 						tapped := got[:len(plan)]
+						for i := range tapped {
+							if tapped[i] == nil { // a resting mic: nothing plays, raw is cancelled
+								tapped[i] = append([]byte(nil), mics[plan[i]]...)
+							}
+						}
 						for _, t := range tapped {
 							if t != nil && aecArmed {
 								applyMakeup(t, d.aecHeadroomGain())
@@ -1490,7 +1495,18 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			} else {
 				if d.tb != nil {
 					sel := d.beam.OutputChannel(beamAngle)
-					tbChans = turnBeamChans(d.beam.MicChannels(raw, extractGain, sel, append([]byte(nil), mono...)), nil, d.makeupFor(aecArmed))
+					rawCh := d.beam.MicChannels(raw, extractGain, sel, append([]byte(nil), mono...))
+					tbChans = turnBeamChans(rawCh, nil, d.makeupFor(aecArmed))
+					if plan := d.tapPlan(sel); plan != nil { // no reference: the taps take the raw mics
+						tapped := make([][]byte, len(plan))
+						for i, ch := range plan {
+							tapped[i] = append([]byte(nil), rawCh[ch]...)
+							if aecArmed {
+								applyMakeup(tapped[i], d.aecHeadroomGain())
+							}
+						}
+						d.pushTaps(tapped)
+					}
 				}
 				mono = d.aec.Process(mono)
 			}
@@ -1498,6 +1514,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				d.makeupClipped += applyMakeup(mono, d.aecHeadroomGain())
 			}
 			tbOut := d.tb.step(tbChans, mono, sessionOpen)
+			if d.tb != nil && d.tb.null {
+				if y := d.tb.st.TakeNull(); len(y) > 0 {
+					d.pushNullTap(s16ToBytes(y))
+				}
+			}
 			clipped := d.beam.ClippedSamples() + d.makeupClipped
 
 			// ── Processing pipeline ──────────────────────────────────────

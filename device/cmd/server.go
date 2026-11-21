@@ -1403,8 +1403,14 @@ func syncReplyTaps(dc *client.DataClient, cc *client.ControlClient, spk *speaker
 	tune := func(sc *shadow.Scorer) {
 		sc.SetThreshold(threshold)
 		sc.SetMinFrames(snap.OwwMinFrames)
-		// Fed only while a reply plays, so always at the barge bar.
-		sc.SetBargeThreshold(bar, func() bool { return true })
+		// Fed only while a reply plays, so always at the barge bar — unless
+		// the taps also listen when idle (wakeTapsIdle), where they take the
+		// stream's own rule: the barge bar only while something plays.
+		if wakeTapsIdle {
+			sc.SetBargeThreshold(bar, speakerPlaying(spk))
+		} else {
+			sc.SetBargeThreshold(bar, func() bool { return true })
+		}
 	}
 	if have := dc.TapScorers(); !rebuild && len(have) == n {
 		for _, sc := range have {
@@ -1428,8 +1434,35 @@ func syncReplyTaps(dc *client.DataClient, cc *client.ControlClient, spk *speaker
 		tune(sc)
 		scs = append(scs, sc)
 	}
-	dc.SetTapScorers(scs, func() bool { return spk.VoiceAudible(wakeword.ScoreSpan) })
-	log.Printf("[taps] %d more microphones scored during replies", n)
+	dc.SetTapScorers(scs, func() bool { return wakeTapsIdle || spk.VoiceAudible(wakeword.ScoreSpan) })
+	if wakeTapsIdle {
+		tapStatsOnce.Do(func() { go logTapStats(dc) })
+		log.Printf("[taps] %d more microphones scored all the time (wake from idle as well as barge)", n)
+	} else {
+		log.Printf("[taps] %d more microphones scored during replies", n)
+	}
+}
+
+// wakeTapsIdle keeps the reply taps scoring when nothing plays, so the wake
+// word is heard on every microphone and not only the stream's: from idle with
+// the TV on, an attempt at 0.87 on ch0 and 0.02-0.08 on the other three went
+// unheard when the stream was on another mic (41C8, 2026-11-21). Bench only
+// for now (turnbeam_bench.go); each tap is a wake scorer, always running.
+var wakeTapsIdle bool
+
+var tapStatsOnce sync.Once
+
+// logTapStats logs each tap scorer's window every 5s (bench, wakeTapsIdle).
+func logTapStats(dc *client.DataClient) {
+	for range time.Tick(5 * time.Second) {
+		var b strings.Builder
+		for i, sc := range dc.TapScorers() {
+			st := sc.Drain()
+			fmt.Fprintf(&b, " t%d[f=%d d=%d nr=%d max=%.3f inf=%dms gap=%dms err=%d]",
+				i, st.Frames, st.Drops, st.NotReady, st.MaxScore, st.MaxInferMs, st.MaxGapMs, st.Errors)
+		}
+		log.Printf("[taps] stats%s", b.String())
+	}
 }
 
 // replyStillHeard reports whether a voice reply is queued, arriving or still
