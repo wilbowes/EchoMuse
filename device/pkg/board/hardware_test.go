@@ -531,3 +531,20 @@ func TestMicADCsAreTheMutedOnes(t *testing.T) {
 		}
 	}
 }
+
+// The canceller frame divides the 1280-sample wake chunk (aec.ValidFrame
+// takes the same set and falls back to 1280 on anything else, which would
+// silently undo a board's measured choice). Donut's 160 is measured
+// (2026-11-21: 11 of 12 barge-ins at 3 m against 4 of 8 at 1280).
+func TestEveryBoardStatesAnAllowedAECFrame(t *testing.T) {
+	for _, b := range Known {
+		switch f := b.Hardware.Mics.AECFrame; f {
+		case 0, 160, 320, 640, 1280:
+		default:
+			t.Errorf("%s: AECFrame %d is not 0, 160, 320, 640 or 1280", b.ID, f)
+		}
+	}
+	if f := donutMics.AECFrame; f != 160 {
+		t.Errorf("donut's canceller frame is %d, measured best at 160", f)
+	}
+}

@@ -1223,6 +1223,27 @@ enabled it and nothing happened" this removes.
   false fire in 49 s of reply-only audio for any set. Geometry-steered beams do
   not beat plain mics on the donut (4 mics, 3 degrees of freedom); talker-learnt
   steering was not tried (no calibration capture on 41C8).
+- 2026-11-21, donut 41C8 moved to the lounge (no other Echo listening), volume
+  21%, Wil at 6, 4 and 8 o'clock, 3 m at 6 and nearer 4 m at 4 and 8. Quiet
+  wake 10/10 first try (crossings 0.51-0.87, peaks 0.79-0.92). Barge over a
+  28 s announcement, one try each, on the 11-20 bench build (taps + stale
+  reads, speex frame 1280): 4 of 8; every miss peaked 0.03 or lower against
+  the 0.25 bar, i.e. nothing heard, and 6 o'clock went 0 of 3. Replaying the
+  captures through speex at 10 ms frames removed 19.4-21 dB of the reply
+  against 14-15 dB at 80 ms (the device's own 14.5-19 dB, which was the
+  "gap at source" of 11-20), and the misses scored 0.57, 0.90 and 0.85 on a
+  tap at 160 against 0.00 at 1280; one miss (the first announcement of a
+  window) scored nothing at any frame. 20 ms frames removed 18.6 dB, 40 ms
+  17.2 dB, and recovered fewer. Bench build at 160: 11 of 12 live (5/6 then
+  6/6, 6 o'clock 4 of 4), +6% of one core during a reply (112% vs 106%),
+  idle unchanged, reply self-score peak 0.09. The one miss (8 o'clock, ~4 m)
+  showed no voice burst in the cancelled audio and scored at most 0.35 with
+  residual suppression: level or model, not residue. The same replay on
+  15LE's 11-20 Dot 2 round gave +0.1-0.4 dB at 160 (9.9-13.9 vs 10.2-14.0),
+  so #1211's one-block filter costs the Dot 2 nothing and donut 6 dB. Not
+  established why: a longer or more diffuse echo path on the donut needing
+  the finer partition is the guess. Captures in
+  em-diag/donut-lounge-2026-11-21 (local).
 
 ## The external audio jack
 

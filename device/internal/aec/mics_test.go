@@ -28,7 +28,7 @@ func micEcho(signal []int16, ch int) []int16 {
 func runMics(c *Canceller, signal []int16, echoes [][]int16, active, from, to int) float64 {
 	var in, out float64
 	for f := from; f < to; f++ {
-		lo, hi := f*FrameSize, (f+1)*FrameSize
+		lo, hi := f*c.frame, (f+1)*c.frame
 		mics := make([][]byte, NumMics)
 		for ch := range mics {
 			mics[ch] = toBytes(echoes[ch][lo:hi])
@@ -262,7 +262,7 @@ func TestUnusedMicrophonesRestWhileNothingPlays(t *testing.T) {
 	}
 	runMics(c, signal, echoes, 6, learn, learn+idle)
 	// The echo's tail runs a few frames into the quiet, then quietHold.
-	if ran, most := c.micFrames-learn*NumMics, uint64(idle+(quietHold+2)*(NumMics-1)); ran > most {
+	if ran, most := c.micFrames-learn*NumMics, uint64(idle+(quietHoldMs*sampleRate/1000/FrameSize+2)*(NumMics-1)); ran > most {
 		t.Fatalf("%d cancellations ran over %d quiet frames, want no more than %d", ran, idle, most)
 	}
 	before := c.micFrames
@@ -328,5 +328,55 @@ func TestTapsAreTheMicAsIfInUse(t *testing.T) {
 		if taps[1] != nil {
 			t.Fatalf("frame %d: a tap outside the array returned audio", f)
 		}
+	}
+}
+
+// A board may state a smaller speex frame (board.MicArray.AECFrame). Each
+// allowed size must converge on every microphone as the default does, over
+// the same audio, so a board's choice changes depth and cost and nothing
+// else.
+func TestEveryAllowedFrameConverges(t *testing.T) {
+	const ms = 4800
+	for _, frame := range []int{160, 320, 640, FrameSize} {
+		frames := ms * sampleRate / 1000 / frame
+		signal := synth(frames * frame)
+		echoes := sevenEchoes(signal)
+		c := NewFrame(NumMics, frame)
+		c.SetParams(true, 0, 64)
+		c.SetHardwareRef(true)
+		runMics(c, signal, echoes, 6, 0, frames-frames/8)
+		if att := runMics(c, signal, echoes, 6, frames-frames/8, frames); att < 20 {
+			t.Errorf("frame %d cancels %.1fdB once converged, want 20dB", frame, att)
+		}
+	}
+}
+
+// Anything but an allowed frame is the default: the mic batches and wake
+// chunks are built in multiples of FrameSize.
+func TestOnlyAllowedFramesAreTaken(t *testing.T) {
+	for frame, want := range map[int]int{0: FrameSize, 160: 160, 320: 320, 640: 640, 1280: 1280, 256: FrameSize, 2560: FrameSize, -160: FrameSize} {
+		if got := NewFrame(NumMics, frame).frame; got != want {
+			t.Errorf("frame %d gave %d, want %d", frame, got, want)
+		}
+	}
+}
+
+// A path saved at one frame is refused by a canceller at another: the
+// filter's shape differs, so loading it would be a wrong filter rather than
+// an empty one.
+func TestASavedPathFromAnotherFrameIsRefused(t *testing.T) {
+	signal := synth(60 * FrameSize)
+	echoes := sevenEchoes(signal)
+	a := hwCanceller(64)
+	runMics(a, signal, echoes, 6, 0, 60)
+	saved, err := a.ExportState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := NewFrame(NumMics, 160)
+	b.SetParams(true, 0, 64)
+	b.SetHardwareRef(true)
+	if err := b.ImportState(saved); err == nil {
+		t.Fatal("a 160-sample canceller took a path saved at 1280")
 	}
 }
