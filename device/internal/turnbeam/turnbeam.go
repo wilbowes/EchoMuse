@@ -1,33 +1,27 @@
 // Package turnbeam is the wake-anchored turn stage: once the wake word has
-// fired, it beams the turn toward the talker and says when the talker has
-// stopped, using only the room's own spatial statistics.
+// fired, it beams the turn toward the talker and cleans the beam's output,
+// using only the room's own spatial statistics. Where the command starts and
+// stops is decided outside, by a speech detector on this output (Segmenter).
 //
-// Both halves read one set of per-bin spatial covariances of the cancelled
-// microphones, kept as 128ms block sums over the last few seconds:
+// Everything is from published methods old enough to be settled practice:
 //
-//   - Noise: the blocks before the wake word. In a household with the TV on
-//     that is the TV, from its fixed speakers, as the array hears it.
-//   - Talker: the blocks holding the wake word itself (WakeS before Lock).
+//   - Covariances: per-bin spatial covariances of the cancelled mics, kept as
+//     128ms block sums. Noise = the NoiseS before the wake word (with the TV
+//     on, the TV as the array hears it); talker = the WakeS holding the wake
+//     word, ending at the crossing.
+//   - Steering by covariance subtraction: the principal eigenvector of
+//     (talker − noise) per bin, made distortionless on the talker's best mic.
+//   - MVDR (Capon 1969) with diagonal loading, fixed for the turn.
+//   - Post-filter: a Wiener gain on a decision-directed a priori SNR (Ephraim
+//     & Malah 1984) with a -15 dB floor (Berouti 1979). Its noise PSD follows
+//     the TV moment to moment from the blocking reference (Griffiths & Jim
+//     1982): the mics with the talker's direction projected out, scaled by
+//     the beam's static residual noise.
 //
-// Beam: MVDR toward the talker against that noise. The steering vector is
-// the principal generalised eigenvector of (talker, noise), mapped back from
-// the whitened space and made distortionless on the talker's best mic, with
-// diagonal loading. The filter is fixed for the turn.
-//
-// Endpoint: whiten each 256ms window by the pre-wake noise and measure the
-// share of power arriving along the talker's whitened steering vector
-// (Souden et al. 2010's multichannel speech presence, as a scalar). The
-// talker raises it above its recent floor (minimum statistics); the turn ends
-// HangS after the last window presenceRatio above that floor. The same
-// decision gates the output (delayed GateDelay so it lands on the audio it
-// describes): TV-only stretches inside the turn go down 26 dB.
-//
-// Measured offline on donut 41C8, lounge, TV at 12 o'clock with speakers at 3
-// and 9 (2026-11-21, docs/history/device.md): beam +4.1 to +5.4 dB talker
-// over TV, and the endpoint gave HA's STT exactly the command at 2.4-2.6 s,
-// for a talker at 6 and 4 o'clock. In line with a TV speaker (8 o'clock,
-// ~4 m) neither half separates: a 7cm array has no spatial resolution there.
-// Nothing about the talker's voice is modelled.
+// Offline on 41C8 in the lounge with the TV on (12 commands, 2026-11-21,
+// docs/history/device.md), with Silero segmenting this output: 10/12 exact,
+// 15% WER, and no TV words in any of 6 wakes with no command after them; the
+// in-turn presence gate this replaces got 6/12 and leaked in 3 of 6.
 package turnbeam
 
 import (
@@ -46,30 +40,33 @@ const (
 	blockS      = float64(blockFrames*hopH) / sampleRate
 	bandLoHz    = 300
 	bandHiHz    = 4000
-	// The talker is present while the score is presenceRatio above its
-	// floor over the last floorS. Set on six lounge TV takes: the command
-	// peaked 1.3-1.9x its floor, TV-only bumps after it at most 1.2x.
-	floorS        = 2.0
-	presenceRatio = 1.3
-	// Gate: the beam's output is delayed GateDelay so each presence decision
-	// (a 256ms window ending now) lands on the audio it describes, then held
-	// at full level while the talker is present and gateRelease after, and
-	// at gateFloor otherwise. TV words between the wake and the command, and
-	// after it, reached HA through the beam (5 dB down is still words):
-	// "I was in a good place. Tell me a long story." (41C8 live 2026-11-21).
-	GateDelay   = 2 * blockFrames * hopH // samples (256ms)
-	gateRelease = 0.3
-	gateFloor   = 0.05 // -26 dB
+
+	// Post-filter.
+	pfFloor   = 0.1778 // -15 dB
+	pfAlpha   = 0.98   // decision-directed smoothing
+	pfXiMin   = 0.0031623
+	phiSmooth = 0.6  // one-pole on the blocking power per hop (~40ms)
+	phiMin    = 0.25 // the moving noise PSD never drops under 1/4 of the static one
+
+	// At Lock the beam is replayed over the last ReplayS before the crossing,
+	// so the post-filter starts warm, the floor is measured on the beam's own
+	// pre-wake output, and the output can start before the lock (OutLeadS
+	// before the crossing).
+	ReplayS  = 3.0
+	OutLeadS = 0.3
+	floorTo  = -1.6 // pre-wake floor over [-ReplayS, floorTo] around the crossing
+	maxLeadS = 0.6  // crossing to Lock, at most
+	// FloorFrame is the frame the floor is measured over: the device's Silero
+	// step, so the Segmenter compares like with like.
+	FloorFrame = 640
 )
 
 // Config sets the stage's windows. Zero fields take the defaults.
 type Config struct {
 	Mics   int     // cancelled microphone channels, in the board's order
 	NoiseS float64 // pre-wake noise window (default 6.5s)
-	WakeS  float64 // window before Lock that holds the wake word (default 1.6s)
+	WakeS  float64 // window before the crossing that holds the wake word (default 1.6s)
 	Load   float64 // diagonal loading, share of the mean noise power (default 1e-3)
-	HangS  float64 // talker gone this long after a crossing ends the turn (default 0.75s)
-	StartS float64 // no crossing at all this long after Lock ends the turn (default 3s)
 }
 
 func (c *Config) defaults() {
@@ -82,17 +79,11 @@ func (c *Config) defaults() {
 	if c.Load <= 0 {
 		c.Load = 1e-3
 	}
-	if c.HangS <= 0 {
-		c.HangS = 0.75
-	}
-	if c.StartS <= 0 {
-		c.StartS = 3
-	}
 }
 
-// Stage holds the STFT state, the covariance blocks and, once locked, the
-// beam and the endpoint detector. Not safe for concurrent use: one capture
-// goroutine owns it.
+// Stage holds the STFT state, the covariance blocks, the recent input and,
+// once locked, the beam and its post-filter. Not safe for concurrent use: one
+// capture goroutine owns it.
 type Stage struct {
 	cfg  Config
 	m    int
@@ -108,29 +99,30 @@ type Stage struct {
 	cur    []complex64
 	curN   int
 
+	// The consumed input of the last ReplayS+maxLeadS (+ one hop), per mic,
+	// as a circular buffer of whole hops.
+	in      [][]int16
+	inHead  int // next write position (samples)
+	inCount int
+
 	// Scratch per frame.
 	re, im [][]float64
 	xb     [][]complex128 // [bin][mic]
+	xw     []complex128   // whitened input, one bin
 
-	locked bool
-	h      [][]complex128 // [bin][mic] beam weights
-	ref    int
-	ola    []float64
-	// Detector.
-	whL     [][]complex128 // [bin] Cholesky of the loaded noise covariance
-	whU     [][]complex128 // [bin] whitened unit steering
-	thr     float64
-	score   float64
-	sinceS  float64 // since Lock
-	lastHit float64 // time (since Lock) of the last window over thr; <0 none
-	ended   bool
-	wakeScore float64 // the detector over the wake word's own blocks
-	preP99    float64 // the 99th percentile of the pre-wake windows (observability)
-	floorHist []float64 // scores the floor is taken over: the pre-wake TV, then the turn
-	dly       []float64 // gate delay line (GateDelay samples)
-	hold      float64   // seconds of full level left
-	gain      float64   // smoothed gate gain
-	Trace     []float64 // per-block scores since Lock (observability; bounded by the turn)
+	locked    bool
+	replaying bool // Lock's replay: no covariance accumulation, no input ring
+	h         [][]complex128 // [bin][mic] beam weights
+	ref       int
+	ola       []float64
+	whL       [][]complex128 // [bin] Cholesky of the loaded noise covariance
+	whU       [][]complex128 // [bin] whitened unit steering
+	phiS      []float64      // [bin] the beam's static residual noise PSD, 1/(dᴴRn⁻¹d)
+	pz        []float64      // [bin] smoothed blocking power
+	pzWarm    bool
+	prev      []float64 // [bin] last |Ŝ|², for the decision-directed SNR
+	phi       []float64 // scratch
+	floorDB   float64
 }
 
 // New returns an unlocked stage.
@@ -141,7 +133,7 @@ func New(cfg Config) *Stage {
 	for i := range s.win {
 		s.win[i] = math.Sqrt(0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/frameN))
 	}
-	nBlocks := int(math.Ceil((cfg.NoiseS+cfg.WakeS)/blockS)) + 2
+	nBlocks := int(math.Ceil((cfg.NoiseS+cfg.WakeS+maxLeadS)/blockS)) + 2
 	s.ring = make([][]complex64, nBlocks)
 	for i := range s.ring {
 		s.ring[i] = make([]complex64, bins*m*m)
@@ -151,31 +143,35 @@ func New(cfg Config) *Stage {
 	s.pend = make([][]float64, m)
 	s.re = make([][]float64, m)
 	s.im = make([][]float64, m)
+	inN := (int((ReplayS+maxLeadS)*sampleRate)/hopH + 2) * hopH
+	s.in = make([][]int16, m)
 	for i := 0; i < m; i++ {
 		s.tail[i] = make([]float64, hopH)
 		s.re[i] = make([]float64, frameN)
 		s.im[i] = make([]float64, frameN)
+		s.in[i] = make([]int16, inN)
 	}
 	s.xb = make([][]complex128, bins)
 	for k := range s.xb {
 		s.xb[k] = make([]complex128, m)
 	}
+	s.xw = make([]complex128, m)
 	s.ola = make([]float64, frameN)
+	s.phi = make([]float64, bins)
 	return s
 }
 
-// Locked, Ended, Score, Threshold and RefMic are the stage's observables.
-func (s *Stage) Locked() bool       { return s.locked }
-func (s *Stage) Ended() bool        { return s.ended }
-func (s *Stage) Score() float64     { return s.score }
-func (s *Stage) Threshold() float64 { return s.thr }
-func (s *Stage) RefMic() int        { return s.ref }
-func (s *Stage) WakeScore() float64 { return s.wakeScore }
+// Locked, RefMic and FloorDB are the stage's observables. FloorDB is the
+// median level (dB, S16 scale) of the cleaned beam over the pre-wake TV, in
+// FloorFrame frames: what "nothing but the room" sounds like at the output.
+func (s *Stage) Locked() bool      { return s.locked }
+func (s *Stage) RefMic() int       { return s.ref }
+func (s *Stage) FloorDB() float64  { return s.floorDB }
 
 // Push feeds one batch of cancelled 16kHz samples per microphone (equal
-// lengths, any size). Covariances are always updated; once locked, the gated
-// beam for every completed hop is returned (it lags the input by one hop plus
-// GateDelay).
+// lengths, any size). Covariances are always updated; once locked, the
+// cleaned beam for every completed hop is returned (it lags the input by one
+// hop).
 func (s *Stage) Push(mics [][]int16) []int16 {
 	if len(mics) != s.m {
 		return nil
@@ -186,8 +182,12 @@ func (s *Stage) Push(mics [][]int16) []int16 {
 		}
 	}
 	var out []int16
+	in := make([][]float64, s.m)
 	for len(s.pend[0]) >= hopH {
-		out = append(out, s.hop()...)
+		for c := range in {
+			in[c] = s.pend[c][:hopH]
+		}
+		out = append(out, s.hop(in)...)
 		for c := 0; c < s.m; c++ {
 			s.pend[c] = s.pend[c][hopH:]
 		}
@@ -200,13 +200,26 @@ func (s *Stage) Push(mics [][]int16) []int16 {
 	return out
 }
 
-func (s *Stage) hop() []int16 {
+// hop runs one STFT hop on hopH new samples per mic.
+func (s *Stage) hop(in [][]float64) []int16 {
 	m := s.m
+	if !s.replaying {
+		n := len(s.in[0])
+		for c := 0; c < m; c++ {
+			for i, v := range in[c] {
+				s.in[c][(s.inHead+i)%n] = int16(v)
+			}
+		}
+		s.inHead = (s.inHead + hopH) % n
+		if s.inCount < n {
+			s.inCount += hopH
+		}
+	}
 	for c := 0; c < m; c++ {
 		re, im := s.re[c], s.im[c]
 		copy(re, s.tail[c])
-		copy(re[hopH:], s.pend[c][:hopH])
-		copy(s.tail[c], s.pend[c][:hopH])
+		copy(re[hopH:], in[c])
+		copy(s.tail[c], in[c])
 		for i := range re {
 			re[i] *= s.win[i]
 			im[i] = 0
@@ -216,40 +229,95 @@ func (s *Stage) hop() []int16 {
 			s.xb[k][c] = complex(re[k], im[k])
 		}
 	}
-	// Covariance accumulation.
-	for k := 0; k < bins; k++ {
-		x := s.xb[k]
-		blk := s.cur[k*m*m : (k+1)*m*m]
-		for i := 0; i < m; i++ {
-			for j := 0; j < m; j++ {
-				blk[i*m+j] += complex64(x[i] * cmplx.Conj(x[j]))
+	if !s.replaying {
+		for k := 0; k < bins; k++ {
+			x := s.xb[k]
+			blk := s.cur[k*m*m : (k+1)*m*m]
+			for i := 0; i < m; i++ {
+				for j := 0; j < m; j++ {
+					blk[i*m+j] += complex64(x[i] * cmplx.Conj(x[j]))
+				}
 			}
 		}
-	}
-	s.curN++
-	if s.curN == blockFrames {
-		copy(s.ring[s.head], s.cur)
-		for i := range s.cur {
-			s.cur[i] = 0
-		}
-		s.curN = 0
-		s.head = (s.head + 1) % len(s.ring)
-		if s.filled < len(s.ring) {
-			s.filled++
-		}
-		if s.locked && !s.ended {
-			s.detect()
+		s.curN++
+		if s.curN == blockFrames {
+			copy(s.ring[s.head], s.cur)
+			for i := range s.cur {
+				s.cur[i] = 0
+			}
+			s.curN = 0
+			s.head = (s.head + 1) % len(s.ring)
+			if s.filled < len(s.ring) {
+				s.filled++
+			}
 		}
 	}
 	if !s.locked {
 		return nil
 	}
-	// Beam, inverse FFT, synthesis window, overlap-add.
+	return s.beamHop()
+}
+
+// beamHop applies the beam and the post-filter to the current hop (s.xb) and
+// returns the next hopH output samples.
+func (s *Stage) beamHop() []int16 {
+	m := s.m
+	// Blocking power per bin: whiten x, remove its component along the
+	// whitened steering; what is left is noise only.
+	for k := 0; k < bins; k++ {
+		if s.whL[k] == nil {
+			continue
+		}
+		l, u, x := s.whL[k], s.whU[k], s.xb[k]
+		for i := 0; i < m; i++ { // xw = L⁻¹x
+			v := x[i]
+			for j := 0; j < i; j++ {
+				v -= l[i*m+j] * s.xw[j]
+			}
+			s.xw[i] = v / l[i*m+i]
+		}
+		var p complex128
+		for i := 0; i < m; i++ {
+			p += cmplx.Conj(u[i]) * s.xw[i]
+		}
+		pz := 0.0
+		for i := 0; i < m; i++ {
+			pz += sq(s.xw[i] - u[i]*p)
+		}
+		pz /= float64(m - 1)
+		if s.pzWarm {
+			s.pz[k] = phiSmooth*s.pz[k] + (1-phiSmooth)*pz
+		} else {
+			s.pz[k] = pz
+		}
+	}
+	s.pzWarm = true
+	for k := 0; k < bins; k++ { // ±1 bin smoothing
+		a, b := k-1, k+1
+		if a < 0 {
+			a = 0
+		}
+		if b > bins-1 {
+			b = bins - 1
+		}
+		s.phi[k] = (s.pz[a] + s.pz[k] + s.pz[b]) / 3
+	}
 	re, im := s.re[0], s.im[0]
 	for k := 0; k < bins; k++ {
 		var y complex128
 		for c := 0; c < m; c++ {
 			y += cmplx.Conj(s.h[k][c]) * s.xb[k][c]
+		}
+		if s.whL[k] != nil {
+			pv := math.Max(s.phi[k]*s.phiS[k], phiMin*s.phiS[k])
+			gam := sq(y) / math.Max(pv, 1e-12)
+			xi := math.Max(pfAlpha*s.prev[k]+(1-pfAlpha)*math.Max(gam-1, 0), pfXiMin)
+			g := math.Max(xi/(1+xi), pfFloor)
+			s.prev[k] = g * g * gam
+			y *= complex(g, 0)
+		}
+		if k == 0 || k == bins-1 {
+			y = complex(real(y), 0)
 		}
 		re[k], im[k] = real(y), imag(y)
 		if k > 0 && k < bins-1 {
@@ -260,18 +328,10 @@ func (s *Stage) hop() []int16 {
 	for i := 0; i < frameN; i++ {
 		s.ola[i] += re[i] * s.win[i]
 	}
-	// Gate: push this hop into the delay line, take out the oldest hop.
-	target := gateFloor
-	if s.hold > 0 {
-		target = 1
-	}
 	out := make([]int16, hopH)
 	for i := 0; i < hopH; i++ {
-		s.gain += (target - s.gain) * 0.01 // ~6ms at 16kHz
-		out[i] = clip16(s.dly[i] * s.gain)
+		out[i] = clip16(s.ola[i])
 	}
-	copy(s.dly, s.dly[hopH:])
-	copy(s.dly[GateDelay-hopH:], s.ola[:hopH])
 	copy(s.ola, s.ola[hopH:])
 	for i := hopH; i < frameN; i++ {
 		s.ola[i] = 0
@@ -312,21 +372,27 @@ func (s *Stage) sumBlocks(from, count int) [][]complex128 {
 
 var errTooEarly = errors.New("turnbeam: not enough audio before the wake word")
 
-// Lock is called at the wake crossing: the last WakeS is the talker, the
-// NoiseS before it is the room. It computes the beam and the detector's
-// threshold; Push then returns the beam's output.
-func (s *Stage) Lock() error {
+// Lock is called once a wake opens a session, leadS after the crossing (the
+// scorer's and the session's latency; clamped to [0, 0.6]s). The WakeS
+// before the crossing is the talker, the NoiseS before that the room. It
+// computes the beam, replays it over the last ReplayS before the crossing,
+// and returns the cleaned beam from LockStart() up to now; Push then
+// continues it sample for sample.
+func (s *Stage) Lock(leadS float64) ([]int16, error) {
 	m := s.m
+	leadS = math.Max(0, math.Min(maxLeadS, leadS))
+	skipB := int(math.Round(leadS / blockS))
 	wakeB := int(math.Round(s.cfg.WakeS / blockS))
 	noiseB := int(math.Round(s.cfg.NoiseS / blockS))
-	if avail := s.filled - wakeB; avail < noiseB {
+	if avail := s.filled - skipB - wakeB; avail < noiseB {
 		noiseB = avail
 	}
-	if float64(noiseB)*blockS < 1 {
-		return errTooEarly
+	replayN := (int((leadS+ReplayS)*sampleRate) + hopH - 1) / hopH * hopH
+	if float64(noiseB)*blockS < 1 || s.inCount < replayN+hopH {
+		return nil, errTooEarly
 	}
-	rx := s.sumBlocks(0, wakeB)
-	rn := s.sumBlocks(wakeB, noiseB)
+	rx := s.sumBlocks(skipB, wakeB)
+	rn := s.sumBlocks(skipB+wakeB, noiseB)
 	lo, hi := bandLoHz*frameN/sampleRate, bandHiHz*frameN/sampleRate
 
 	// Reference mic: most talker over noise in the speech band.
@@ -345,20 +411,17 @@ func (s *Stage) Lock() error {
 	s.h = make([][]complex128, bins)
 	s.whL = make([][]complex128, bins)
 	s.whU = make([][]complex128, bins)
+	s.phiS = make([]float64, bins)
 	for k := 0; k < bins; k++ {
+		s.h[k] = make([]complex128, m)
+		s.h[k][s.ref] = 1 // a dead bin (DC, silence) passes the reference mic through
 		n := loaded(rn[k], m, s.cfg.Load)
 		l, err := cholesky(n, m)
-		if err != nil { // a dead bin (DC, silence): pass the reference mic through
-			s.h[k] = make([]complex128, m)
-			s.h[k][s.ref] = 1
+		if err != nil {
 			continue
 		}
-		u, _ := principal(whiten(l, m, rx[k]), m)
-		d := make([]complex128, m)
-		matvec(l, m, u, d) // d = L·u
-		if d[s.ref] == 0 {
-			s.h[k] = make([]complex128, m)
-			s.h[k][s.ref] = 1
+		d := subtractSteer(rx[k], rn[k], m)
+		if d == nil || cmplx.Abs(d[s.ref]) < 1e-12 {
 			continue
 		}
 		r := d[s.ref]
@@ -366,125 +429,103 @@ func (s *Stage) Lock() error {
 			d[i] /= r
 		}
 		x := solveUpperH(l, m, solveLower(l, m, d)) // n⁻¹·d
-		den := dot(d, x)
-		h := make([]complex128, m)
-		for i := range h {
-			h[i] = x[i] / cmplx.Conj(den)
+		den := real(dot(d, x))
+		if den <= 0 {
+			continue
 		}
-		s.h[k] = h
-		s.whL[k], s.whU[k] = l, u
+		for i := range x {
+			s.h[k][i] = x[i] / complex(den, 0)
+		}
+		u := solveLower(l, m, d) // whitened steering, unit
+		if normalise(u) == 0 {
+			continue
+		}
+		s.whL[k], s.whU[k], s.phiS[k] = l, u, 1/den
 	}
 
-	// Threshold from the pre-wake windows (two blocks, hop one), as the
-	// offline prototype set it: 1.15 × the 99th percentile, at least 1.5.
-	var base []float64
-	for b := wakeB; b+2 <= wakeB+noiseB; b++ {
-		base = append(base, s.windowScore(b))
-	}
-	sort.Float64s(base)
-	p99 := base[int(math.Min(float64(len(base)-1), math.Ceil(0.99*float64(len(base)))-1))]
-	s.preP99 = p99
-	s.thr = 0
-	// Seed the floor with the windows just before the wake word, oldest
-	// first: a talker who runs the command on from the wake word never lets
-	// the turn's own floor see the TV alone. They age out after floorS.
-	nf := int(math.Round(floorS / blockS))
-	s.floorHist = s.floorHist[:0]
-	for b := wakeB + nf - 1; b >= wakeB; b-- {
-		if b+2 <= wakeB+noiseB {
-			s.floorHist = append(s.floorHist, s.windowScore(b))
-		}
-	}
-	s.wakeScore = s.windowScore(0)
-	s.Trace = s.Trace[:0]
-
-	s.dly = make([]float64, GateDelay)
-	s.hold, s.gain = gateRelease, 1 // the wake word's tail passes; the command may run on from it
-	s.locked, s.ended = true, false
-	s.sinceS, s.lastHit, s.score = 0, -1, 0
+	// Replay the recent input through the locked beam.
+	s.pz, s.prev, s.pzWarm = make([]float64, bins), make([]float64, bins), false
 	for i := range s.ola {
 		s.ola[i] = 0
 	}
-	return nil
-}
-
-// windowScore is the detector over blocks [from, from+2): the median, over
-// the speech band, of the share of whitened power along the talker's
-// whitened steering vector, relative to the mean per channel.
-func (s *Stage) windowScore(from int) float64 {
-	m := s.m
-	rc := s.sumBlocks(from, 2)
-	lo, hi := bandLoHz*frameN/sampleRate, bandHiHz*frameN/sampleRate
-	vals := make([]float64, 0, hi-lo+1)
-	w := make([]complex128, m)
-	for k := lo; k <= hi; k++ {
-		if s.whL[k] == nil {
+	n := len(s.in[0])
+	start := (s.inHead - replayN + 2*n) % n
+	saved := make([][]float64, m)
+	for c := 0; c < m; c++ {
+		saved[c] = append([]float64(nil), s.tail[c]...)
+		for i := 0; i < hopH; i++ {
+			s.tail[c][i] = float64(s.in[c][(start-hopH+i+n)%n])
+		}
+	}
+	s.locked, s.replaying = true, true
+	var y []int16
+	hopIn := make([][]float64, m)
+	for c := range hopIn {
+		hopIn[c] = make([]float64, hopH)
+	}
+	for off := 0; off < replayN; off += hopH {
+		for c := 0; c < m; c++ {
+			for i := 0; i < hopH; i++ {
+				hopIn[c][i] = float64(s.in[c][(start+off+i)%n])
+			}
+		}
+		y = append(y, s.hop(hopIn)...)
+	}
+	s.replaying = false
+	for c := 0; c < m; c++ { // the replay ends on the same hop the live input did
+		copy(s.tail[c], saved[c])
+	}
+	// y[i] is replay-input sample i - hopH (the beam lags one hop: the first
+	// hop emits the hop before the replay's start); the crossing is leadS
+	// before the replay's end.
+	cross := replayN - int(math.Round(leadS*sampleRate)) // in replay-input samples
+	at := func(t float64) int { // output index of time t around the crossing
+		return cross + int(math.Round(t*sampleRate)) + hopH
+	}
+	var lv []float64
+	for i := at(-ReplayS) + hopH; i+FloorFrame <= at(floorTo); i += FloorFrame { // skip the first, half-windowed hop
+		if i < 0 {
 			continue
 		}
-		wm := whiten(s.whL[k], m, rc[k])
-		tr := traceRe(wm, m) / float64(m)
-		if tr <= 0 {
-			continue
-		}
-		matvec(wm, m, s.whU[k], w)
-		vals = append(vals, real(dot(s.whU[k], w))/tr)
+		lv = append(lv, LevelDB(y[i:i+FloorFrame]))
 	}
-	if len(vals) == 0 {
-		return 0
+	s.floorDB = -90
+	if len(lv) > 0 {
+		sort.Float64s(lv)
+		s.floorDB = lv[len(lv)/2]
 	}
-	sort.Float64s(vals)
-	return vals[len(vals)/2]
+	// Everything from the replay's second hop (the first is half-windowed):
+	// the caller warms its speech detector on it up to -OutLeadS.
+	return y[hopH:], nil
 }
 
-func (s *Stage) detect() {
-	s.sinceS += blockS
-	s.score = s.windowScore(0)
-	s.Trace = append(s.Trace, s.score)
-	// Minimum statistics (Martin 2001): the TV's own score drifts once the
-	// turn starts (0.8 in a take whose pre-wake windows set 1.65, 41C8
-	// 2026-11-21), so presence is judged against the lowest score of the
-	// last floorS, not against the pre-wake level.
-	s.floorHist = append(s.floorHist, s.score)
-	n := int(math.Round(floorS / blockS))
-	lo := len(s.floorHist) - n
-	if lo < 0 {
-		lo = 0
+// LockStart is the time, around the crossing, of the first sample Lock
+// returns.
+func LockStart() float64 { return -ReplayS + float64(hopH)/sampleRate }
+
+// LevelDB is the mean-square level of S16 samples in dB.
+func LevelDB(x []int16) float64 {
+	e := 0.0
+	for _, v := range x {
+		e += float64(v) * float64(v)
 	}
-	floor := s.floorHist[lo]
-	for _, v := range s.floorHist[lo:] {
-		floor = math.Min(floor, v)
+	return 10 * math.Log10(e/float64(len(x))+1e-9)
+}
+
+// subtractSteer is the principal eigenvector of rx - rn: the talker's own
+// covariance, with the room's taken out (covariance subtraction).
+func subtractSteer(rx, rn []complex128, m int) []complex128 {
+	a := make([]complex128, m*m)
+	for i := range a {
+		a[i] = rx[i] - rn[i]
 	}
-	s.thr = presenceRatio * floor
-	if s.score > s.thr {
-		s.hold = gateRelease
-	} else {
-		s.hold -= blockS
-	}
-	// A window that still holds the wake word's tail is the wake word, not
-	// the command: counting it would end a turn whose talker pauses for the
-	// cue before speaking.
-	if s.sinceS < 3*blockS-1e-9 { // two-block window + the partial block at Lock
-		return
-	}
-	if s.score > s.thr {
-		s.lastHit = s.sinceS
-		return
-	}
-	if s.lastHit < 0 {
-		if s.sinceS >= s.cfg.StartS {
-			s.ended = true
-		}
-		return
-	}
-	if s.sinceS-s.lastHit >= s.cfg.HangS {
-		s.ended = true
-	}
+	return hermEigMax(a, m)
 }
 
 // Unlock returns to listening: the covariances keep accumulating.
 func (s *Stage) Unlock() {
-	s.locked, s.ended = false, false
-	s.h, s.whL, s.whU = nil, nil, nil
+	s.locked = false
+	s.h, s.whL, s.whU, s.phiS = nil, nil, nil, nil
 }
 
 func loaded(a []complex128, m int, share float64) []complex128 {

@@ -253,7 +253,7 @@ type DataClient struct {
 	// listenGate decides what of the wake stream may leave the device when
 	// listenState is ListenLocal. Always present; idle in the other states.
 	listenGate *listen.Gate
-	tb         *turnBeam // wake-anchored beam + endpoint on a session (turnbeam.go); nil = off
+	tb         *turnBeam // wake-anchored beam, post-filter and command segment on a session (turnbeam.go); nil = off
 	// wakeLevels holds the wake stream's recent frame levels, for the level
 	// sent on oww_wake (wakelevel.go).
 	wakeLevels  levelRing
@@ -333,6 +333,9 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		tb:         newTurnBeam(board.CurrentLayout().Mics.NumMics()),
 	}
 	d.newSpeechStream = d.sileroStream
+	if d.tb != nil {
+		d.tb.newVAD = func() speechScorer { return d.newSpeechStream() }
+	}
 	d.listenState.Store(ListenStream)
 	// Seeded from the env default so a device that never reaches a
 	// controller still honours EM_AEC_HW_REF; the first config push
@@ -631,7 +634,7 @@ func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 	}
 	session, ok = d.listenGate.Open(crossAt, time.Now())
 	if ok {
-		d.tb.requestLock()
+		d.tb.requestLock(crossAt)
 	}
 	return session, ok
 }

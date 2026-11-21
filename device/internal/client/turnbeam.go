@@ -5,42 +5,53 @@ import (
 	"log"
 	"math"
 	"os"
-	"sync/atomic"
+	"sync"
+	"time"
 
 	"github.com/wilbowes/EchoMuse/internal/turnbeam"
 )
 
 // The turn stage (internal/turnbeam) on a private-listening session: once a
-// wake opens a session, the session's audio is the wake-anchored beam, and
-// when the stage says the talker has stopped the rest of the session is
-// silence, so HA's own end of speech fires as it would in a quiet room.
+// wake opens a session, the session carries the wake-anchored, cleaned beam,
+// but only the one segment of it that holds the command (turnbeam.Segmenter,
+// driven by Silero on the beam itself); everything else is silence, so HA's
+// own end of speech fires as it would in a quiet room.
 //
-// It can only ever send less than the plain path: the beam replaces the
-// audio one for one, silence replaces the rest, and every device limit
-// (ack timeout, max open, mute, link) is unchanged. The wake scorer keeps
-// scoring the plain stream; only what the gate sends changes.
+// The session's audio runs turnbeam.SegDelayS behind the microphones so that
+// each sample's gain is final when it is sent: a 0.64s later start, and a
+// turn that ends that much later. It can only ever send less than the plain
+// path: the beam replaces the audio one for one, silence replaces the rest,
+// and every device limit (ack timeout, max open, mute, link) is unchanged.
+// The wake scorer keeps scoring the plain stream.
+//
+// Without Silero (model not installed) the stage stays off for the turn and
+// the plain stream goes out, as before the stage existed.
 //
 // Off unless EM_TURNBEAM=on (bench, 2026-11-21). A config key with a
 // capability is owed before this is anything but a bench option.
 type turnBeam struct {
-	st      *turnbeam.Stage
-	lockReq atomic.Bool // set by OpenListen, taken by the capture goroutine
-	active  bool        // locked for the open session
-	quiet   bool        // the stage ended the talker: send silence
-	frames  int
-	// The plain stream one hop late, so the switch to the beam (which lags
-	// its input by one STFT hop) crossfades between aligned audio. A hard cut
-	// with a 16ms slip and a half-window first hop landed on the start of the
-	// command and Parakeet heard "January" for "and what time" (41C8 live,
-	// 2026-11-21; the same lock replayed without the splice was clean).
-	plainTail []int16
-	fade      int // samples of crossfade left
+	st *turnbeam.Stage
+	// newVAD returns a fresh speech detector for one turn, or nil.
+	newVAD func() speechScorer
+
+	mu      sync.Mutex // guards lockReq/crossAt (set by OpenListen)
+	lockReq bool
+	crossAt time.Time
+
+	active bool
+	vad    speechScorer
+	seg    *turnbeam.Segmenter
+	// fifo holds the cleaned beam not yet sent; fifo[0] is at time fifoT
+	// (seconds around the crossing). scored counts how much of it, from
+	// fifo[0], the detector has seen.
+	fifo     []int16
+	fifoT    float64
+	scored   int
+	sent     int // samples sent since the lock (observability)
+	reported bool
 }
 
-const (
-	beamLagSamples = 256 + turnbeam.GateDelay // turnbeam's STFT hop and its gate delay
-	crossfadeN     = 1280 // 80ms
-)
+const vadFrame = turnbeam.FloorFrame // the device's Silero step (ort.VADChunk)
 
 // TurnBeamBenchOn, set only by bench builds (turnbeam_bench.go), switches
 // the stage on without the env var. nil in production.
@@ -51,70 +62,146 @@ func newTurnBeam(mics int) *turnBeam {
 	if !on || mics < 2 {
 		return nil
 	}
-	log.Printf("[turnbeam] on: wake-anchored beam and endpoint over %d mics", mics)
+	log.Printf("[turnbeam] on: wake-anchored beam, post-filter and one speech segment per turn over %d mics", mics)
 	return &turnBeam{st: turnbeam.New(turnbeam.Config{Mics: mics})}
 }
 
-// requestLock is called when a session opens (any goroutine).
-func (t *turnBeam) requestLock() {
-	if t != nil {
-		t.lockReq.Store(true)
+// requestLock is called when a session opens for a wake whose crossing frame
+// was captured at crossAt (any goroutine).
+func (t *turnBeam) requestLock(crossAt time.Time) {
+	if t == nil {
+		return
 	}
+	t.mu.Lock()
+	t.lockReq, t.crossAt = true, crossAt
+	t.mu.Unlock()
+}
+
+func (t *turnBeam) takeLock() (time.Time, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	req := t.lockReq
+	t.lockReq = false
+	return t.crossAt, req
 }
 
 // step runs on the capture goroutine once per batch with every microphone's
 // cancelled (or, while nothing plays, raw) audio at the overall mic gain. It
 // returns what the session should carry instead of the plain stream for this
-// batch, or nil to leave the plain stream alone.
+// batch (always len(plain) bytes), or nil to leave the plain stream alone.
 func (t *turnBeam) step(chans [][]int16, plain []byte, sessionOpen bool) []byte {
 	if t == nil || len(chans) == 0 {
 		return nil
 	}
-	// The plain stream delayed by the beam's lag, kept every batch.
-	delayed := make([]int16, len(plain)/2)
-	if t.plainTail == nil {
-		t.plainTail = make([]int16, beamLagSamples)
-	}
-	cat := append(append([]int16(nil), t.plainTail...), bytesToS16(plain)...)
-	copy(delayed, cat[:len(delayed)])
-	t.plainTail = append(t.plainTail[:0], cat[len(delayed):]...)
-	if t.lockReq.Swap(false) && sessionOpen {
-		if err := t.st.Lock(); err != nil {
-			log.Printf("[turnbeam] no beam this turn: %v", err)
-		} else {
-			t.active, t.quiet, t.frames, t.fade = true, false, 0, crossfadeN
-			log.Printf("[turnbeam] locked: ref ch%d, wake score %.2f", t.st.RefMic(), t.st.WakeScore())
-		}
+	if crossAt, req := t.takeLock(); req && sessionOpen {
+		t.lock(time.Since(crossAt).Seconds())
 	}
 	if t.active && !sessionOpen {
 		t.st.Unlock()
 		t.active = false
-		log.Printf("[turnbeam] session closed after %.2fs", float64(t.frames)/16000)
+		log.Printf("[turnbeam] session closed after %.2fs", float64(t.sent)/16000)
 	}
 	y := t.st.Push(chans)
-	if !t.active || len(y) == 0 {
+	if !t.active {
 		return nil
 	}
-	t.frames += len(y)
-	if !t.quiet && t.st.Ended() {
-		t.quiet = true
-		log.Printf("[turnbeam] talker done %.2fs after the wake: silence from here (score %.2f, threshold %.2f)",
-			float64(t.frames)/16000, t.st.Score(), t.st.Threshold())
+	t.fifo = append(t.fifo, y...)
+	t.score()
+	return t.emit(len(plain) / 2)
+}
+
+func (t *turnBeam) lock(leadS float64) {
+	var vad speechScorer
+	if t.newVAD != nil {
+		vad = t.newVAD()
 	}
-	out := make([]byte, 2*len(y))
-	if t.quiet {
+	if vad == nil {
+		log.Printf("[turnbeam] no speech detector: plain stream this turn")
+		return
+	}
+	y, err := t.st.Lock(leadS)
+	if err != nil {
+		log.Printf("[turnbeam] no beam this turn: %v", err)
+		return
+	}
+	// Warm the detector (it is recurrent) on the replayed pre-wake beam, then
+	// queue from OutLeadS before the crossing.
+	k := int(math.Round((-turnbeam.OutLeadS - turnbeam.LockStart()) * 16000))
+	if k < 0 || k > len(y) {
+		k = 0
+	}
+	buf := make([]float32, vadFrame)
+	for i := k % vadFrame; i+vadFrame <= k; i += vadFrame {
+		for j, v := range y[i : i+vadFrame] {
+			buf[j] = float32(v) / 32767
+		}
+		vad.Prob(buf)
+	}
+	t.active, t.vad, t.reported, t.sent = true, vad, false, 0
+	t.fifo, t.fifoT, t.scored = append(t.fifo[:0], y[k:]...), -turnbeam.OutLeadS, 0
+	t.seg = turnbeam.NewSegmenter(float64(vadFrame)/16000, t.st.FloorDB(), -turnbeam.OutLeadS)
+	log.Printf("[turnbeam] locked %.2fs after the crossing: ref ch%d, floor %.1f dB",
+		leadS, t.st.RefMic(), t.st.FloorDB())
+}
+
+// score runs the detector over every whole frame of the FIFO it has not seen.
+func (t *turnBeam) score() {
+	buf := make([]float32, vadFrame)
+	for t.scored+vadFrame <= len(t.fifo) {
+		fr := t.fifo[t.scored : t.scored+vadFrame]
+		for i, v := range fr {
+			buf[i] = float32(v) / 32767
+		}
+		p, err := t.vad.Prob(buf)
+		if err != nil {
+			log.Printf("[turnbeam] speech detector: %v — treating the rest of the turn as silence", err)
+			p = 0
+			t.vad = zeroScorer{}
+		}
+		t.seg.Feed(float64(p), turnbeam.LevelDB(fr))
+		t.scored += vadFrame
+	}
+}
+
+// emit sends n samples: the oldest in the FIFO once they are SegDelayS old,
+// weighted by the segment; silence until then.
+func (t *turnBeam) emit(n int) []byte {
+	out := make([]byte, 2*n)
+	delay := int(turnbeam.SegDelayS * 16000)
+	if len(t.fifo)-n < delay {
 		return out
 	}
-	for i, v := range y {
-		if t.fade > 0 && i < len(delayed) {
-			g := 1 - float64(t.fade)/crossfadeN
-			v = int16(math.Round(g*float64(v) + (1-g)*float64(delayed[i])))
-			t.fade--
+	for i := 0; i < n; i++ {
+		g := t.seg.Gain(t.fifoT + float64(i)/16000)
+		if g > 0 {
+			v := int16(math.Round(float64(t.fifo[i]) * g))
+			binary.LittleEndian.PutUint16(out[2*i:], uint16(v))
 		}
-		binary.LittleEndian.PutUint16(out[2*i:], uint16(v))
+	}
+	t.fifo = t.fifo[n:]
+	t.fifoT += float64(n) / 16000
+	t.scored -= n
+	t.sent += n
+	if cap(t.fifo) > 4*16000 && len(t.fifo) < 16000 {
+		t.fifo = append([]int16(nil), t.fifo...)
+	}
+	if !t.reported && t.seg.Done() {
+		if a, b, ok := t.seg.Bounds(); ok {
+			if t.fifoT >= b {
+				t.reported = true
+				log.Printf("[turnbeam] command %+.2f..%+.2fs around the wake: silence from here", a, b)
+			}
+		} else {
+			t.reported = true
+			log.Printf("[turnbeam] no speech within %.0fs of the wake: nothing sent", turnbeam.StartS)
+		}
 	}
 	return out
 }
+
+type zeroScorer struct{}
+
+func (zeroScorer) Prob([]float32) (float32, error) { return 0, nil }
 
 func bytesToS16(b []byte) []int16 {
 	v := make([]int16, len(b)/2)

@@ -163,3 +163,78 @@ func traceRe(a []complex128, m int) float64 {
 	}
 	return s
 }
+
+// hermEigMax returns a unit eigenvector of Hermitian a (m×m) for its largest
+// eigenvalue (largest, not largest in magnitude). Cyclic Jacobi rotations
+// (Jacobi 1846) on the real symmetric 2m×2m form [[Re, -Im], [Im, Re]], whose
+// eigenvector [x; y] for λ is a's x + iy. Exact to rounding however close the
+// top two eigenvalues are, which power iteration is not; m ≤ 8, called once
+// per bin at Lock.
+func hermEigMax(a []complex128, m int) []complex128 {
+	n := 2 * m
+	s := make([]float64, n*n)
+	v := make([]float64, n*n)
+	for i := 0; i < m; i++ {
+		for j := 0; j < m; j++ {
+			re, im := real(a[i*m+j]), imag(a[i*m+j])
+			s[i*n+j], s[(i+m)*n+j+m] = re, re
+			s[i*n+j+m], s[(i+m)*n+j] = -im, im
+		}
+	}
+	for i := 0; i < n; i++ {
+		v[i*n+i] = 1
+	}
+	for sweep := 0; sweep < 60; sweep++ {
+		off, tot := 0.0, 0.0
+		for i := 0; i < n; i++ {
+			for j := 0; j < n; j++ {
+				tot += s[i*n+j] * s[i*n+j]
+				if i != j {
+					off += s[i*n+j] * s[i*n+j]
+				}
+			}
+		}
+		if off <= 1e-26*tot || off == 0 {
+			break
+		}
+		for p := 0; p < n-1; p++ {
+			for q := p + 1; q < n; q++ {
+				apq := s[p*n+q]
+				if math.Abs(apq) < 1e-300 {
+					continue
+				}
+				theta := (s[q*n+q] - s[p*n+p]) / (2 * apq)
+				t := 1 / (math.Abs(theta) + math.Sqrt(theta*theta+1))
+				if theta < 0 {
+					t = -t
+				}
+				c := 1 / math.Sqrt(t*t+1)
+				sn := t * c
+				for k := 0; k < n; k++ { // columns p, q
+					kp, kq := s[k*n+p], s[k*n+q]
+					s[k*n+p], s[k*n+q] = c*kp-sn*kq, sn*kp+c*kq
+					vp, vq := v[k*n+p], v[k*n+q]
+					v[k*n+p], v[k*n+q] = c*vp-sn*vq, sn*vp+c*vq
+				}
+				for k := 0; k < n; k++ { // rows p, q
+					pk, qk := s[p*n+k], s[q*n+k]
+					s[p*n+k], s[q*n+k] = c*pk-sn*qk, sn*pk+c*qk
+				}
+			}
+		}
+	}
+	best := 0
+	for j := 1; j < n; j++ {
+		if s[j*n+j] > s[best*n+best] {
+			best = j
+		}
+	}
+	out := make([]complex128, m)
+	for i := 0; i < m; i++ {
+		out[i] = complex(v[i*n+best], v[(i+m)*n+best])
+	}
+	if normalise(out) == 0 {
+		return nil
+	}
+	return out
+}

@@ -123,10 +123,11 @@ func power(x []int16) float64 {
 }
 
 // The talker speaks for 1.6s (the wake word) and 1.5s more (the command)
-// over a TV that plays throughout. The beam must take the TV well down
-// against the talker, and the endpoint must fire after the talker stops and
-// not before.
-func TestTheBeamFavoursTheTalkerAndTheTurnEndsWithThem(t *testing.T) {
+// over a TV that plays throughout. The cleaned beam must take the TV well
+// down against the talker; Lock's replay must start the output OutLeadS
+// before the crossing and hand over to Push without a gap; and the pre-wake
+// floor must describe the TV-only output.
+func TestTheBeamFavoursTheTalker(t *testing.T) {
 	r := rand.New(rand.NewSource(3))
 	const pre, wake, cmd, after = 7.0, 1.6, 1.5, 4.0
 	n := int((pre + wake + cmd + after) * sampleRate)
@@ -136,84 +137,132 @@ func TestTheBeamFavoursTheTalkerAndTheTurnEndsWithThem(t *testing.T) {
 
 	s := New(Config{Mics: 4})
 	batch := 2560
-	lockAt := int((pre + wake) * sampleRate)
+	cross := int((pre + wake) * sampleRate) // the crossing: the wake word ends
+	lockAt := (cross/batch + 1) * batch     // a batch later
+	lead := float64(lockAt-cross) / sampleRate
 	var out []int16
-	var refIn []int16
-	endedAt, early := -1.0, false
 	for i := 0; i+batch <= n; i += batch {
+		if i == lockAt {
+			y, err := s.Lock(lead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := int((lead-LockStart())*sampleRate) - hopH
+			if d := len(y) - want; d < -hopH || d > hopH {
+				t.Fatalf("Lock returned %d samples, want ~%d (from %.2fs around the crossing)", len(y), want, LockStart())
+			}
+			out = append(out, y[int(math.Round((-OutLeadS-LockStart())*sampleRate)):]...)
+		}
 		chunk := make([][]int16, 4)
 		for c := range chunk {
 			chunk[c] = all[c][i : i+batch]
 		}
-		if i == lockAt/batch*batch && !s.Locked() {
-			if err := s.Lock(); err != nil {
-				t.Fatal(err)
-			}
-		}
-		y := s.Push(chunk)
-		if s.Locked() {
-			out = append(out, y...)
-			refIn = append(refIn, chunk[s.RefMic()][:len(y)]...)
-			if s.Ended() && endedAt < 0 {
-				endedAt = float64(i+batch)/sampleRate - (pre + wake + cmd)
-				early = i+batch <= talkTo
-			}
-		}
+		out = append(out, s.Push(chunk)...)
 	}
-	// Output and input from the lock: command = first cmd seconds, TV tail after +1s.
-	c0, c1 := 0, int(cmd*sampleRate)
-	t0 := int((cmd + 1) * sampleRate)
-	inSIR := 10 * math.Log10(power(refIn[c0:c1])/power(refIn[t0:]))
-	outSIR := 10 * math.Log10(power(out[c0:c1])/power(out[t0:]))
-	t.Logf("talker over TV: ref mic %.1f dB, beam %.1f dB; threshold %.2f; ended %.2fs after the talker stopped",
-		inSIR, outSIR, s.Threshold(), endedAt)
+	// out[0] is OutLeadS before the crossing; the input sample at the same
+	// time is cross - OutLeadS·sr.
+	at := func(sec float64) int { return int((OutLeadS + sec) * sampleRate) }
+	in0 := cross - int(OutLeadS*sampleRate)
+	ref := all[s.RefMic()]
+	cmdIn, tvIn := ref[in0+at(0):in0+at(cmd)], ref[in0+at(cmd+1):in0+at(cmd+3.5)]
+	cmdOut, tvOut := out[at(0):at(cmd)], out[at(cmd+1):at(cmd+3.5)]
+	inSIR := 10 * math.Log10(power(cmdIn)/power(tvIn))
+	outSIR := 10 * math.Log10(power(cmdOut)/power(tvOut))
+	t.Logf("talker over TV: ref mic %.1f dB, cleaned beam %.1f dB; floor %.1f dB, TV-only out %.1f dB",
+		inSIR, outSIR, s.FloorDB(), LevelDB(tvOut))
 	if outSIR-inSIR < 10 {
-		t.Errorf("the beam gained %.1f dB of talker over TV, want 10", outSIR-inSIR)
+		t.Errorf("the cleaned beam gained %.1f dB of talker over TV, want 10", outSIR-inSIR)
 	}
-	if endedAt < 0 || endedAt > s.cfg.HangS+0.5 {
-		t.Errorf("turn ended %.2fs after the talker stopped, want by %.2fs", endedAt, s.cfg.HangS+0.5)
+	// The talker must come through at their own level: the post-filter's
+	// floor applies to the TV, not to them.
+	if g := 10 * math.Log10(power(cmdOut)/power(cmdIn)); g < -3 {
+		t.Errorf("the talker came out %.1f dB down", g)
 	}
-	if early {
-		t.Errorf("turn ended before the talker stopped")
+	if d := s.FloorDB() - LevelDB(tvOut); math.Abs(d) > 3 {
+		t.Errorf("pre-wake floor %.1f dB against %.1f dB of TV-only output", s.FloorDB(), LevelDB(tvOut))
 	}
-}
-
-// Nobody speaks after the wake word: the turn ends at StartS, not at the cap.
-func TestATurnWithNothingAfterTheWakeEndsAtStartS(t *testing.T) {
-	r := rand.New(rand.NewSource(4))
-	const pre, wake = 7.0, 1.6
-	n := int((pre + wake + 5) * sampleRate)
-	talkFrom, talkTo := int(pre*sampleRate), int((pre+wake)*sampleRate)
-	sc := makeScene(r, n, func(i int) bool { return i >= talkFrom && i < talkTo })
-	all := sc.mics(r, 0, n, true)
-	s := New(Config{Mics: 4})
-	batch := 2560
-	lockAt := (talkTo + batch - 1) / batch * batch // the crossing comes after the wake word
-	endedAt := -1.0
-	for i := 0; i+batch <= n; i += batch {
-		chunk := make([][]int16, 4)
-		for c := range chunk {
-			chunk[c] = all[c][i : i+batch]
+	// No gap at the hand-over from the replay to Push: the output over the
+	// lock is as loud as the command around it.
+	for _, w := range [][2]float64{{lead - 0.05, lead + 0.05}} {
+		if g := LevelDB(out[at(w[0]):at(w[1])]) - LevelDB(cmdOut); g < -6 {
+			t.Errorf("the output drops %.1f dB where the replay hands over to Push", g)
 		}
-		if i == lockAt && !s.Locked() {
-			if err := s.Lock(); err != nil {
-				t.Fatal(err)
-			}
-		}
-		s.Push(chunk)
-		if s.Locked() && s.Ended() && endedAt < 0 {
-			endedAt = float64(i+batch-lockAt) / sampleRate
-		}
-	}
-	if endedAt < 0 || math.Abs(endedAt-s.cfg.StartS) > 0.4 {
-		t.Fatalf("a turn with nothing after the wake ended at %.2fs, want ~%.1fs", endedAt, s.cfg.StartS)
 	}
 }
 
 func TestLockRefusesWithoutEnoughRoom(t *testing.T) {
 	s := New(Config{Mics: 4})
 	s.Push([][]int16{make([]int16, 8000), make([]int16, 8000), make([]int16, 8000), make([]int16, 8000)})
-	if err := s.Lock(); err == nil {
+	if _, err := s.Lock(0); err == nil {
 		t.Fatal("locked with half a second of audio")
+	}
+}
+
+// The steering by covariance subtraction finds the talker's direction even
+// when the noise is far louder than the talker.
+func TestSubtractSteerFindsAWeakTalker(t *testing.T) {
+	m := 4
+	tv := []complex128{1, 1i, -1, -1i}
+	tk := []complex128{1, -1, 1, -1}
+	rn, rx := make([]complex128, m*m), make([]complex128, m*m)
+	for i := 0; i < m; i++ {
+		for j := 0; j < m; j++ {
+			n := 100*tv[i]*cmplx.Conj(tv[j])
+			if i == j {
+				n += 1
+			}
+			rn[i*m+j] = n
+			rx[i*m+j] = n + 0.5*tk[i]*cmplx.Conj(tk[j])
+		}
+	}
+	d := subtractSteer(rx, rn, m)
+	var c complex128
+	for i := range d {
+		c += cmplx.Conj(tk[i]) * d[i]
+	}
+	if a := cmplx.Abs(c) / 2; a < 0.99 { // |tk| = 2, |d| = 1
+		t.Fatalf("steering against the talker's direction: |cos| = %.3f", a)
+	}
+}
+
+// hermEigMax: a·v = λmax·v on random Hermitian matrices, including ones with
+// a negative eigenvalue larger in magnitude than the top one.
+func TestHermEigMaxFindsTheLargestEigenvalue(t *testing.T) {
+	r := rand.New(rand.NewSource(9))
+	for trial := 0; trial < 50; trial++ {
+		m := 4 + trial%4
+		b := make([]complex128, m*m)
+		for i := range b {
+			b[i] = complex(r.NormFloat64(), r.NormFloat64())
+		}
+		a := make([]complex128, m*m) // a = b + bᴴ - 3·tr shift makes a big negative eigenvalue likely
+		for i := 0; i < m; i++ {
+			for j := 0; j < m; j++ {
+				a[i*m+j] = b[i*m+j] + cmplx.Conj(b[j*m+i])
+			}
+		}
+		v := hermEigMax(a, m)
+		w := make([]complex128, m)
+		matvec(a, m, v, w)
+		lam := real(dot(v, w))
+		res := 0.0
+		for i := range w {
+			res += sq(w[i] - complex(lam, 0)*v[i])
+		}
+		if math.Sqrt(res) > 1e-9*math.Max(1, math.Abs(lam)) {
+			t.Fatalf("m=%d: ‖a·v - λv‖ = %.3g", m, math.Sqrt(res))
+		}
+		// λ must be the largest: the Rayleigh quotient of any vector is below it.
+		for k := 0; k < 20; k++ {
+			x := make([]complex128, m)
+			for i := range x {
+				x[i] = complex(r.NormFloat64(), r.NormFloat64())
+			}
+			normalise(x)
+			matvec(a, m, x, w)
+			if q := real(dot(x, w)); q > lam+1e-9 {
+				t.Fatalf("m=%d: a vector has Rayleigh quotient %.4f over λ=%.4f", m, q, lam)
+			}
+		}
 	}
 }
