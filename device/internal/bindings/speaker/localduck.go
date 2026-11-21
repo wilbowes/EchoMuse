@@ -78,6 +78,17 @@ func (d *LocalDuck) Confirm(on bool) {
 	}
 }
 
+// Reset forgets the controller's duck when the control link drops. The
+// controller will not send `duck off` for a turn it no longer has, so a held
+// duck would otherwise block local ducking until some later turn's duck cycle
+// cleared it. An unconfirmed local duck keeps its timer: with the link gone
+// nothing else will release it.
+func (d *LocalDuck) Reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.held = false
+}
+
 // Cancel releases an UNCONFIRMED local duck — the session closed without the
 // controller taking the turn. A confirmed duck is the controller's to end.
 func (d *LocalDuck) Cancel() {

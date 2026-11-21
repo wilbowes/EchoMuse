@@ -86,3 +86,34 @@ func TestLocalDuckWorksAgainAfterTheControllerReleases(t *testing.T) {
 		t.Fatal("an unconfirmed duck must release itself")
 	}
 }
+
+// The link drops while the controller's duck is on. The controller sends no
+// `duck off` for a turn it no longer has, so after Reset the next wake must
+// duck locally again rather than wait for a release that never comes.
+func TestALostLinkForgetsTheControllersDuck(t *testing.T) {
+	var l duckLog
+	d := NewLocalDuck(l.fn, 20*time.Millisecond)
+	d.Confirm(true)
+	d.Reset()
+	d.Start(-18)
+	if len(l.set) == 0 || l.last() != -18 {
+		t.Fatalf("a wake after the link dropped did not duck: %v", l.set)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if l.last() != 0 {
+		t.Fatal("an unconfirmed duck must release itself")
+	}
+}
+
+// Reset must not strand an unconfirmed local duck: with the link gone, its
+// own timer is the only thing left to release it.
+func TestResetKeepsAnUnconfirmedDucksRelease(t *testing.T) {
+	var l duckLog
+	d := NewLocalDuck(l.fn, 20*time.Millisecond)
+	d.Start(-18)
+	d.Reset()
+	time.Sleep(60 * time.Millisecond)
+	if l.last() != 0 {
+		t.Fatalf("an unconfirmed duck stayed on after the link dropped: %v", l.set)
+	}
+}
