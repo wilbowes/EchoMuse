@@ -16,10 +16,9 @@
 //
 // Endpoint: whiten each 256ms window by the pre-wake noise and measure the
 // share of power arriving along the talker's whitened steering vector
-// (Souden et al. 2010's multichannel speech presence, as a scalar). The TV
-// alone, at any level, stays near its pre-wake baseline; the talker raises
-// it. The turn ends HangS after the last window over the threshold, which is
-// set from the pre-wake windows themselves.
+// (Souden et al. 2010's multichannel speech presence, as a scalar). The
+// talker raises it above its recent floor (minimum statistics); the turn ends
+// HangS after the last window presenceRatio above that floor.
 //
 // Measured offline on donut 41C8, lounge, TV at 12 o'clock with speakers at 3
 // and 9 (2026-11-21, docs/history/device.md): beam +4.1 to +5.4 dB talker
@@ -45,6 +44,11 @@ const (
 	blockS      = float64(blockFrames*hopH) / sampleRate
 	bandLoHz    = 300
 	bandHiHz    = 4000
+	// The talker is present while the score is presenceRatio above its
+	// floor over the last floorS. Set on six lounge TV takes: the command
+	// peaked 1.3-1.9x its floor, TV-only bumps after it at most 1.2x.
+	floorS        = 2.0
+	presenceRatio = 1.3
 )
 
 // Config sets the stage's windows. Zero fields take the defaults.
@@ -109,6 +113,10 @@ type Stage struct {
 	sinceS  float64 // since Lock
 	lastHit float64 // time (since Lock) of the last window over thr; <0 none
 	ended   bool
+	wakeScore float64 // the detector over the wake word's own blocks
+	preP99    float64 // the 99th percentile of the pre-wake windows (observability)
+	floorHist []float64 // scores the floor is taken over: the pre-wake TV, then the turn
+	Trace     []float64 // per-block scores since Lock (observability; bounded by the turn)
 }
 
 // New returns an unlocked stage.
@@ -148,6 +156,7 @@ func (s *Stage) Ended() bool        { return s.ended }
 func (s *Stage) Score() float64     { return s.score }
 func (s *Stage) Threshold() float64 { return s.thr }
 func (s *Stage) RefMic() int        { return s.ref }
+func (s *Stage) WakeScore() float64 { return s.wakeScore }
 
 // Push feeds one batch of cancelled 16kHz samples per microphone (equal
 // lengths, any size). Covariances are always updated; once locked, the beam's
@@ -351,7 +360,20 @@ func (s *Stage) Lock() error {
 	}
 	sort.Float64s(base)
 	p99 := base[int(math.Min(float64(len(base)-1), math.Ceil(0.99*float64(len(base)))-1))]
-	s.thr = math.Max(1.15*p99, 1.5)
+	s.preP99 = p99
+	s.thr = 0
+	// Seed the floor with the windows just before the wake word, oldest
+	// first: a talker who runs the command on from the wake word never lets
+	// the turn's own floor see the TV alone. They age out after floorS.
+	nf := int(math.Round(floorS / blockS))
+	s.floorHist = s.floorHist[:0]
+	for b := wakeB + nf - 1; b >= wakeB; b-- {
+		if b+2 <= wakeB+noiseB {
+			s.floorHist = append(s.floorHist, s.windowScore(b))
+		}
+	}
+	s.wakeScore = s.windowScore(0)
+	s.Trace = s.Trace[:0]
 
 	s.locked, s.ended = true, false
 	s.sinceS, s.lastHit, s.score = 0, -1, 0
@@ -392,6 +414,22 @@ func (s *Stage) windowScore(from int) float64 {
 func (s *Stage) detect() {
 	s.sinceS += blockS
 	s.score = s.windowScore(0)
+	s.Trace = append(s.Trace, s.score)
+	// Minimum statistics (Martin 2001): the TV's own score drifts once the
+	// turn starts (0.8 in a take whose pre-wake windows set 1.65, 41C8
+	// 2026-11-21), so presence is judged against the lowest score of the
+	// last floorS, not against the pre-wake level.
+	s.floorHist = append(s.floorHist, s.score)
+	n := int(math.Round(floorS / blockS))
+	lo := len(s.floorHist) - n
+	if lo < 0 {
+		lo = 0
+	}
+	floor := s.floorHist[lo]
+	for _, v := range s.floorHist[lo:] {
+		floor = math.Min(floor, v)
+	}
+	s.thr = presenceRatio * floor
 	// A window that still holds the wake word's tail is the wake word, not
 	// the command: counting it would end a turn whose talker pauses for the
 	// cue before speaking.

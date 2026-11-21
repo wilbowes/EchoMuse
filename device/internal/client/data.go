@@ -253,6 +253,7 @@ type DataClient struct {
 	// listenGate decides what of the wake stream may leave the device when
 	// listenState is ListenLocal. Always present; idle in the other states.
 	listenGate *listen.Gate
+	tb         *turnBeam // wake-anchored beam + endpoint on a session (turnbeam.go); nil = off
 	// wakeLevels holds the wake stream's recent frame levels, for the level
 	// sent on oww_wake (wakelevel.go).
 	wakeLevels  levelRing
@@ -329,6 +330,7 @@ func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Spe
 		proc:       processor.New(),
 		aec:        canceller,
 		listenGate: listen.New(0, 0, 0),
+		tb:         newTurnBeam(board.CurrentLayout().Mics.NumMics()),
 	}
 	d.newSpeechStream = d.sileroStream
 	d.listenState.Store(ListenStream)
@@ -399,6 +401,14 @@ func aecHeadroomFor(a board.MicArray) float64 {
 
 // applyMakeup scales S16LE mono in place by g, clamping, and returns how
 // many samples it clamped.
+// makeupFor is the gain that gives back the AEC headroom, 1 when unarmed.
+func (d *DataClient) makeupFor(armed bool) float64 {
+	if armed {
+		return d.aecHeadroomGain()
+	}
+	return 1
+}
+
 func applyMakeup(b []byte, g float64) (clipped uint64) {
 	for i := 0; i+1 < len(b); i += 2 {
 		v := math.Round(float64(int16(binary.LittleEndian.Uint16(b[i:]))) * g)
@@ -619,7 +629,11 @@ func (d *DataClient) OpenListen(crossAt time.Time) (session uint32, ok bool) {
 	if d.ListenState() != ListenLocal {
 		return 0, false
 	}
-	return d.listenGate.Open(crossAt, time.Now())
+	session, ok = d.listenGate.Open(crossAt, time.Now())
+	if ok {
+		d.tb.requestLock()
+	}
+	return session, ok
 }
 
 // routeWakeFrame decides what of one wake-stream frame leaves the device
@@ -1204,6 +1218,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	active := false
 	everActive := false // true once active has been true at least once this turn
 	buf := make([]byte, 0, vadOwwChunkBytes*4)
+	sendBuf := make([]byte, 0, vadOwwChunkBytes*4) // what the gate sends: buf, or the turn stage's audio
 	// preroll ring — processed mono periods captured while the gate is
 	// closed, oldest first. Flushed into buf at gate open, cleared while
 	// active. Slices are retained (not copied): Process() returns a fresh
@@ -1422,6 +1437,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// defaults to off, and this is an allocation and a copy per
 			// period on the deadline-bound mic goroutine.
 			var echoRef []byte
+			var tbChans [][]int16
 			loopRef := false
 			if d.aec.Enabled() {
 				echoRef = d.beam.EchoRef(raw)
@@ -1441,7 +1457,25 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				// the echo path differs per microphone and a turn locks to
 				// a different one each time (#814).
 				sel := d.beam.OutputChannel(beamAngle)
-				if taps := d.tapPlan(sel); taps != nil {
+				if d.tb != nil {
+					// The turn stage wants every microphone cancelled: ask for
+					// all of them beside the taps, and copy them out before the
+					// taps' in-place make-up touches the shared buffers.
+					mics := d.beam.MicChannels(raw, extractGain, sel, mono)
+					plan := d.tapPlan(sel)
+					var got [][]byte
+					mono, got = d.aec.ProcessMicsWithRefTaps(mics, sel, echoRef, append(append([]int(nil), plan...), allChannels(len(mics))...))
+					tbChans = turnBeamChans(mics, got[len(plan):], d.makeupFor(aecArmed))
+					if plan != nil {
+						tapped := got[:len(plan)]
+						for _, t := range tapped {
+							if t != nil && aecArmed {
+								applyMakeup(t, d.aecHeadroomGain())
+							}
+						}
+						d.pushTaps(tapped)
+					}
+				} else if taps := d.tapPlan(sel); taps != nil {
 					var tapped [][]byte
 					mono, tapped = d.aec.ProcessMicsWithRefTaps(d.beam.MicChannels(raw, extractGain, sel, mono), sel, echoRef, taps)
 					for _, t := range tapped {
@@ -1454,11 +1488,16 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					mono = d.aec.ProcessMicsWithRef(d.beam.MicChannels(raw, extractGain, sel, mono), sel, echoRef)
 				}
 			} else {
+				if d.tb != nil {
+					sel := d.beam.OutputChannel(beamAngle)
+					tbChans = turnBeamChans(d.beam.MicChannels(raw, extractGain, sel, append([]byte(nil), mono...)), nil, d.makeupFor(aecArmed))
+				}
 				mono = d.aec.Process(mono)
 			}
 			if aecArmed {
 				d.makeupClipped += applyMakeup(mono, d.aecHeadroomGain())
 			}
+			tbOut := d.tb.step(tbChans, mono, sessionOpen)
 			clipped := d.beam.ClippedSamples() + d.makeupClipped
 
 			// ── Processing pipeline ──────────────────────────────────────
@@ -1560,6 +1599,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// gate below now serves only bounded lockMic turns.
 			if !lockMic {
 				buf = append(buf, mono...)
+				if tbOut != nil && len(tbOut) == len(mono) {
+					sendBuf = append(sendBuf, tbOut...)
+				} else {
+					sendBuf = append(sendBuf, mono...)
+				}
 				state := d.ListenState()
 				for len(buf) >= vadOwwChunkBytes {
 					// One copy per frame, stamped once, shared by the scorer
@@ -1569,6 +1613,12 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					chunk := make([]byte, vadOwwChunkBytes)
 					copy(chunk, buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]
+					send := chunk
+					if len(sendBuf) >= vadOwwChunkBytes {
+						send = make([]byte, vadOwwChunkBytes)
+						copy(send, sendBuf[:vadOwwChunkBytes])
+						sendBuf = sendBuf[vadOwwChunkBytes:]
+					}
 					at := time.Now()
 					d.wakeLevels.push(at, vadPeriodRMS(chunk), gainLin)
 					// Score the SAME bytes on the SAME 80ms boundaries the
@@ -1585,7 +1635,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 						sc.PushBytesAt(chunk, at)
 						d.noteStream(chunk)
 					}
-					d.routeWakeFrame(state, chunk, at, sendFrame, sendListenFrame)
+					d.routeWakeFrame(state, send, at, sendFrame, sendListenFrame)
 				}
 				continue
 			}

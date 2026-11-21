@@ -106,8 +106,13 @@ func main() {
 		p("mic", ref)
 		p("endpoint", beam[:endN])
 		drop := db(ref, 3*rate, 12*rate) - db(beam, 3*rate, 12*rate)
-		fmt.Printf("lock %d at %.2fs: ref ch%d, threshold %.2f, endpoint %s, 3-12s after the lock the beam is %.1f dB under the mic\n",
-			li, t, st.RefMic(), st.Threshold(), fmtEnd(endS), drop)
+		fmt.Printf("lock %d at %.2fs: ref ch%d, threshold %.2f, wake score %.2f, endpoint %s, 3-12s after the lock the beam is %.1f dB under the mic\n",
+			li, t, st.RefMic(), st.Threshold(), st.WakeScore(), fmtEnd(endS), drop)
+		var tr []string
+		for _, v := range st.Trace {
+			tr = append(tr, fmt.Sprintf("%.1f", v))
+		}
+		fmt.Printf("  trace (128ms blocks from the lock): %s\n", strings.Join(tr, " "))
 	}
 }
 

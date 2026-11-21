@@ -1244,6 +1244,29 @@ enabled it and nothing happened" this removes.
   established why: a longer or more diffuse echo path on the donut needing
   the finer partition is the guess. Captures in
   em-diag/donut-lounge-2026-11-21 (local).
+- 2026-11-21, TV turns on donut 41C8 (lounge, TV at 12 o'clock, speakers at
+  3 and 9): the wake fired but every turn ran to HA's 15 s cap, HA's VAD held
+  open by TV speech, and Parakeet transcribed the TV ("What time is it for
+  good neighbours? They're not controlling their weeds..."). A voice
+  signature from the wake word (ECAPA) fixed it offline on 3/3 takes but
+  reads close to Amazon US 10,373,612 / US 11,514,901 (reference vector from
+  the wake word, other speaker excluded): parked pending advice. A TV
+  reference from a talker-nulled beam into speex removed only 0.2-1.4 dB more
+  (the TV left after the beam is reverberation no linear mix of four mics
+  predicts). Built instead: internal/turnbeam, wake-anchored MVDR plus a
+  matched spatial presence score. First live round 0/2: the replay had been
+  locked 0.3-0.65 s late (log-second times; the true crossings come from
+  scoring the capture), the hard cut to the beam landed on the command
+  (Parakeet heard "January" for "and what time"), and a threshold set from
+  the pre-wake windows sat at 1.65 while the TV scored 0.8 in the turn.
+  Fixed with a minimum-statistics floor (2 s, presence 1.3x, seeded with the
+  pre-wake TV for run-on commands) and an 80 ms crossfade from the plain
+  stream delayed one hop. Live round 2: 7/7 commands transcribed (5 exact
+  "What time is it?"), turns ended 2.1-2.6 s after the wake, audio sent
+  2.7-3.8 s instead of 15 s; idle +2 points of a core. Wake under the TV took
+  a second try a couple of times (separate). Unsolved: in line with a TV
+  speaker at ~4 m (no spatial separation, and the command was unintelligible
+  on the raw mics). One talker, one TV, one unit so far.
 
 ## The external audio jack
 
