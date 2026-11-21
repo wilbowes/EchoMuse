@@ -57,9 +57,13 @@ const (
 	// at gateFloor otherwise. TV words between the wake and the command, and
 	// after it, reached HA through the beam (5 dB down is still words):
 	// "I was in a good place. Tell me a long story." (41C8 live 2026-11-21).
+	// At -26 dB and a 0.3s hold it cut the command's own pauses and soft
+	// words and spliced what was left with a bystander's word: "What's going
+	// on?" for "what's the time" (turn 1478). -10 dB and 0.8s duck rather than
+	// cut; a soft per-bin post-filter is the replacement.
 	GateDelay   = 2 * blockFrames * hopH // samples (256ms)
-	gateRelease = 0.3
-	gateFloor   = 0.05 // -26 dB
+	gateRelease = 0.8
+	gateFloor   = 0.32 // -10 dB
 )
 
 // Config sets the stage's windows. Zero fields take the defaults.
