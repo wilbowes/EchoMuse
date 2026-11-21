@@ -228,6 +228,14 @@ Lighter on a small controller, and the 5 second wake stall is fixed. Pair with f
 
 @Dutch365 (#946, #967) and @forming (#720).
 
+## 2.27.1
+
+One fix on top of 2.27.0. Pair with firmware v2.19.0 and emOS v0.11, which this controller offers. No database changes.
+
+### Fixed
+
+- **The setup wizard stopped at Connect Device with "Cannot read properties of undefined (reading 'iterateKeys')".** It never gave the ADB library a place to keep the browser's key, which only mattered once an Echo asked for one, and Echoes unlocked with a current firebreak do. The wizard now keeps a key in the browser. Rooted FireOS accepts only the key of the computer that unlocked it, so if the wizard says the Echo did not accept the browser's key, start the Echo in TWRP (`firebreak twrp`) and connect again (#1206, #1208). Thanks @JamShady and @davlaw.
+
 ## 2.27.0
 
 The Dot's own voicing, the Echo 2nd gen, volume steps like stock, and half the memory on a small controller. Pair with firmware v2.19.0 and emOS v0.11, which this controller offers.
