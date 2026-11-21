@@ -22,6 +22,7 @@ Device WebSocket protocol:
      "version": "v2.0.1", "capabilities": [...]}
     {"type": "button", "clickType": 138, "down": false}
     {"type": "log", "level": "info", "message": "..."}
+    {"type": "playback_started"}          (only if playback_start)
     {"type": "playback_stats", "periods": 123, "underruns": 0}
     {"type": "listen_state", "state": "local", "reason": ""}
     {"type": "oww_wake", "score": .9, "threshold": .5, "ageMs": 80,
@@ -93,6 +94,7 @@ import em_config_types
 import em_dbwriter
 import em_tasks
 import em_pacing
+import em_playstart
 import em_platform
 import em_boards
 import em_tcp
@@ -784,6 +786,12 @@ class Device:
         # previous one, so the hazard those calls guarded against is gone by
         # construction rather than by discipline.
         self._playback_waiters: collections.deque = collections.deque()
+        # The start-of-audio half of the above (#203): per-playback waiters
+        # the device's `playback_started` resolves, on firmware announcing
+        # `playback_start`. Same queue shape for the same reason — the meter
+        # ring is raised from this report, and one playback's start must
+        # resolve only its own waiter. em_playstart holds the queue.
+        self.playback_start = em_playstart.StartReport()
         # Outcome of the most recently persisted turn, set by em_esphome and
         # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
         self.last_turn_outcome: str | None = None
@@ -838,15 +846,24 @@ class Device:
     # One waiter per playback. See _playback_waiters for why this is a queue
     # and not a single Event.
 
-    def begin_playback(self) -> asyncio.Event:
-        """Register a waiter for this playback and return it."""
-        ev = asyncio.Event()
-        self._playback_waiters.append(ev)
-        return ev
-
-    def end_playback(self, ev: asyncio.Event) -> None:
+    def begin_playback(self) -> em_playstart.Playback:
         """
-        Retire a waiter, whether or not the device ever reported.
+        Register waiters for BOTH ends of this playback and return them.
+
+        The start waiter lives here, beside the end one, because every voice
+        stream must register one: a timer burst and an announcement go through
+        the same `begin_playback`, and registering starts only where the meter
+        is wanted let their `playback_started` resolve the turn's waiter and
+        raise the meter on the wrong audio (#203).
+        """
+        ended = asyncio.Event()
+        started = self.playback_start.begin()
+        self._playback_waiters.append(ended)
+        return em_playstart.Playback(ended, started)
+
+    def end_playback(self, playback: em_playstart.Playback) -> None:
+        """
+        Retire both waiters, whether or not the device ever reported.
 
         Must be called from a finally: a playback cancelled mid-stream (a
         barge-in, a mute, a dropped device) never gets its report, and a
@@ -855,9 +872,10 @@ class Device:
         in this file are reached more than once by design.
         """
         try:
-            self._playback_waiters.remove(ev)
+            self._playback_waiters.remove(playback.ended)
         except ValueError:
             pass
+        self.playback_start.end(playback.started)
 
     def signal_playback_done(self) -> None:
         """
@@ -1039,6 +1057,22 @@ class Device:
         was only ever "immediate" for audio not yet sent.
         """
         return "output_chain" in (self.capabilities or [])
+
+    @property
+    def playback_start_capable(self) -> bool:
+        """
+        Whether this firmware reports the moment a voice stream starts
+        playing (#203), rather than leaving the controller to estimate it from
+        the first period it puts on the wire.
+
+        The device is the only side that knows: it is the instant its ALSA
+        write begins, which is also what its barge-in threshold keys off.
+        Without the report the estimate is kept — it errs by up to the prime
+        window, which is a tile that looks responsive, where assuming the
+        report would leave the tile dark through the whole response on every
+        device already in the field.
+        """
+        return "playback_start" in (self.capabilities or [])
 
     @property
     def timer_alarm_ringing(self) -> bool:
@@ -1337,9 +1371,10 @@ class Device:
         - **True is still a controller-side ESTIMATE** — the first period put
           on the wire. The device holds audio until roughly
           SPEAKER_PRIME_SECONDS is queued (primePeriods, pcm_speaker.go), so
-          the tile leads the speaker by up to that much. Closing that gap needs
-          the DEVICE to report the moment it starts, which no released firmware
-          does; `playback_stats` is the only playback message it sends.
+          the tile leads the speaker by up to that much. Firmware announcing
+          `playback_start` reports when its ALSA write begins (#203), but that
+          report raises the playback meter ring (`em_playstart`); it does not
+          move this flag, which is set where the audio is sent.
 
         Guarded rather than plain, because one caller is stream_speaker's
         finally, which is also reached when barge-in cancels the task
@@ -2106,7 +2141,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     device.speaker_busy += 1
     # Created inside the try, torn down in the finally; None until then, so an
     # error in the EQ step does not turn the finally into a NameError.
-    playback_ev = cancel_task = done_task = stream_task = timeout_task = None
+    playback = cancel_task = done_task = stream_task = timeout_task = None
     try:
         _t_eq0 = asyncio.get_event_loop().time()
         speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -2119,8 +2154,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
             f"{em_eq.describe_activity(_limiter, _guard)}"
         )
         cancel_task    = asyncio.create_task(device.cancel_event.wait())
-        playback_ev    = device.begin_playback()
-        done_task      = asyncio.create_task(playback_ev.wait())
+        playback       = device.begin_playback()
+        done_task      = asyncio.create_task(playback.ended.wait())
         stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
         t_stream_start = asyncio.get_event_loop().time()
         # Opens the delivery window measured against the device's
@@ -2189,7 +2224,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         # Every helper task ends here, on every exit. These cancels used to sit
         # at the end of the try, so a playback that was itself cancelled (a
         # barge-in, a dismissed timer chime) left two Event.wait() tasks
-        # pending: the one on playback_ev surfaced as "Task was destroyed but
+        # pending: the one on the playback Event surfaced as "Task was destroyed but
         # it is pending!" once the Event was dropped (dev add-on, 2026-09-25),
         # and the one on cancel_event, which lives as long as the device, never
         # surfaced at all. The stream task kept sending too. Same teardown as
@@ -2209,7 +2244,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         # cancelled playback — barge-in, mute, a device that dropped — never
         # gets its report, and a waiter left queued would take the NEXT
         # playback's report and desynchronise every one after it.
-        device.end_playback(playback_ev)
+        if playback is not None:
+            device.end_playback(playback)
 
         # The real end of audio, not the end of the socket write. The device
         # reports playback_stats once its audio channel drains after EOS, and
@@ -2552,37 +2588,8 @@ async def _ring_timer_alarm(device: Device) -> None:
         await leds_off(device)
 
 
-async def _meter_at_playback_start(pcm_chunks, on_start):
-    """
-    Pass PCM through untouched, firing `on_start` when the device will have
-    begun playing it.
-
-    The device holds audio until roughly SPEAKER_PRIME_SECONDS is queued, or
-    until EOS for a response shorter than that (primePeriods, pcm_speaker.go).
-    Counting bytes handed to the streamer tracks that closely enough — the
-    socket write completes near-instantly however slow the link is, which is
-    the same property that makes send_ms useless as a delivery measure.
-
-    Exhaustion fires it too, so a two-word answer still gets a meter. If the
-    stream is cancelled or yields nothing, it never fires and the spinner
-    simply stays up until the turn's ring cleanup — the failure direction
-    that looks like "still working" rather than "dead".
-    """
-    prime_bytes = int(SPEAKER_PRIME_SECONDS * SPEAKER_RATE * 2)
-    sent = 0
-    fired = False
-    async for chunk in pcm_chunks:
-        yield chunk
-        if not fired:
-            sent += len(chunk)
-            if sent >= prime_bytes:
-                fired = True
-                await on_start()
-    if not fired:
-        await on_start()
-
-
-async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
+async def _run_streaming_post_turn_playback(device: Device, pcm_chunks,
+                                            on_start=None) -> int:
     """
     Play decoded HA TTS while the HTTP response is still arriving.
 
@@ -2610,9 +2617,19 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
     # are still writing has a waiter to resolve. A fresh Event per playback
     # cannot carry a stale set from the previous response, which is what the
     # clear() this replaces was for.
-    playback_ev = device.begin_playback()
+    playback = device.begin_playback()
+    # The meter is raised from this playback's own start waiter, registered
+    # above with its end waiter. The device holds audio until roughly the
+    # prime window is queued, so the byte count the controller sends leads the
+    # speaker; only this waiter is the instant its ALSA write begins.
+    meter_task = None
+    if on_start is not None:
+        started = playback.started if device.playback_start_capable else None
+        pcm_chunks, meter_task = em_playstart.meter_at_playback_start(
+            pcm_chunks, on_start,
+            int(SPEAKER_PRIME_SECONDS * SPEAKER_RATE * 2), started)
     cancel_task = asyncio.create_task(device.cancel_event.wait())
-    done_task   = asyncio.create_task(playback_ev.wait())
+    done_task   = asyncio.create_task(playback.ended.wait())
     stream_task = asyncio.create_task(
         device.stream_speaker_chunks(pcm_chunks, stream_eq)
     )
@@ -2684,7 +2701,10 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         # reports, not when the last byte reached the socket. In the finally so
         # a cancel or an error leaves the tile idle rather than stuck Speaking.
         await device._set_speaking(False)
-        device.end_playback(playback_ev)
+        if meter_task is not None:
+            meter_task.cancel()
+            await asyncio.gather(meter_task, return_exceptions=True)
+        device.end_playback(playback)
         for t in (cancel_task, done_task):
             t.cancel()
         if not stream_task.done():
@@ -2847,6 +2867,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                         leds_spin_green(device, stop_spin)
                     )
                 meter_refresh_task = None
+                meter_on = None
                 if device.led_anim_capable:
                     # Playback ring: throb with the response's live audio
                     # level (device-side "meter" pattern, RMS measured at
@@ -2888,7 +2909,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
                             _refresh_meter_dead_man()
                         )
 
-                    pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
+                    # The wrapper is applied by the playback itself, after it
+                    # has registered this playback's start waiter (#203).
+                    meter_on = _meter_on
 
                 if device.private_listening:
                     # Defensive, for a turn that reached TTS without an end
@@ -2931,7 +2954,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown",
 
                 try:
                     return await _run_streaming_post_turn_playback(
-                        device, pcm_chunks
+                        device, pcm_chunks, on_start=meter_on
                     )
                 finally:
                     if meter_refresh_task is not None:
@@ -4886,6 +4909,19 @@ async def _on_playback_stats(device: Device, msg: dict) -> None:
         )
 
 
+async def _on_playback_started(device: Device, msg: dict) -> None:
+    """Device reports that a voice stream began playing (#203).
+
+    The device's ALSA write beginning is the only witness; it is the instant
+    the barge-in threshold keys off and the level tap the meter renders is
+    read. Resolves the oldest outstanding per-playback waiter in
+    device.playback_start, so the meter ring is raised from the device rather
+    than from the first period sent, which leads the speaker by the prime
+    window.
+    """
+    device.playback_start.signal()
+
+
 async def _on_oww_shadow_cross(device: Device, msg: dict) -> None:
     device_id = device.device_id
     # On-device scoring reached the wake threshold. Recorded
@@ -5125,6 +5161,7 @@ CONTROL_HANDLERS = {
     "sendspin_token":   _on_sendspin_token,
     "wifi_result":      _on_wifi_result,
     "playback_stats":   _on_playback_stats,
+    "playback_started": _on_playback_started,
     "oww_shadow_cross": _on_oww_shadow_cross,
     "oww_wake":         _on_oww_wake,
     "listen_state":     _on_listen_state,
