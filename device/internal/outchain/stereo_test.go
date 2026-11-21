@@ -260,6 +260,17 @@ func TestStereoNotPermittedAlwaysWritesLEqualsR(t *testing.T) {
 	c.Process(buf)
 	requireLEqualsR(t, "Process after the permission went", buf)
 
+	// The same through ProcessFloat, under a boost.
+	c = shaped()
+	c.ProcessFloat(interleaveFloat(2048, 0, l, r), boostScales(2048, 0))
+	if !c.stereo {
+		t.Fatal("ProcessFloat: not stereo with permission")
+	}
+	c.SetStereo(false)
+	fb := interleaveFloat(2048, 2048, l, r)
+	c.ProcessFloat(fb, boostScales(2048, 1))
+	requireLEqualsRFloat(t, "ProcessFloat after the permission went", fb)
+
 	// ProcessWide has no per-channel path.
 	c = shaped()
 	out := make([]byte, 2048*4)
@@ -322,6 +333,57 @@ func TestPermissionDropMergesWithoutAStep(t *testing.T) {
 	step := math.Abs(float64(channel(next, 0)[0]) - avg(len(pl)-1))
 	if step > 2*slope+2 {
 		t.Errorf("a %.0f step where the music moves at most %.0f a sample", step, slope)
+	}
+	// The boundary frame leaves the limiter's look-ahead delay, so it shows
+	// the limiter's merge alone. What the EQ's and the guard's merges did
+	// comes out a delay line later: hold the whole period to the same bound.
+	nl := channel(next, 0)
+	for i := 1; i < len(nl); i++ {
+		if d := math.Abs(float64(nl[i]) - float64(nl[i-1])); d > 2*slope+2 {
+			t.Fatalf("frame %d after the drop: a %.0f step where the music moves at most %.0f a sample", i, d, slope)
+		}
+	}
+}
+
+// Parameters that change while the chain is per channel reach both sides:
+// on dual-mono audio a chain forced per channel stays the mono chain bit for
+// bit through a band change, a loudness toggle, flat and back.
+func TestSetParamsWhileStereoKeepsDualMonoExact(t *testing.T) {
+	mono, forced := shaped(), shaped()
+	mono.SetStereo(false)
+	mono.Process(make([]byte, 2048*4))
+	forced.Process(make([]byte, 2048*4))
+	forced.engage()
+
+	base := DefaultParams()
+	base.StockSound = false
+	base.GuardEnabled, base.GuardDb = true, -12
+	base.LimiterEnabled, base.LimiterThresholdDb = true, -6
+	bands := base
+	bands.Bands = [NumBands]float64{-6, 3, 0, 6, 0, -3, 9, 0}
+	loud := bands
+	loud.Loudness = !loud.Loudness
+	flat := base
+	thresh := loud
+	thresh.LimiterThresholdDb = -3
+	changes := map[int]Params{2: bands, 4: loud, 6: flat, 8: thresh}
+
+	bass := sum(tone(20000, 60), tone(6000, 3000))
+	for k := 0; k < 10; k++ {
+		if p, ok := changes[k]; ok {
+			mono.SetParams(p)
+			forced.SetParams(p)
+		}
+		a := interleave(2048, (k+1)*2048, bass, bass)
+		b := append([]byte(nil), a...)
+		mono.Process(a)
+		forced.Process(b)
+		if !forced.stereo {
+			t.Fatalf("period %d: no longer per channel", k)
+		}
+		if !bytes.Equal(a, b) {
+			t.Fatalf("period %d: per channel differs from mono after a parameter change", k)
+		}
 	}
 }
 
