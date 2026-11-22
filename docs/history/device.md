@@ -1295,6 +1295,18 @@ enabled it and nothing happened" this removes.
   wakes at 0.5 vs 0.3 need a real-voice round before it ships. Wil listened
   to all four fires at realistic bars: reply residue in every one, none the
   people talking elsewhere, so they are true false barges (forge ~1.6/h).
+- 2026-11-22, late-reverb suppression and a coherence gain on the donut
+  barge rounds, offline, after the device's speex AEC, shipped Hey_Verona at
+  +12 dB, 4 mics, rule two frames >= 0.25 or one >= 0.5, 4 phases. Lebart
+  2001 (exponential decay, Td 50 ms) per mic: T60 0.3 s 5.50/14 and 1.25/7,
+  T60 0.5 s 2.50/14 and 1.50/7, against 5.75/14 and 2.25/7. Allen 1977 /
+  Zelinski 1988 coherence gain (mean pairwise |cross-PSD| over mean
+  auto-PSD, squared, floor 0.15) applied to each mic's own STFT: 7.00/14 and
+  2.00/7, and the reply-only peak rose 0.05 -> 0.29 on 11-20, over the 0.25
+  bar. Both together 6.00/14 and 2.00/7. So enhancement after the AEC loses
+  catches or buys them with residue; with the gain/high-pass/hop sweep and
+  the AEC3 rematch, that is three front-end families with no clean gain on
+  the shipped model. Not run on C95 or the soak for that reason.
 
 ## The external audio jack
 
