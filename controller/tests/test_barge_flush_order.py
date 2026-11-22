@@ -98,7 +98,7 @@ def test_a_barge_while_thinking_sends_no_flush(monkeypatch):
 def test_the_stream_watcher_flushes_before_it_claims():
     # The watcher is a scoring loop over live audio, so its order is pinned
     # in the source: exactly one flush, ahead of the claim.
-    src = code_only(def_source("_barge_watcher"))
+    src = code_only(def_source("barge_watcher"))
     assert src.count("speaker_flush") == 1
     assert src.index("speaker_flush") < src.index("em_wake_claim.claim_wake(")
 
@@ -149,7 +149,7 @@ def test_the_turn_loop_waits_before_it_stops_the_watcher():
 
 
 def test_every_barge_exit_marks_the_decision_made():
-    watcher = code_only(def_source("_barge_watcher"))
+    watcher = code_only(def_source("barge_watcher"))
     assert "finally:\n        device.barge_decided.set()" in watcher
     listen = code_only(def_source("_private_listen"))
     assert "await _private_barge(device, ev)\n            finally:\n                device.barge_decided.set()" in listen
@@ -179,7 +179,7 @@ def test_a_private_barge_marks_the_turn_before_it_flushes(monkeypatch):
 
 
 def test_the_stream_watcher_marks_the_turn_before_it_flushes():
-    src = code_only(def_source("_barge_watcher"))
+    src = code_only(def_source("barge_watcher"))
     assert src.index("esphome.note_barged(device.device_id)") < src.index("speaker_flush")
 
 

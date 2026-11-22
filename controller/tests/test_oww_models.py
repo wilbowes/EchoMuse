@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 import em_oww_models as owm
+import _sources
 
 
 # ─── prediction_key ──────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ def test_scalar_score_reads_the_first_element_as_the_firmware_does():
 
 
 def test_every_score_the_controller_reads_is_made_scalar():
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
     reads = [l.strip() for l in src.splitlines() if "prediction.get(" in l]
     assert len(reads) >= 2
     assert all(l.startswith("score = em_oww_models.scalar_score(prediction.get(")

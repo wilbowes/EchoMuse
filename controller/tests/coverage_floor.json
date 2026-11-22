@@ -5,6 +5,7 @@
  "em_arbiter.py": 99.0,
  "em_auth.py": 70.0,
  "em_barge.py": 99.0,
+ "em_barge_watcher.py": 16.0,
  "em_ble_gatt.py": 94.0,
  "em_ble_health.py": 99.0,
  "em_ble_proxy.py": 36.0,

@@ -32,6 +32,7 @@ import re
 from pathlib import Path
 
 from em_runbarrier import RunBarrier
+import _sources
 
 ESPHOME_SRC = (Path(__file__).resolve().parents[1] / "em_esphome.py").read_text()
 CONTROLLER_SRC = (Path(__file__).resolve().parents[1] / "em_controller.py").read_text()
@@ -206,8 +207,7 @@ def test_barge_serialises_in_both_phases():
     aborted first. Playback must serialise too: RUN_END follows TTS_END, so a
     barge in the first milliseconds of audio can beat it.
     """
-    watcher = CONTROLLER_SRC[CONTROLLER_SRC.index("async def _barge_watcher"):]
-    watcher = watcher[: watcher.index("\nasync def ", 10)]
+    watcher = _sources.def_source("barge_watcher")
     assert "abort_ha=True" in watcher, (
         "barge during thinking must abort HA's pipeline before the "
         "interrupting turn starts"

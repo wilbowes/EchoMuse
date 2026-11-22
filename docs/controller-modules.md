@@ -53,6 +53,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_static` | Routes: the pages and first-run setup. |
 | `em_routes_system` | Routes: status, controller settings, support bundle. |
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
+| `em_barge_watcher` | The barge-in watcher: scores the mic during a reply and cuts it on the wake word. |
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
@@ -466,6 +467,7 @@ Grouped by where each one lives now.
 | `_OWW_RAW_BUFFER_KEEP` | `em_wake_model` (same name) |
 | `_claim_wake`, `_wake_heard_at`, `_wake_dating`, `_device_level` | `em_wake_claim.claim_wake`, `wake_heard_at`, `wake_dating`, `device_level` |
 | `_arbitration_slack`, `_arbitration_hold` | `em_wake_claim` (same names) |
+| `_barge_watcher` | `em_barge_watcher.barge_watcher` |
 
 ## Moved out of em_esphome (2026-11)
 

@@ -132,9 +132,7 @@ def test_delete_device_evicts_the_cached_models():
 
 
 def test_barge_watcher_uses_the_cache():
-    src = _controller_src()
-    watcher = src[src.index("async def _barge_watcher"):]
-    watcher = watcher[:watcher.index("async def ", 1)]
+    watcher = _sources.def_source("barge_watcher")
     assert "em_wake_model.acquire_barge_model(" in watcher, \
         "the barge watcher must acquire its model from the cache"
     assert "OWWModel(" not in watcher, \

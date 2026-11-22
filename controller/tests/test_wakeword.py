@@ -280,10 +280,7 @@ CONTROLLER = Path(__file__).resolve().parent.parent
 
 
 def _func(name: str) -> str:
-    tree = ast.parse((CONTROLLER / "em_controller.py").read_text())
-    return ast.unparse(next(
-        n for n in ast.walk(tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name))
+    return ast.unparse(_sources.find_def(name)[1])
 
 
 def test_the_rule_does_not_know_where_the_wake_word_is_detected():
@@ -294,7 +291,7 @@ def test_the_rule_does_not_know_where_the_wake_word_is_detected():
 
 def test_the_controller_asks_the_rule_for_wakes_and_for_barges():
     assert "em_wakeword.wake_allowed(" in _func("_stream_listen")
-    assert "em_wakeword.wake_allowed(" in _func("_barge_watcher")
+    assert "em_wakeword.wake_allowed(" in _func("barge_watcher")
 
 
 def test_the_echo_stops_at_the_crossing_before_anything_can_act_on_it():
