@@ -109,7 +109,7 @@ def test_the_picker_write_is_applied_before_the_handler_yields():
     assert "create_task" not in apply
     assert re.search(r"^\s+set_fn\(on\)\s*$", apply, re.M), "called, not scheduled"
 
-    ctrl = CONTROLLER.read_text()
+    ctrl = _sources.all_source()
     setter = _block(ctrl, "        def _set_wake_word(on: bool, _d=_device_ref) -> None:",
                     "            async def _follow()")
     for line in ("_d.wake_word_enabled = t.enabled",
@@ -121,7 +121,7 @@ def test_the_picker_write_is_applied_before_the_handler_yields():
 
 def test_the_choice_survives_a_controller_restart():
     """Read from the DB at connect and set on the server before its port comes up."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     assert "device.wake_word_enabled = await loop.run_in_executor(\n            None, db.get_wake_word_enabled, device_id" in src
     connect = _block(src, "await esphome.device_connected(", "\n        )")
     assert "wake_word_enabled=device.wake_word_enabled" in connect
@@ -168,14 +168,14 @@ def test_unmuting_with_the_wake_word_off_takes_the_stream_back_down():
 
 def test_the_wake_listener_honours_the_picker():
     """Both the frame gate and the stall watchdog, or the watchdog restarts the stream."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     listener = _block(src, "async def _stream_listen(", "\nasync def ")
     assert listener.count("em_wakeword.wake_allowed(") >= 2
 
 
 def test_the_wake_stream_does_not_come_up_with_the_wake_word_off():
     """`Device.mic_start` is the one gate; `mic_start_turn` (an HA-initiated turn) is not gated."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     start = _block(src, "    async def mic_start(self):", "    async def mic_start_turn(self):")
     assert "wake_word_enabled" in start
     turn = _block(src, "    async def mic_start_turn(self):", "    async def mic_stop(self):")
@@ -193,7 +193,7 @@ def test_the_api_readout_is_the_stored_choice():
 
 def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
     """No ring indicator (#286); HA driving the idle ring is #66."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     setter = _block(src, "def _set_wake_word(", "        # Capabilities before")
     assert "await leds_" not in setter
     assert "send_led_anim" not in setter and "set_leds" not in setter
@@ -205,7 +205,7 @@ def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
 
 def test_a_private_wake_is_declined_with_the_wake_word_off():
     """The Echo scores its own wake word (#602), so each wake is declined, after the mic mute check and with its own reason."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     turn = _block(src, "async def _private_wake_turn(", "\n\n\n")
     gate = turn.index("if not device.wake_word_enabled:")
     close = turn.index('await device.listen_close(session, "wake_off")', gate)

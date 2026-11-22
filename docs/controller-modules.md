@@ -53,6 +53,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_static` | Routes: the pages and first-run setup. |
 | `em_routes_system` | Routes: status, controller settings, support bundle. |
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
+| `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
@@ -444,6 +445,10 @@ Grouped by where each one lives now.
 | `WS_PING_INTERVAL_S`, `WS_PING_TIMEOUT_S` | `em_wire` |
 | `MIC_FRAME_TYPE`, `VAD_END_TYPE`, `VAD_NO_SPEECH_TIMEOUT_TYPE`, `BLE_ADVERTS_TYPE`, `BLE_GATT_TYPE`, `SPEAKER_FRAME_TYPE`, `SPEAKER_EOS_TYPE` | `em_wire` |
 | `CONTROLLER_FEATURES` | `em_wire` |
+| `Device` | `em_device.Device` |
+| `_push_device_state` | `em_device.push_device_state` |
+| `DATA_RECONNECT_GRACE_S`, `RTT_EXCURSION_MS`, `OWW_MODEL`, `OWW_THRESHOLD` | `em_device` (same names) |
+| `_log_task_exception` | `em_tasks.log_exception` |
 
 ## Moved out of em_esphome (2026-11)
 

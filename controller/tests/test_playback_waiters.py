@@ -21,6 +21,8 @@ import asyncio
 import collections
 from pathlib import Path
 
+import _sources
+
 import pytest
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -28,9 +30,8 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 def _playback_api():
     """Build a throwaway class carrying only the playback-waiter methods."""
-    tree = ast.parse((CONTROLLER / "em_controller.py").read_text())
     device = next(
-        n for n in tree.body
+        n for m in _sources.MODULES for n in _sources.tree(m).body
         if isinstance(n, ast.ClassDef) and n.name == "Device"
     )
     wanted = {"begin_playback", "end_playback", "signal_playback_done"}
@@ -38,7 +39,7 @@ def _playback_api():
                if isinstance(n, ast.FunctionDef) and n.name in wanted]
     missing = wanted - {m.name for m in methods}
     assert not missing, (
-        f"em_controller.Device no longer defines {sorted(missing)} — if they "
+        f"Device no longer defines {sorted(missing)} — if they "
         "were renamed, update this test to match rather than deleting it"
     )
     ns: dict = {"asyncio": asyncio, "collections": collections}

@@ -370,9 +370,9 @@ def _source(name):
 def test_stream_reply_is_off_by_default_in_config_and_on_the_device():
     assert re.search(r'"streamReply":\s*False,', _source("em_db.py")), (
         "streamReply must default to False in em_db's default config")
-    assert re.search(r"self\.stream_reply:\s*bool\s*=\s*False", _source("em_controller.py")), (
+    assert re.search(r"self\.stream_reply:\s*bool\s*=\s*False", _sources.all_source()), (
         "Device.stream_reply must default to False")
-    assert 'config.get("streamReply", False)' in _source("em_controller.py"), (
+    assert 'config.get("streamReply", False)' in _sources.all_source(), (
         "the registration mirror must default to False")
 
 

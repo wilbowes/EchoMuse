@@ -10,19 +10,20 @@ are shape guards on the shipped source.
 """
 
 from pathlib import Path
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _finally_src() -> str:
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     start = src.index("log.info(f\"[control] Device disconnected")
     end = src.index("# ─── Data plane handler", start)
     return src[start:end]
 
 
 def test_teardown_is_deferred_not_immediate():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     start = src.index('log.info(f"[control] Device disconnected')
     seg = src[start:start + 1200]
     task_call = seg.index("em_tasks.spawn(")
@@ -37,7 +38,7 @@ def test_teardown_is_deferred_not_immediate():
 
 
 def test_the_grace_task_checks_for_a_replacement():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     start = src.index("async def _release_device_services")
     task = src[start:start + 2500]
     assert "CONTROL_RECONNECT_GRACE_S" in task
@@ -49,7 +50,7 @@ def test_the_grace_task_checks_for_a_replacement():
 
 
 def test_the_grace_window_exists_and_is_documented():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     assert "CONTROL_RECONNECT_GRACE_S" in src
     # The data-plane constant this mirrors:
     assert "DATA_RECONNECT_GRACE_S = 3.0" in src
@@ -60,7 +61,7 @@ def test_the_stale_connection_guard_survives():
     The 2026-07-14 guard solves a different ordering problem (close arriving
     AFTER a replacement registered) and must stay untouched.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     # the message wraps across two f-string lines — match the fragments
     assert "replacement is active" in src and "services up" in src, \
         "the out-of-order stale guard is still needed alongside the grace"

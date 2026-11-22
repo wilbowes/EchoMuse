@@ -83,7 +83,7 @@ def test_every_playback_path_that_builds_a_chain_checks_the_gate():
 
 
 def test_the_gate_is_the_capability_the_device_announces():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     m = re.search(r"def output_chain_on_device\(self\).*?return (.+?)\n", src, re.S)
     assert m and '"output_chain" in (self.capabilities' in m.group(1)
 

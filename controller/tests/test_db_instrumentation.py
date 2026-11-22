@@ -186,7 +186,7 @@ def test_stats_relay_allowlist_covers_every_device_stat():
     import re
 
     root = pathlib.Path(__file__).resolve().parents[1]
-    ctrl = (root / "em_controller.py").read_text()
+    ctrl = _sources.all_source()
     dbsrc = (root / "em_db.py").read_text()
 
     body = re.search(r'(.*?)\n\s*if msg\.get\("ble"\)',

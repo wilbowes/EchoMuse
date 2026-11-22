@@ -20,6 +20,7 @@ import _oww_stub
 
 _oww_stub.install()
 
+import em_device
 import em_controller  # noqa: E402 — must follow the stub
 
 
@@ -30,11 +31,11 @@ def pushed():
     `_push_device_state` on the module. Without restoring it, every later test
     in the session would push to a list this file created.
     """
-    original = em_controller._push_device_state
+    original = em_device.push_device_state
     pushed: list = []
-    em_controller._push_device_state = lambda device: _record(pushed, device)
+    em_device.push_device_state = lambda device: _record(pushed, device)
     yield pushed
-    em_controller._push_device_state = original
+    em_device.push_device_state = original
     # em_controller is already imported and holds its own reference to the stub
     # Model, so the stub itself is no longer needed — and sys.modules is global.
     # Four tests in test_oww_assets.py and test_oww_models.py call
@@ -59,7 +60,7 @@ def _device(device_id="dev1"):
     """A Device with nothing connected to it. The state methods under test touch
     no socket — they set fields and push — so a bare instance is the whole
     fixture. Everything else stays at its initialised value."""
-    return em_controller.Device(
+    return em_device.Device(
         device_id,
         "10.0.0.1",      # ip — never sent anywhere by the paths under test
         [],              # capabilities
@@ -167,12 +168,12 @@ def test_a_failing_push_does_not_raise(pushed):
     d = _device()
 
     async def main(raiser):
-        em_controller._push_device_state = raiser
+        em_device.push_device_state = raiser
         try:
             await d._set_speaking(True)
             await d._set_speaking(False)
         finally:
-            em_controller._push_device_state = lambda device: _record(pushed, device)
+            em_device.push_device_state = lambda device: _record(pushed, device)
 
     # An ordinary error.
     async def boom(device):
@@ -186,7 +187,7 @@ def test_a_failing_push_does_not_raise(pushed):
         raise asyncio.CancelledError()
 
     d2 = _device("dev2")
-    em_controller._push_device_state = cancelled
+    em_device.push_device_state = cancelled
     try:
         asyncio.run(d2._set_speaking(True))
     except asyncio.CancelledError:
@@ -196,7 +197,7 @@ def test_a_failing_push_does_not_raise(pushed):
             "so except Exception would not catch this"
         )
     finally:
-        em_controller._push_device_state = lambda device: _record(pushed, device)
+        em_device.push_device_state = lambda device: _record(pushed, device)
 
     assert d2.speaking is True, "the flag must be set even when the push is cancelled"
 

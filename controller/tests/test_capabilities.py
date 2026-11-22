@@ -66,7 +66,7 @@ def test_every_capability_the_controller_checks_is_one_the_device_sends():
     # either is an entity that never appears or never fires, with no error
     # anywhere — exactly what this test exists to catch.
     checked = set(re.findall(r'"([a-z_]+)"\s+in\s+\(self\.capabilities',
-                             CONTROLLER.read_text()))
+                             _sources.all_source()))
     checked |= set(re.findall(r'_device_has\(\s*"([a-z_]+)"\s*\)',
                               ESPHOME.read_text()))
     assert checked, "no capability checks found — has the idiom changed?"
@@ -83,7 +83,7 @@ def test_shadow_capability_is_surfaced_to_the_dashboard():
     toggle that silently does nothing on older firmware — which reads as a
     broken feature rather than an unsupported one.
     """
-    assert "oww_shadow_capable" in CONTROLLER.read_text(), \
+    assert "oww_shadow_capable" in _sources.all_source(), \
         "em_controller must expose the shadow capability as a property"
     assert "owwShadowCapable" in _device_record(), \
         "/api/devices must surface the shadow capability"
@@ -96,7 +96,7 @@ def test_wake_mic_capability_is_surfaced_to_the_dashboard():
     """Older firmware ignores `wakeMic` (#705), so the control must not be
     offered there as a switch that does nothing."""
     assert "wake_mic" in device_capabilities(), "firmware no longer announces wake_mic"
-    assert "wake_mic_capable" in CONTROLLER.read_text()
+    assert "wake_mic_capable" in _sources.all_source()
     assert "wakeMicCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!wakeMicCapable}" in jsx
@@ -106,7 +106,7 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
     """Old firmware must not be offered a switch it cannot honour."""
     caps = device_capabilities()
     assert "volume_cue" in caps, "firmware no longer announces volume_cue"
-    assert "volume_cue_capable" in CONTROLLER.read_text(), \
+    assert "volume_cue_capable" in _sources.all_source(), \
         "em_controller must expose the volume cue capability as a property"
     assert "volumeCueCapable" in _device_record(), \
         "/api/devices must surface the volume cue capability"
@@ -117,7 +117,7 @@ def test_volume_cue_capability_is_surfaced_to_the_dashboard():
 
 def test_speaker_protection_hides_on_stock_sound():
     assert "stock_sound" in device_capabilities()
-    assert "stock_sound_capable" in CONTROLLER.read_text()
+    assert "stock_sound_capable" in _sources.all_source()
     assert "stockSoundCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert re.search(r"\{!stockSoundCapable && \(\s*<StageAdvanced", jsx)
@@ -125,7 +125,7 @@ def test_speaker_protection_hides_on_stock_sound():
 
 def test_response_level_is_gated_on_its_capability():
     assert "response_level" in device_capabilities()
-    assert "response_level_capable" in CONTROLLER.read_text()
+    assert "response_level_capable" in _sources.all_source()
     assert "responseLevelCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!responseLevelCapable}" in jsx
@@ -161,7 +161,7 @@ def test_triggering_is_a_separate_capability_from_scoring():
     assert "oww_trigger" in caps, "firmware no longer announces oww_trigger"
     assert "oww_shadow" in caps, \
         "oww_trigger must not replace oww_shadow — shadow is still a mode"
-    assert "oww_trigger_capable" in CONTROLLER.read_text(), \
+    assert "oww_trigger_capable" in _sources.all_source(), \
         "em_controller must expose the trigger capability as a property"
     assert "owwTriggerCapable" in _device_record(), \
         "/api/devices must surface the trigger capability"
@@ -172,7 +172,7 @@ def test_triggering_is_a_separate_capability_from_scoring():
 def test_remote_volume_arc_is_capability_gated():
     """Old firmware must not be offered a toggle it cannot honour."""
     assert "remote_volume_arc" in device_capabilities()
-    assert "remote_volume_arc_capable" in CONTROLLER.read_text()
+    assert "remote_volume_arc_capable" in _sources.all_source()
     assert "remoteVolumeArcCapable" in _device_record()
     jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
     assert "disabled={!remoteVolumeArcCapable}" in jsx
@@ -321,7 +321,7 @@ def test_hardware_echo_reference_is_a_capability_and_a_runtime_state():
     caps = device_capabilities()
     assert "aec_hw_ref" in caps, "firmware no longer announces aec_hw_ref"
 
-    ctl = CONTROLLER.read_text()
+    ctl = _sources.all_source()
     assert "aec_hw_ref_capable" in ctl, \
         "em_controller must expose the hardware-reference capability"
     assert '"aecRef"' in ctl or "'aecRef'" in ctl, \
@@ -399,7 +399,7 @@ def test_private_listening_is_negotiated_in_both_directions():
     import sys
     sys.path.insert(0, str(ROOT / "controller"))
     import em_listen
-    py = CONTROLLER.read_text()
+    py = _sources.all_source()
     import em_wire
     assert em_listen.FEATURE in em_wire.CONTROLLER_FEATURES
     assert f'"{em_listen.CAPABILITY}" in (self.capabilities' in py
@@ -411,7 +411,7 @@ def test_identify_ring_capability_is_surfaced_to_the_dashboard():
     """Identify (#860) has no fallback: old firmware gets the button disabled."""
     caps = device_capabilities()
     assert "identify_ring" in caps, "firmware no longer announces identify_ring"
-    assert "identify_ring_capable" in CONTROLLER.read_text(), \
+    assert "identify_ring_capable" in _sources.all_source(), \
         "em_controller must expose the identify capability as a property"
     assert "identifyRingCapable" in _device_record(), \
         "/api/devices must surface the identify capability"

@@ -393,7 +393,7 @@ def test_send_ms_stays_socket_write_time():
     folds HA's synthesis time in and makes it read exactly like delivery.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
     fn = src[src.index("async def stream_speaker_chunks"):]
     fn = fn[:fn.index("\n    async def ", 1) if "\n    async def " in fn[1:] else len(fn)]
     assert "send_seconds" in fn, \
@@ -800,7 +800,7 @@ def test_data_reconnect_grace_is_per_stream_not_per_frame():
     is why the shape is pinned rather than the constant.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     fn = src[src.index("    async def send_data(self, data: bytes):"):]
     fn = fn[:fn.index("\n    async def ", 1)]
@@ -1712,7 +1712,7 @@ def test_an_announcement_reports_whether_it_actually_played():
 
 def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
     """
-    The dashboard renders `speaking` above `thinking` and _push_device_state
+    The dashboard renders `speaking` above `thinking` and push_device_state
     has always carried it — but nothing pushed the transition. The only pushes
     were at listening, thinking and turn end, so a turn read
     listening -> thinking -> idle and never showed Speaking at all. It appeared
@@ -1722,12 +1722,12 @@ def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
     Setting the flag and telling anyone about it are now one operation, so a
     third streaming path cannot reintroduce the gap by doing only the first.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
                        src, re.S)
     assert setter, "_set_speaking not found"
-    assert "_push_device_state(self)" in setter.group(0), (
+    assert "push_device_state(self)" in setter.group(0), (
         "the setter must push — that is the whole reason it exists"
     )
 
@@ -1753,7 +1753,7 @@ def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
     The playback functions wait on the device's playback_stats; they are the
     only things that know the speaker has stopped.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     for fn_name in ("stream_speaker", "stream_speaker_chunks"):
         fn = re.search(rf"async def {fn_name}\(.*?\n(?=    async def |    def )",
@@ -1778,7 +1778,7 @@ def test_speaking_and_thinking_are_mutually_exclusive():
     stale `thinking` is invisible until speaking clears — and then the tile
     reads as if the device started thinking again mid-response.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
                        src, re.S).group(0)
     assert "self.thinking = False" in setter, (
@@ -1794,11 +1794,11 @@ def test_the_speaking_push_cannot_fail_a_speaker_stream():
     not take the stream down with it — turn end pushes the same state moments
     later. The flag assignment is synchronous and happens either way.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
                        src, re.S).group(0)
     assign = setter.find("self.speaking = value")
-    push = setter.find("_push_device_state(self)")
+    push = setter.find("push_device_state(self)")
     assert assign < push, "the flag must be set before the push is attempted"
     assert "except BaseException" in setter, (
         "a bare `except Exception` does not catch the CancelledError this sees "
