@@ -62,6 +62,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_private_listen` | Private listening, controller side: the listen report wait, the session loop, private wakes and barge-ins. |
 | `em_turn` | One voice turn: HA's run, the reply and its playback, barge-ins, follow-ups; where turn mic frames are queued. |
 | `em_wake_claim` | Claiming a wake when several Echoes heard it: arbitration windows, when a wake was heard, the claim. |
+| `em_wake_listen` | The wake listener per Echo: supervision and restart backoff, private vs streamed, the stream loop that starts the turn. |
 | `em_wake_model` | The controller-scored wake and barge models per Echo: cache, reset off the loop, buffer trim. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
@@ -477,6 +478,9 @@ Grouped by where each one lives now.
 | `_await_barge_decision`, `BARGE_DECISION_TIMEOUT_S` | `em_turn` (same names) |
 | `_await_listen_report`, `_no_mic`, `_private_listen` | `em_private_listen.await_listen_report`, `no_mic`, `private_listen` |
 | `_private_wake_turn`, `_private_barge` | `em_private_listen` (same names) |
+| `_supervise_wake_listener` | `em_wake_listen.supervise_wake_listener` |
+| `wake_word_listener`, `_stream_listen`, `_after_model_release` | `em_wake_listen` (same names) |
+| `OWW_PAUSE_STUCK_S`, `FRESH_CONN_GRACE_S`, `WAKE_RESTART_BACKOFF_S`, `WAKE_RESTART_MAX_BACKOFF_S`, `WAKE_RESTART_HEALTHY_S` | `em_wake_listen` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 

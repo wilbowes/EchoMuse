@@ -168,8 +168,7 @@ def test_unmuting_with_the_wake_word_off_takes_the_stream_back_down():
 
 def test_the_wake_listener_honours_the_picker():
     """Both the frame gate and the stall watchdog, or the watchdog restarts the stream."""
-    src = _sources.all_source()
-    listener = _block(src, "async def _stream_listen(", "\nasync def ")
+    listener = _sources.def_source("_stream_listen")
     assert listener.count("em_wakeword.wake_allowed(") >= 2
 
 
