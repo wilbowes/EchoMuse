@@ -120,6 +120,7 @@ import em_volume
 import em_speechgate
 import em_timers
 import em_loglevel
+import em_leds
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -239,9 +240,6 @@ PING_INTERVAL_SEC = 5.0
 # a latency measurement, it is a lost packet, and keeping them would grow
 # ping_sent without bound across a long disconnect.
 PING_TIMEOUT_SEC = 60.0
-
-# LEDs
-NUM_LEDS = 12
 
 
 # mDNS re-registration interval — keeps IGMP membership alive on the LAN
@@ -371,123 +369,6 @@ def _guard_for(device):
         device.bass_guard_enabled,
         device.bass_guard_db,
     )
-
-
-# ─── LED helpers ──────────────────────────────────────────────────────────────
-
-def _make_leds(r, g, b):
-    return [{"id": i, "r": r, "g": g, "b": b} for i in range(NUM_LEDS)]
-
-
-async def leds_off(device: em_device.Device):
-    if device.led_anim_capable:
-        await device.send_led_anim({"pattern": "off"})
-    else:
-        await device.set_leds(_make_leds(0, 0, 0))
-
-
-# Turn outcomes that get a distinguishing ring cue at turn end. Everything
-# else ("ok", "cancelled", "barged") ends silently: the user either heard a
-# reply or cut it off themselves, so a cue would be noise.
-#
-# Rhythm carries the meaning, not colour — a new colour would collide with
-# red (mute), orange (link down) or cyan (volume), and the point of the
-# cue is to be understandable without a legend. One slow throb reads as
-# "nothing heard"; fast blinks read as "something went wrong".
-_OUTCOME_ANIM = {
-    "no_speech":     "nospeech_anim",
-    "no_tts":        "error_anim",
-    "tts_error":     "error_anim",
-    "timeout":       "error_anim",
-    "stream_timeout": "error_anim",
-    # Not an error — HA took the wake word and ended the run deliberately,
-    # which the satellite setup flow does on every prompt. Needs a cue
-    # because the turn is over in milliseconds: without one the ring lights
-    # and clears too fast to register, and a device that worked perfectly
-    # looks like it glitched.
-    "pipeline_refused": "ack_anim",
-    # Nothing upstream to answer: no ESPHome server, or HA has never dialled
-    # this device's port. The turn dies in milliseconds like the refusal
-    # above, but the causes are opposite — there the pipeline answered and
-    # declined, here there is no pipeline — so the cue says so in the colour
-    # the device already uses for a missing link. See em_scenes.no_ha_anim.
-    "no_ha":         "no_ha_anim",
-    # HA chose to say nothing ("never mind"). Without a cue the ring went
-    # from thinking to dark, which read as cut off. See em_scenes.done_anim.
-    "silent_reply":  "done_anim",
-}
-
-# How long the listening ring is held before the no_ha cue replaces it. The
-# wake word was heard, and an orange fault flashed on its own reads as "the
-# device did nothing"; the ack has to land first. Costs the wake listener the
-# same delay before it restarts, which is the price of the ring saying
-# anything at all on a turn that lasted milliseconds.
-NO_HA_HOLD_S = 0.6
-
-
-async def _leds_turn_end(device: em_device.Device):
-    """
-    Clear the ring at turn end, playing a brief self-clearing cue first if
-    the turn ended in a way the user would otherwise have no signal for.
-
-    The cue anims carry a 1s TTL, so the device retires them on its own
-    ticker with no follow-up message — nothing to leak if the controller
-    dies in between, and a continuation/barge repaint simply supersedes it
-    via the animator's generation counter.
-    """
-    outcome = device.last_turn_outcome
-    device.last_turn_outcome = None
-    key = _OUTCOME_ANIM.get(outcome or "")
-    # Barge-in re-enters a fresh turn immediately and repaints listening —
-    # a cue there would flash for a few frames and read as a glitch.
-    if key and device.led_anim_capable and not device.barge_detected:
-        anim = device.led_scene.get(key)
-        if anim:
-            log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
-            if outcome == "no_ha":
-                # The listening ring is still lit from turn start (30s TTL),
-                # so this is a hold, not a repaint.
-                await asyncio.sleep(NO_HA_HOLD_S)
-            await device.send_led_anim(anim)
-            return
-    await leds_off(device)
-
-
-async def leds_listening(device: em_device.Device):
-    if device.led_anim_capable:
-        await device.send_led_anim(device.led_scene["listening_anim"])
-    else:
-        await device.set_leds(device.led_scene["listening"], listening=True)
-
-
-async def leds_spin_green(device: em_device.Device, stop_event: asyncio.Event):
-    # Name is historical — the spinner renders whatever the device's scene
-    # says (head+trail dot for solid scenes, rotating palette for pride).
-    #
-    # led_anim firmware animates locally: one message starts the spinner,
-    # the device runs it on its own ticker (controller event-loop stalls
-    # and WiFi jitter can't judder it), and this task just waits to send
-    # the stop. Legacy firmware falls back to controller-rendered frames.
-    if device.led_anim_capable:
-        try:
-            await device.send_led_anim(device.led_scene["spin_anim"])
-            await stop_event.wait()
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await leds_off(device)
-        return
-    spin_frame = device.led_scene["spin_frame"]
-    pos = 0
-    try:
-        while not stop_event.is_set():
-            await device.set_leds(spin_frame(pos))
-            pos = (pos + 1) % NUM_LEDS
-            await asyncio.sleep(0.08)
-    except asyncio.CancelledError:
-        pass
-    finally:
-        await leds_off(device)
 
 
 # ─── Audio conversion ─────────────────────────────────────────────────────────
@@ -1073,7 +954,7 @@ async def _dismiss_by_speech(device: em_device.Device) -> None:
     # not say it is waiting to be told.
     lit = {d.device_id: d for d in [device, *_ringing_devices()]}
     for d in lit.values():
-        await leds_listening(d)
+        await em_leds.leds_listening(d)
     vad = em_speechgate.new_turn()
     listen = em_timers.DismissListen(esphome.VOICE_PREROLL_DISCARD)
     # Without the detector there is no way to ask whether anyone spoke, and
@@ -1106,7 +987,7 @@ async def _dismiss_by_speech(device: em_device.Device) -> None:
             # person has finished speaking; stopping an alarm darkens its
             # Echo, so it is lit again first.
             for d in lit.values():
-                await leds_listening(d)
+                await em_leds.leds_listening(d)
             tail = loop.time() + em_timers.DISMISS_TAIL_S
             while not listen.finished:
                 left = tail - loop.time()
@@ -1124,7 +1005,7 @@ async def _dismiss_by_speech(device: em_device.Device) -> None:
     # Dark everywhere: stopped, that is the confirmation; resuming, each ring
     # repaints its own pulse with its next burst.
     for d in lit.values():
-        await leds_off(d)
+        await em_leds.leds_off(d)
 
 
 _alarm_pcm_cache: "bytes | None" = None
@@ -1283,7 +1164,7 @@ async def _ring_timer_alarm(device: em_device.Device) -> None:
         # left it routed — the same defensive restart the turn path ends with.
         await device.mic_start()
         await em_player.resume_interrupted(device.device_id)
-        await leds_off(device)
+        await em_leds.leds_off(device)
 
 
 async def _meter_at_playback_start(pcm_chunks, on_start):
@@ -1503,7 +1384,7 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                 return
             log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
             device.listening = True
-            await leds_listening(device)
+            await em_leds.leds_listening(device)
             await em_device.push_device_state(device)
 
             stop_spin = asyncio.Event()
@@ -1536,7 +1417,7 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                         await spin_task
                     except asyncio.CancelledError:
                         pass
-                await _leds_turn_end(device)
+                await em_leds.leds_turn_end(device)
 
             async def on_thinking_esphome():
                 nonlocal spin_task, watcher
@@ -1550,7 +1431,7 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                     spin_task is None or spin_task.done()
                 ):
                     spin_task = asyncio.create_task(
-                        leds_spin_green(device, stop_spin)
+                        em_leds.leds_spin_green(device, stop_spin)
                     )
                 if device.private_listening:
                     # End of speech: close the session (and its beam lock,
@@ -1578,7 +1459,7 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                 nonlocal spin_task, watcher
                 if spin_task is None or spin_task.done():
                     spin_task = asyncio.create_task(
-                        leds_spin_green(device, stop_spin)
+                        em_leds.leds_spin_green(device, stop_spin)
                     )
                 meter_refresh_task = None
                 if device.led_anim_capable:
@@ -1758,9 +1639,9 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                         # start, so this is a hold rather than a repaint, and
                         # barge_detected must be clear for the cue to survive
                         # _leds_turn_end's own guard.
-                        await leds_listening(device)
+                        await em_leds.leds_listening(device)
                         await esphome.record_dropped_wake(device, *no_ha)
-                        await _leds_turn_end(device)
+                        await em_leds.leds_turn_end(device)
                     break
 
                 if device.barge_detected:
@@ -1781,7 +1662,7 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                     # no voice_queue drain here though, the follow-up
                     # words spoken after "hey rhasspy" are already in it.
                     device.listening = True
-                    await leds_listening(device)
+                    await em_leds.leds_listening(device)
                     await em_device.push_device_state(device)
                     turn_label      = "barge-in"
                     # A barge-in the Echo heard itself opened a session
@@ -1836,7 +1717,7 @@ async def _run_voice_locked(device: em_device.Device, trigger_label: str = "unkn
                         log.debug(f"[{device.device_id}] Continuation: drained {drained} stale frames")
                     # Re-arm listening state for the follow-up turn.
                     device.listening = True
-                    await leds_listening(device)
+                    await em_leds.leds_listening(device)
                     await em_device.push_device_state(device)
                     turn_label      = "continuation"
                     preroll_discard = 0
@@ -2205,7 +2086,7 @@ async def _private_wake_turn(device: em_device.Device, ev: dict) -> None:
         await device.listen_close(session, "no_ha" if not serves else "ceded")
         if not serves:
             await esphome.record_dropped_wake(device, f"wakeword({score:.3f})", wake_info)
-            await _leds_turn_end(device)
+            await em_leds.leds_turn_end(device)
             log.info(f"[{device.device_id}] Wake heard but no HA connection — standing down "
                      f"(score={score:.3f})")
             em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
@@ -2213,7 +2094,7 @@ async def _private_wake_turn(device: em_device.Device, ev: dict) -> None:
         else:
             # The Echo lit its own listening ring at the crossing; nothing on
             # a ceding path darkens it otherwise.
-            await leds_off(device)
+            await em_leds.leds_off(device)
             log.info(f"[{device.device_id}] Wake ceded to {won_by} "
                      f"(arbitration; score={score:.3f})")
             em_dbwriter.submit(db.log_device, device.device_id, "info", "controller",
@@ -2906,7 +2787,7 @@ async def _stream_listen(device: em_device.Device):
                                 await esphome.record_dropped_wake(
                                     device, f"wakeword({score:.3f})", wake_info
                                 )
-                                await _leds_turn_end(device)
+                                await em_leds.leds_turn_end(device)
                                 log.info(
                                     f"[{device.device_id}] Wake heard but no "
                                     f"HA connection — standing down "
@@ -2929,7 +2810,7 @@ async def _stream_listen(device: em_device.Device):
                             # retires it. Plain off, not _leds_turn_end:
                             # there was no turn, so an outcome cue would be
                             # inventing one.
-                            await leds_off(device)
+                            await em_leds.leds_off(device)
                             log.info(
                                 f"[{device.device_id}] Wake ceded to "
                                 f"{won_by} (arbitration; score={score:.3f}, "
@@ -3099,9 +2980,9 @@ async def handle_button_event(device: em_device.Device, event: dict):
                 device.device_id, "info", "controller",
                 "Button pressed but no HA connection"
             )
-            await leds_listening(device)
+            await em_leds.leds_listening(device)
             await esphome.record_dropped_wake(device, "button", None)
-            await _leds_turn_end(device)
+            await em_leds.leds_turn_end(device)
         else:
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
@@ -4160,7 +4041,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
         log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
-        await leds_off(device)
+        await em_leds.leds_off(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
@@ -4198,7 +4079,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 await _run_post_turn_playback(_d, pcm_bytes)
             finally:
                 if ring:
-                    await leds_off(_d)
+                    await em_leds.leds_off(_d)
                 await _d.mic_start()
                 await em_player.resume_interrupted(_d.device_id)
             # Whether the audio actually reached the speaker. Something that

@@ -90,14 +90,14 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
     )
     assert "leds_off(device)" in code, \
         "a ceding device must be told to darken its ring"
-    assert "_leds_turn_end" not in code, \
+    assert "leds_turn_end" not in code, \
         "the loser had no turn, so it gets plain off, not an outcome cue"
 
     # And the two exits must stay distinguishable: the stand-down path is the
     # one that cues, and reading it as a cede would take the cue away exactly
     # on a multi-device fleet, which is how this was reported.
     standdown = branch[stand:branch.index("continue", stand)]
-    assert "_leds_turn_end(device)" in standdown, \
+    assert "em_leds.leds_turn_end(device)" in standdown, \
         "a device with no HA cues its state whether or not another Echo won"
 
 
@@ -114,5 +114,5 @@ def test_the_private_path_darkens_a_loser_and_cues_a_device_with_no_ha():
     assert "listen_close(session" in code
     standdown = code[code.index("if not serves:"):code.index("else:")]
     cede = code[code.index("else:"):]
-    assert "_leds_turn_end(device)" in standdown
-    assert "leds_off(device)" in cede and "_leds_turn_end" not in cede
+    assert "em_leds.leds_turn_end(device)" in standdown
+    assert "leds_off(device)" in cede and "leds_turn_end" not in cede

@@ -2016,7 +2016,7 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
     body = src[src.index("async def wake_word_listener"):]
     stand = body.index("if not serves:")
     tail  = body[stand:stand + 2000]
-    assert "_leds_turn_end(device)" in tail, "no cue on the stand-down path"
+    assert "em_leds.leds_turn_end(device)" in tail, "no cue on the stand-down path"
     assert "record_dropped_wake" in tail, (
         "the wake must still reach the activity history, or an HA outage is "
         "indistinguishable from a device that heard nothing"
@@ -2077,7 +2077,7 @@ def test_every_outcome_cue_names_a_scene_key_that_exists():
     that is already the unusual one.
     """
     import em_scenes
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_leds.py").read_text()
     block = src[src.index("_OUTCOME_ANIM = {"):]
     block = block[:block.index("\n}")]
     keys = re.findall(r':\s*"(\w+_anim)"', block)
@@ -2309,7 +2309,7 @@ def test_the_no_ha_barge_records_where_nothing_overwrites_it():
     start = src.index("Barge-in: starting interrupting turn")
     branch = src[ceded:start]
     for call in ("leds_listening(device)", "record_dropped_wake(",
-                 "_leds_turn_end(device)"):
+                 "em_leds.leds_turn_end(device)"):
         assert call in branch, f"the no-HA stand-down needs {call}"
     assert branch.index("device.barge_detected = False") < \
            branch.index("record_dropped_wake("), (
