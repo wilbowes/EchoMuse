@@ -147,11 +147,8 @@ def test_key_is_not_in_a_support_bundle_or_the_device_list():
 # ── negotiated both ways ──────────────────────────────────────────────────────
 
 def test_controller_and_device_announce_the_same_name():
-    ctrl = (CONTROLLER / "em_controller.py").read_text()
-    tree = ast.parse(ctrl)
-    features = next(n for n in tree.body if isinstance(n, ast.Assign)
-                    and getattr(n.targets[0], "id", "") == "CONTROLLER_FEATURES")
-    assert "ble_connect" in ast.literal_eval(features.value)
+    import em_wire
+    assert "ble_connect" in em_wire.CONTROLLER_FEATURES
     go = (CONTROLLER.parent / "device/internal/client/control.go").read_text()
     assert 'const FeatureBleConnect = "ble_connect"' in go
     assert '"ble_connect"}' in go.split("func capabilities()")[1].split("return caps")[0]

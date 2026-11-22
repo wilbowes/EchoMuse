@@ -1,6 +1,6 @@
 {
  "files": {
-  "em_controller.py": 6323,
+  "em_controller.py": 6201,
   "em_db.py": 3535,
   "em_esphome.py": 3169
  },
@@ -22,6 +22,6 @@
   "em_player.MediaSession._feed": 318,
   "em_routes_provision._post_provision_emos_image": 157,
   "em_scenes.resolve": 159,
-  "em_shell.stream_file": 238
+  "em_shell.stream_file": 237
  }
 }

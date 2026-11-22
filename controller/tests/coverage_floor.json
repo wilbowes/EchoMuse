@@ -98,5 +98,6 @@
  "em_wakeword.py": 99.0,
  "em_wav.py": 95.0,
  "em_wifi.py": 99.0,
+ "em_wire.py": 99.0,
  "em_wsclose.py": 99.0
 }

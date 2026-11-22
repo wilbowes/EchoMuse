@@ -215,6 +215,7 @@ COPY em_announce.py .
 COPY em_runbarrier.py .
 COPY em_volume.py .
 COPY em_wifi.py .
+COPY em_wire.py .
 COPY em_timers.py .
 COPY em_identify.py .
 COPY em_loglevel.py .
