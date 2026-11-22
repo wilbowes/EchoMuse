@@ -59,6 +59,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_link_gate` | Who may hold a device-link plane: token and TLS per WebSocket, /data and /shell following /control. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
 | `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
+| `em_turn` | One voice turn: HA's run, the reply and its playback, barge-ins, follow-ups; where turn mic frames are queued. |
 | `em_wake_claim` | Claiming a wake when several Echoes heard it: arbitration windows, when a wake was heard, the claim. |
 | `em_wake_model` | The controller-scored wake and barge models per Echo: cache, reset off the loop, buffer trim. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
@@ -471,6 +472,8 @@ Grouped by where each one lives now.
 | `_barge_watcher` | `em_barge_watcher.barge_watcher` |
 | `_link_auth_ok`, `_presented_its_token`, `_not_from_control` | `em_link_gate.link_auth_ok`, `presented_its_token`, `not_from_control` |
 | `_peer_ip`, `REQUIRE_DEVICE_TLS` | `em_link_gate` (same names) |
+| `_run_voice_locked`, `_put_voice_frame` | `em_turn.run_voice_locked`, `put_voice_frame` |
+| `_await_barge_decision`, `BARGE_DECISION_TIMEOUT_S` | `em_turn` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 

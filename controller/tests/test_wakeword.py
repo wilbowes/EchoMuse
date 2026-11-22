@@ -315,7 +315,7 @@ def test_a_follow_up_gets_a_microphone_in_every_combination():
 
 
 def test_the_follow_up_path_uses_it():
-    assert "em_wakeword.follow_up_needs_turn_stream(" in _func("_run_voice_locked")
+    assert "em_wakeword.follow_up_needs_turn_stream(" in _func("run_voice_locked")
 
 
 def test_audio_arriving_with_the_wake_word_off_is_a_stream_to_stop():

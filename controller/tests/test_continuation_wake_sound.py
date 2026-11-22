@@ -17,6 +17,7 @@ _oww_stub.install()
 
 import em_device
 import em_leds
+import em_turn
 import em_controller  # noqa: E402 — must follow the stub
 
 
@@ -57,7 +58,7 @@ def _run_turns(monkeypatch, continues, wake_sound=True, capabilities=("wake_cue"
     monkeypatch.setattr(em_controller.em_player, "interrupt", nothing)
     monkeypatch.setattr(em_controller.em_player, "resume_interrupted", nothing)
 
-    asyncio.run(em_controller._run_voice_locked(
+    asyncio.run(em_turn.run_voice_locked(
         d, trigger_label="wakeword(0.990)", is_wakeword=True))
     return sent
 

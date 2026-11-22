@@ -19,6 +19,7 @@ _oww_stub.install()
 import em_device
 import em_controller  # noqa: E402 — must follow the stub
 import em_wake_claim  # noqa: E402
+import em_turn  # noqa: E402
 import em_state  # noqa: E402
 from _sources import code_only, def_source  # noqa: E402
 
@@ -132,7 +133,7 @@ def test_the_turn_loop_waits_for_the_claim_a_flush_outran(monkeypatch, winner):
 
         barge = asyncio.create_task(em_controller._private_barge(d, _wake_event()))
         await flushed.wait()  # the reply has ended; the turn unwinds now
-        await em_controller._await_barge_decision(d)
+        await em_turn._await_barge_decision(d)
         seen = (d.cancel_event.is_set(), d.barge_ceded)
         await barge
         return seen
@@ -143,7 +144,7 @@ def test_the_turn_loop_waits_for_the_claim_a_flush_outran(monkeypatch, winner):
 def test_the_turn_loop_waits_before_it_stops_the_watcher():
     # stop_watcher cancels the watcher, and a watcher cancelled mid-claim
     # never decides the barge at all.
-    src = code_only(def_source("_run_voice_locked"))
+    src = code_only(def_source("run_voice_locked"))
     assert src.index("_await_barge_decision(device)") < src.index("await stop_watcher()")
     assert src.index("_await_barge_decision(device)") < src.index("device.barge_detected and device.barge_ceded")
 

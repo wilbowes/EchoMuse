@@ -1,12 +1,11 @@
 {
  "files": {
-  "em_controller.py": 3734,
+  "em_controller.py": 3263,
   "em_db.py": 3535,
   "em_esphome.py": 3169
  },
  "functions": {
   "em_barge_watcher.barge_watcher": 293,
-  "em_controller._run_voice_locked": 434,
   "em_controller._stream_listen": 662,
   "em_controller.handle_control": 589,
   "em_controller.handle_data": 197,
@@ -22,6 +21,7 @@
   "em_player.MediaSession._feed": 318,
   "em_routes_provision._post_provision_emos_image": 157,
   "em_scenes.resolve": 159,
-  "em_shell.stream_file": 237
+  "em_shell.stream_file": 237,
+  "em_turn.run_voice_locked": 434
  }
 }
