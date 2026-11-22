@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 import em_wsclose as wsc
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
@@ -121,8 +122,9 @@ def test_an_unknown_code_is_rendered_not_guessed():
 # ── The wiring, asserted on source ───────────────────────────────────────────
 
 def test_both_device_planes_report_the_reason():
-    src = (CONTROLLER / "em_controller.py").read_text()
-    assert "import em_wsclose" in src
+    # Both plane handlers by name, wherever they live: a file-level read
+    # missed the data plane once it left em_controller.
+    src = _sources.def_source("handle_control") + _sources.def_source("handle_data")
     # The bug was `except ConnectionClosed: pass` — two of them, one per
     # plane. Neither may come back.
     assert not re.search(r"except websockets\.exceptions\.ConnectionClosed:\s*\n\s*pass",
@@ -136,8 +138,7 @@ def test_the_data_plane_cannot_report_an_unset_reason():
     The finally block logs on EVERY exit path, including the ones that never
     raise ConnectionClosed, so the tuple has to exist before the try.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    handler = src[src.index("async def handle_data("):]
+    handler = _sources.def_source("handle_data")
     handler = handler[:handler.index("\n    try:")]
     assert "_close_why = (None, None, None, None)" in handler, \
         "_close_why must be initialised before the try, or the finally NameErrors"
