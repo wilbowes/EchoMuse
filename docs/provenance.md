@@ -56,7 +56,7 @@ Last full pass: 2026-11-22.
 |---|---|---|---|---|
 | Wake word scored on the cancelled mic during playback; playback stops when it fires | `em_barge`, `listen/barge.go` | IVR barge-in over an echo canceller (telephony practice, 1990s) | old | — |
 | Lower bar during playback, two consecutive frames to fire | `em_barge` | threshold plus M-of-N debounce (detection theory) | old | — |
-| **Several other mics scored during a reply; any one may fire** | `client/taps.go` (#1240; biscuit 3 taps, donut all) | product practice | **none on file** | score one stream only. C95, 37 attempts at 3 m: ch6 alone 6.75, one mic locked by SRP-PHAT at the wake 7.0, ch6 + 3 taps 16.0 (2026-11-22) |
+| **Several other mics scored during a reply; any one may fire** | `client/taps.go` (#1240; biscuit 3 taps, donut all) | product practice | **none on file; kept by decision (2026-11-22): raw mics may be scored together, built beams may not** | score one stream only. C95, 37 attempts at 3 m: ch6 alone 6.75, one mic locked by SRP-PHAT at the wake 7.0, ch6 + 3 taps 16.0 (2026-11-22) |
 
 ## Speech gate and end of turn
 
@@ -108,5 +108,5 @@ Built only from methods with an old source, by decision (2026-11-21).
 
 | Method | Why shelved |
 |---|---|
-| Wake over TV by scoring several separated or beamformed streams (online AuxIVA, fixed MVDR bank) | Offline 37 TV attempts: raw mics 18, IVA 30-31. The only fallback is raw mics, so shelved 2026-11-21 (`bench/iva-wake`). |
+| Wake or barge by scoring several separated or beamformed streams (online AuxIVA, fixed MVDR bank, the Dot 2 beam union) | Offline 37 TV attempts: raw mics 18, IVA 30-31, fixed beams 25-29. Shelved 2026-11-21 (`bench/iva-wake`); the line was drawn 2026-11-22: several raw mics may be scored, several built beams may not. One beam feeding one scorer is fine. |
 | Voice signature for the turn | Parked 2026-11-21. |
