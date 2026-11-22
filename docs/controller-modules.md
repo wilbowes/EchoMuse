@@ -56,6 +56,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
+| `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
@@ -455,6 +456,9 @@ Grouped by where each one lives now.
 | `_leds_turn_end` | `em_leds.leds_turn_end` |
 | `_run_post_turn_playback`, `_run_streaming_post_turn_playback`, `_meter_at_playback_start` | `em_playback.run_post_turn_playback`, `run_streaming_post_turn_playback`, `meter_at_playback_start` |
 | `_limiter_for`, `_guard_for` | `em_playback` (same names) |
+| `start_timer_alarm`, `stop_timer_alarm` | `em_alarm` (same names) |
+| `_ringing_devices`, `_hold_alarms`, `_dismiss_by_speech` | `em_alarm.ringing_devices`, `hold_alarms`, `dismiss_by_speech` |
+| `_release_alarm_holds`, `_ring_timer_alarm`, `_alarm_burst_pcm`, `_wait_for_turn_audio`, `_alarm_pcm_cache`, `_ALARM_HOLD_MARGIN_S` | `em_alarm` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 
