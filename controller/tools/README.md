@@ -63,3 +63,9 @@ And one needs openwakeword, so neither the test venv nor CI can run it:
   audio from `device/internal/wakeword/testdata/vad_fixture.pcm` and compares
   every prediction. Run from the repo root where openwakeword is installed
   (a dev box or the controller image): `python controller/tools/trim_check.py`.
+
+- **barge_replay.py** — score a bench capture's wake scorer inputs (`rawcap-*.s`,
+  `.t0`..., from a `-tags bench` build) with any wake models, offline, each at
+  one or more barge rules (`--bars LOW/HIGH[,...]`). Prints every fire with its
+  capture and second for checking by ear, then fires per hour of reply. Runs on
+  the dev box with openwakeword; the capture is the device's own cancelled audio.
