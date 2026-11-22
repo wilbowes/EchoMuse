@@ -22,6 +22,7 @@ tested through em_pacing and the wiring is asserted against the source.
 import re
 from pathlib import Path
 
+import _sources
 import em_pacing
 
 CONTROLLER = Path(__file__).resolve().parents[1]
@@ -72,10 +73,8 @@ def test_the_lead_stays_under_the_device_buffer():
     Read from the Go source rather than restated, so raising audioChanDepth
     on one side and not the other is caught here instead of on hardware.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    lead = float(re.search(r"^VOICE_LEAD_S\s*=\s*([\d.]+)", src, re.M).group(1))
-    rate = int(re.search(r"^SPEAKER_RATE\s*=\s*(\d+)", src, re.M).group(1))
-    period = int(re.search(r"^SPEAKER_PERIOD\s*=\s*(\d+)", src, re.M).group(1))
+    import em_wire
+    lead, rate, period = em_wire.VOICE_LEAD_S, em_wire.SPEAKER_RATE, em_wire.SPEAKER_PERIOD
 
     go = (DEVICE / "internal/bindings/speaker/pcm_speaker.go").read_text()
     depth = int(re.search(r"audioChanDepth\s*=\s*(\d+)", go).group(1))
@@ -98,9 +97,8 @@ def test_the_pacing_wait_is_raced_against_cancel():
     A barge-in or mute must land INSIDE the pacing gap. A bare sleep would
     add pacing latency to the one thing that must never be delayed.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    block = src[src.index("async def send_period("):]
-    block = block[:block.index("sent_seconds += SPEAKER_PERIOD_SECONDS")]
+    block = _sources.def_source("send_period")
+    block = block[:block.index("sent_seconds += em_wire.SPEAKER_PERIOD_SECONDS")]
     assert "em_pacing.lead_delay(" in block, "send_period must consult the pacer"
     assert "cancel_event.wait()" in block, \
         "the pacing wait must be raced against cancel_event, not a bare sleep"
@@ -113,9 +111,8 @@ def test_the_first_period_is_never_paced():
     until it is reached. Expressed as the pacer living in the `else` of the
     first-period branch.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    block = src[src.index("async def send_period("):]
-    block = block[:block.index("sent_seconds += SPEAKER_PERIOD_SECONDS")]
+    block = _sources.def_source("send_period")
+    block = block[:block.index("sent_seconds += em_wire.SPEAKER_PERIOD_SECONDS")]
     first = block.index("First streamed PCM period")
     assert block.index("em_pacing.lead_delay(") > first, \
         "pacing must come after the first-period branch, never before it"

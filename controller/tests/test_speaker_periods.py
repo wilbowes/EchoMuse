@@ -12,24 +12,20 @@ raises `ValueError: negative count` the moment the flush pushes the
 remainder past a period. Measured on the 2026-08-25 soak as one turn ending
 `tts_error` with `tts_bytes=0`, ~1.7s after playback had started.
 
-The suite cannot import `em_controller`, so the numbers come from the
-importable half of the chain and the ordering is pinned against the source.
+The numbers come from the importable half of the chain (em_wire, em_eq,
+em_limiter) and the ordering is pinned against the source.
 """
 
-import ast
 import re
-from pathlib import Path
 
 import numpy as np
 
+import _sources
 import em_eq
 import em_limiter
+import em_wire
 
-CONTROLLER = Path(__file__).resolve().parents[1]
-SRC = (CONTROLLER / "em_controller.py").read_text()
-
-SPEAKER_PERIOD = int(re.search(r"^SPEAKER_PERIOD\s*=\s*(\d+)", SRC, re.M).group(1))
-SPEAKER_BYTES = SPEAKER_PERIOD * 2
+SPEAKER_BYTES = em_wire.SPEAKER_BYTES
 
 
 def _stream_body() -> str:
@@ -40,10 +36,7 @@ def _stream_body() -> str:
     about, so a source search that includes them matches the warning rather
     than the code — which is how the first version of this test failed.
     """
-    fn = next(n for n in ast.walk(ast.parse(SRC))
-              if isinstance(n, ast.AsyncFunctionDef)
-              and n.name == "stream_speaker_chunks")
-    body = ast.get_source_segment(SRC, fn)
+    body = _sources.def_source("stream_speaker_chunks")
     return "\n".join(
         line for line in body.splitlines() if not line.lstrip().startswith("#")
     )
@@ -88,7 +81,7 @@ def test_the_flush_is_drained_before_the_remainder_is_padded():
     """
     body = _stream_body()
     flush = body.index("stream_eq.flush()")
-    pad = body.index("bytes(SPEAKER_BYTES - len(")
+    pad = body.index("bytes(em_wire.SPEAKER_BYTES - len(")
     between = body[flush:pad]
     assert "drain_whole_periods()" in between, (
         "the limiter tail must be drained into whole periods before the "
@@ -103,7 +96,7 @@ def test_the_pad_can_never_be_negative_by_construction():
     an undrained tail is what went negative.
     """
     body = _stream_body()
-    pad_line = re.search(r"bytes\(SPEAKER_BYTES - len\((\w+)\)\)", body)
+    pad_line = re.search(r"bytes\(em_wire\.SPEAKER_BYTES - len\((\w+)\)\)", body)
     assert pad_line, "the final pad has moved — re-pin this test"
     padded = pad_line.group(1)
     assert padded == "pending", (

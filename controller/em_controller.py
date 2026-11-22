@@ -109,7 +109,7 @@ import em_oww_warmup
 import em_barge
 import em_listen
 import em_announce
-import em_ble_gatt
+import em_wire
 import em_wakelevel
 import em_button
 import em_wakeword
@@ -215,62 +215,6 @@ DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
 # Device approval mode — overridden by system_config after db.init()
 DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
 
-# Mic
-CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
-# NOTE: VOICE_PREROLL_DISCARD lives in em_esphome.py (esphome.VOICE_PREROLL_DISCARD)
-# — it's used there in _stream_mic_audio, and _run_voice_locked below reads it
-# via that single source of truth rather than keeping a second copy here that
-# could drift out of sync (a duplicate here was previously dead code — see
-# v2.6.3 changelog — resist the temptation to reintroduce it).
-
-
-# Speaker — must match PcmSpeaker constants in Go. The wire carries MONO
-# 48kHz (the device duplicates to stereo at the ALSA write — shipping two
-# identical channels to a mono speaker doubled TTS bandwidth for nothing,
-# and halving it matters on marginal 2.4GHz links).
-SPEAKER_RATE   = 48000
-SPEAKER_PERIOD = 2048
-SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
-SPEAKER_PERIOD_SECONDS = SPEAKER_BYTES / (SPEAKER_RATE * 2)   # ~42.7ms
-
-# How far ahead of realtime a VOICE response may be queued.
-#
-# The voice path used to send every period as fast as the socket would take
-# it, with TCP backpressure as the only brake. That is what cut long
-# responses off mid-sentence, and the chain is mechanical:
-#
-#   1. controller pushes ~1.7x realtime, bounded only by the link
-#   2. the device's WS read goroutine calls PumpPeriod INLINE per 0x02 frame
-#   3. pump() ends in a BLOCKING channel send, on a channel 128 periods
-#      (~5.5s) deep
-#   4. once full, the read goroutine blocks inside PumpPeriod and stops
-#      calling ReadMessage
-#   5. gorilla fires the pong handler only INSIDE ReadMessage, so a blocked
-#      device cannot answer a ping
-#   6. we ping every 20s and close after 10s without a pong
-#   7. the buffer drains at realtime, so the block outlasts the timeout
-#   8. 1011 keepalive ping timeout, mid-response
-#
-# Measured on Test Echo 1, 2026-08-30: 3.4MB (35.4s of audio) sent in 21.3s,
-# 9.8s of that blocked in socket writes, connection closed 5s later. Short
-# responses never reproduce it because they never fill 5.5s.
-#
-# SENDING FASTER THAN THIS BUYS NOTHING. The device can hold 5.5s and no
-# more; everything beyond that sits in TCP buffers, which are lost on a
-# reconnect exactly like un-sent audio is. So the excess never improved
-# stall resilience — it only bought the block. Pacing to just under the
-# device's own depth keeps the same protection with none of the cost.
-#
-# 4.0s to match em_player.LEAD_S, which reached the same number from the
-# same constraint for the music plane: ~1.4s of headroom under audioChanDepth
-# so the feed can never outrun the device's channel. Voice had no equivalent,
-# and that asymmetry was the bug.
-VOICE_LEAD_S = 4.0
-
-# The device holds playback until ~this much audio is buffered (or EOS
-# arrives) — primePeriods in pcm_speaker.go. The post-playback drain sleep
-# must allow for the delayed start.
-SPEAKER_PRIME_SECONDS = 1.1
 
 # Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
 # characterising jitter needs samples, and one tiny JSON message per device
@@ -310,16 +254,6 @@ WAKE_RESTART_HEALTHY_S     = 60.0
 
 PING_INTERVAL_SEC = 5.0
 
-# WebSocket keepalive on every device plane. The timeout is how long a ping may
-# go unanswered before the link is declared dead, and 10s was shorter than the
-# loss bursts this link actually has: with the BLE scan running, a Dot loses
-# enough frames that TCP's retransmits alone can outlast it, and the overnight
-# `1011 keepalive ping timeout` closes were exactly that (2026-09-23) — a live
-# device torn down, its HA entities flapping, to rediscover it 5s later. 30s
-# rides those out and still finds a dead Echo within ~50s; the device waits 45s
-# for its own pongs (wsPongWait), so the two ends now disagree less.
-WS_PING_INTERVAL_S = 20
-WS_PING_TIMEOUT_S = 30
 # A sample at or above this counts as an excursion. 200ms is well clear of a
 # healthy hop (Office measures 264ms median for a whole audio round trip
 # including frame batching) while catching the ~1s tail under investigation.
@@ -340,61 +274,6 @@ OWW_THRESHOLD = float(os.environ.get("OWW_THRESHOLD", "0.5"))
 # mDNS re-registration interval — keeps IGMP membership alive on the LAN
 MDNS_REFRESH_INTERVAL = 120
 
-# Binary frame types
-MIC_FRAME_TYPE     = 0x01
-VAD_END_TYPE       = 0x04
-# Distinct from VAD_END_TYPE — device never detected speech at all within its
-# local no-speech grace period (see device/internal/client/data.go
-# noSpeechTimeout), as opposed to VAD_END_TYPE which means speech was
-# detected and then ended normally. Each frame type queues its matching
-# string sentinel (esphome.VAD_SENTINEL_END / VAD_SENTINEL_TIMEOUT) so the
-# type travels with the queue item — B5 fix, 2026-07-07; the old None +
-# device.last_vad_was_timeout side-channel let a second sentinel overwrite
-# the first's flag before it was consumed. OWW/barge-watcher consumers treat
-# both flavours identically; esphome's _stream_mic_audio differentiates.
-VAD_NO_SPEECH_TIMEOUT_TYPE = 0x05
-
-# BLE advertisement batches from the device's passive scanner, moved off the
-# control plane (#404). The control WebSocket is where liveness is measured —
-# the RTT echo and the keepalive pong take the same mutex and the same TCP
-# stream — so bulk telemetry there head-of-line-blocks the channel a device's
-# health is judged on. Proven by crossover on 2026-09-01: the proxy moved
-# between two Dots on one desk and took the excursions with it.
-#
-# Payload is the same JSON body the control message carried, so nothing about
-# what an advert IS changed; only which socket it arrives on.
-BLE_ADVERTS_TYPE   = 0x06
-
-# What this controller can do, announced to the device on the ack. The mirror
-# of the device's own `capabilities` in its register message, and it exists for
-# the same reason: negotiate by capability, never by version string.
-#
-# `ble_adverts_data` says this controller reads BLE_ADVERTS_TYPE off the data
-# plane. A device must not send those frames unnegotiated — an older controller
-# ignores unknown frame types, so the adverts would vanish in silence, which is
-# a worse fault than the one being fixed. The control-plane `ble_adverts`
-# message stays handled forever, for firmware that predates this.
-#
-# `listen_session` says this controller understands private listening
-# (docs/listening.md): listen_state, session-tagged oww_wake, 0x07 session
-# audio and the listen_* replies. A device goes quiet only when it sees this —
-# an older controller acts on a device wake only when stream frames arrive.
-#
-# "output_chain": this controller sends UNPROCESSED audio to a device that
-# announced the same capability, and leaves EQ, bass guard and limiter to it.
-# The device runs its chain only when it sees this, so neither half alone
-# changes anything and the two can never both process the same audio.
-#
-# "ble_connect": this controller drives Bluetooth LE connections through a
-# device that announced the same capability (#656), as BLE_GATT_TYPE frames in
-# both directions. A message on a new frame code is negotiated both ways for
-# the usual reason: sent to a side that does not read it, it vanishes.
-CONTROLLER_FEATURES = ["ble_adverts_data", "listen_session", "output_chain",
-                       "ble_connect"]
-BLE_GATT_TYPE      = em_ble_gatt.FRAME_BLE_GATT
-SPEAKER_FRAME_TYPE = 0x02
-SPEAKER_EOS_TYPE   = 0x03
-MIC_HEADER_LEN     = 3   # [type][seq_hi][seq_lo]
 
 # Volume conversion lives in em_volume so the scale has ONE definition and a
 # test — it used to be spelled `/ 175` in three separate modules.
@@ -988,7 +867,7 @@ class Device:
         if ws is None or not self.ble_connect_capable:
             return False
         try:
-            await ws.send(bytes((BLE_GATT_TYPE,)) + payload)
+            await ws.send(bytes((em_wire.BLE_GATT_TYPE,)) + payload)
             return True
         except Exception as e:
             log.warning(f"[{self.device_id}] ble gatt send failed: {e}")
@@ -1336,7 +1215,7 @@ class Device:
           after EOS, and clear the flag there.
         - **True is still a controller-side ESTIMATE** — the first period put
           on the wire. The device holds audio until roughly
-          SPEAKER_PRIME_SECONDS is queued (primePeriods, pcm_speaker.go), so
+          em_wire.SPEAKER_PRIME_SECONDS is queued (primePeriods, pcm_speaker.go), so
           the tile leads the speaker by up to that much. Closing that gap needs
           the DEVICE to report the moment it starts, which no released firmware
           does; `playback_stats` is the only playback message it sends.
@@ -1370,14 +1249,14 @@ class Device:
             while offset < len(pcm):
                 if self.cancel_event.is_set():
                     break
-                chunk = pcm[offset:offset + SPEAKER_BYTES]
-                if len(chunk) < SPEAKER_BYTES:
+                chunk = pcm[offset:offset + em_wire.SPEAKER_BYTES]
+                if len(chunk) < em_wire.SPEAKER_BYTES:
                     # Pad the final partial period with silence — without this,
                     # up to one full period (~42ms at 48kHz) of the last word is
                     # silently dropped because the old loop required a full period.
-                    chunk = chunk + bytes(SPEAKER_BYTES - len(chunk))
-                await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
-                offset += SPEAKER_BYTES
+                    chunk = chunk + bytes(em_wire.SPEAKER_BYTES - len(chunk))
+                await self.send_data(bytes([em_wire.SPEAKER_FRAME_TYPE]) + chunk)
+                offset += em_wire.SPEAKER_BYTES
         finally:
             # NOT where speaking clears — see _run_post_turn_playback. This
             # returns when the last byte is written to the socket, which
@@ -1391,7 +1270,7 @@ class Device:
             # complete even though this task is mid-cancellation; the
             # original CancelledError still propagates after the finally.
             try:
-                await asyncio.shield(self.send_data(bytes([SPEAKER_EOS_TYPE])))
+                await asyncio.shield(self.send_data(bytes([em_wire.SPEAKER_EOS_TYPE])))
             except BaseException:
                 pass  # WS gone / re-cancelled — device flush self-heals on reconnect
 
@@ -1434,7 +1313,7 @@ class Device:
                     "sent to device"
                 )
             else:
-                # Hold the queue to VOICE_LEAD_S ahead of realtime — see the
+                # Hold the queue to em_wire.VOICE_LEAD_S ahead of realtime — see the
                 # constant for why sending faster is pure cost. The first
                 # period is exempt so nothing delays the start of playback,
                 # and the lead is then free to build at full speed until it
@@ -1442,7 +1321,7 @@ class Device:
                 delay = em_pacing.lead_delay(
                     sent_seconds,
                     asyncio.get_event_loop().time() - first_send_time,
-                    VOICE_LEAD_S,
+                    em_wire.VOICE_LEAD_S,
                 )
                 if delay > 0:
                     paced_seconds += delay
@@ -1458,16 +1337,16 @@ class Device:
                     if self.cancel_event.is_set():
                         return
             _t_send = asyncio.get_event_loop().time()
-            await self.send_data(bytes([SPEAKER_FRAME_TYPE]) + chunk)
+            await self.send_data(bytes([em_wire.SPEAKER_FRAME_TYPE]) + chunk)
             send_seconds += asyncio.get_event_loop().time() - _t_send
-            sent_seconds += SPEAKER_PERIOD_SECONDS
+            sent_seconds += em_wire.SPEAKER_PERIOD_SECONDS
 
         async def drain_whole_periods() -> None:
-            while len(pending) >= SPEAKER_BYTES:
+            while len(pending) >= em_wire.SPEAKER_BYTES:
                 if self.cancel_event.is_set():
                     break
-                chunk = bytes(pending[:SPEAKER_BYTES])
-                del pending[:SPEAKER_BYTES]
+                chunk = bytes(pending[:em_wire.SPEAKER_BYTES])
+                del pending[:em_wire.SPEAKER_BYTES]
                 await send_period(chunk)
 
         try:
@@ -1490,7 +1369,7 @@ class Device:
 
             # The flush can push `pending` back over a period, so it has to be
             # drained again before the remainder is padded. It used to pad
-            # straight from here, and `bytes(SPEAKER_BYTES - len(chunk))` is a
+            # straight from here, and `bytes(em_wire.SPEAKER_BYTES - len(chunk))` is a
             # ValueError once that goes negative: the drain loop above leaves
             # 0-4095 bytes and the tail adds 478, so any remainder over 3618
             # killed the response — 11.7% of them, measured as `negative
@@ -1500,14 +1379,14 @@ class Device:
             await drain_whole_periods()
 
             if pending and not self.cancel_event.is_set():
-                chunk = bytes(pending) + bytes(SPEAKER_BYTES - len(pending))
+                chunk = bytes(pending) + bytes(em_wire.SPEAKER_BYTES - len(pending))
                 await send_period(chunk)
         finally:
             # NOT where speaking clears — see the note in stream_speaker.
             # One EOS terminates the complete response. Sending EOS per HTTP
             # chunk would make the device repeatedly prime and flush.
             try:
-                await asyncio.shield(self.send_data(bytes([SPEAKER_EOS_TYPE])))
+                await asyncio.shield(self.send_data(bytes([em_wire.SPEAKER_EOS_TYPE])))
             except BaseException:
                 pass
 
@@ -1607,7 +1486,7 @@ def get_device(device_id: str) -> Device | None:
 def _limiter_for(device):
     """Adapter: a Device's limiter config -> em_limiter.for_stream."""
     return em_limiter.for_stream(
-        SPEAKER_RATE,
+        em_wire.SPEAKER_RATE,
         device.limiter_enabled,
         device.limiter_threshold,
         device.limiter_release,
@@ -1617,7 +1496,7 @@ def _limiter_for(device):
 def _guard_for(device):
     """Adapter: a Device's bass-guard config -> em_mbc.for_stream."""
     return em_mbc.for_stream(
-        SPEAKER_RATE,
+        em_wire.SPEAKER_RATE,
         device.bass_guard_enabled,
         device.bass_guard_db,
     )
@@ -1759,7 +1638,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 # ─── Audio conversion ─────────────────────────────────────────────────────────
 
 # (The numpy linear-interpolation resample_to_48k that used to live here is
-# gone: em_tts_audio.fetch now decodes at SPEAKER_RATE directly, with ffmpeg
+# gone: em_tts_audio.fetch now decodes at em_wire.SPEAKER_RATE directly, with ffmpeg
 # doing any rate conversion — and HA transcodes to 48kHz at source when it
 # honours the media player's declared supported_formats.)
 
@@ -1864,9 +1743,9 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 continue
             buf.extend(payload)
             heard = em_listen.captured(payload, loop.time())
-            while len(buf) >= CHUNK_BYTES:
-                frame = bytes(buf[:CHUNK_BYTES])
-                del buf[:CHUNK_BYTES]
+            while len(buf) >= em_wire.CHUNK_BYTES:
+                frame = bytes(buf[:em_wire.CHUNK_BYTES])
+                del buf[:em_wire.CHUNK_BYTES]
                 samples = np.frombuffer(frame, dtype=np.int16)
                 rms = float(np.sqrt(np.mean((samples.astype(np.float64) / 32768.0) ** 2)))
                 rms_sum += rms
@@ -2090,7 +1969,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     def _prepare_pcm() -> bytes:
         if on_device:
             return voice_response
-        return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
+        return em_eq.apply(voice_response, em_wire.SPEAKER_RATE, device.eq_bands,
                            device.eq_loudness, limiter=_limiter,
                            guard=_guard)
 
@@ -2115,7 +1994,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         )
         log.info(
             f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
-            f"({len(speaker_pcm)//SPEAKER_BYTES} periods) — "
+            f"({len(speaker_pcm)//em_wire.SPEAKER_BYTES} periods) — "
             f"{em_eq.describe_activity(_limiter, _guard)}"
         )
         cancel_task    = asyncio.create_task(device.cancel_event.wait())
@@ -2156,7 +2035,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                 # barge-in or a mute usually lands in this window, and an
                 # uncancellable wait here is what caused the 5.7s dead window
                 # fixed on 2026-07-10.
-                audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
+                audio_duration = len(speaker_pcm) / (em_wire.SPEAKER_RATE * 2) + em_wire.SPEAKER_PRIME_SECONDS
                 elapsed        = asyncio.get_event_loop().time() - t_stream_start
                 device.playback_send_ms = int(elapsed * 1000)
                 timeout        = audio_duration * 2 + 10.0
@@ -2425,7 +2304,7 @@ async def _alarm_burst_pcm() -> bytes:
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-i", em_timers.ALARM_SOUND_FILE,
             "-f", "s16le", "-acodec", "pcm_s16le",
-            "-ar", str(SPEAKER_RATE), "-ac", "1", "-",
+            "-ar", str(em_wire.SPEAKER_RATE), "-ac", "1", "-",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2557,7 +2436,7 @@ async def _meter_at_playback_start(pcm_chunks, on_start):
     Pass PCM through untouched, firing `on_start` when the device will have
     begun playing it.
 
-    The device holds audio until roughly SPEAKER_PRIME_SECONDS is queued, or
+    The device holds audio until roughly em_wire.SPEAKER_PRIME_SECONDS is queued, or
     until EOS for a response shorter than that (primePeriods, pcm_speaker.go).
     Counting bytes handed to the streamer tracks that closely enough — the
     socket write completes near-instantly however slow the link is, which is
@@ -2568,7 +2447,7 @@ async def _meter_at_playback_start(pcm_chunks, on_start):
     simply stays up until the turn's ring cleanup — the failure direction
     that looks like "still working" rather than "dead".
     """
-    prime_bytes = int(SPEAKER_PRIME_SECONDS * SPEAKER_RATE * 2)
+    prime_bytes = int(em_wire.SPEAKER_PRIME_SECONDS * em_wire.SPEAKER_RATE * 2)
     sent = 0
     fired = False
     async for chunk in pcm_chunks:
@@ -2600,7 +2479,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             f"loudness={device.eq_loudness}"
         )
         stream_eq = em_eq.StreamingEQ(
-            SPEAKER_RATE,
+            em_wire.SPEAKER_RATE,
             device.eq_bands,
             device.eq_loudness,
             limiter=_limiter_for(device),
@@ -2631,7 +2510,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         device.playback_eq_ms = eq_ms
         device.playback_send_ms = send_ms
         stream_elapsed = asyncio.get_event_loop().time() - t_stream_start
-        audio_duration = total_pcm / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
+        audio_duration = total_pcm / (em_wire.SPEAKER_RATE * 2) + em_wire.SPEAKER_PRIME_SECONDS
 
         if not total_pcm:
             log.info(f"[{device.device_id}] Streamed response contained no audio")
@@ -2653,10 +2532,10 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         timeout = audio_duration * 2 + 10.0
         log.info(
             f"[{device.device_id}] Streamed {total_pcm} bytes "
-            f"({total_pcm//SPEAKER_BYTES} periods) in {stream_elapsed:.1f}s "
+            f"({total_pcm//em_wire.SPEAKER_BYTES} periods) in {stream_elapsed:.1f}s "
             f"while HA generated audio (socket writes {send_ms}ms — NOT "
             f"delivery, see delivery_ms; paced {paced_ms}ms holding "
-            f"{VOICE_LEAD_S:.0f}s of lead); awaiting device playback_stats "
+            f"{em_wire.VOICE_LEAD_S:.0f}s of lead); awaiting device playback_stats "
             f"(est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
         )
         timeout_task = asyncio.create_task(asyncio.sleep(timeout))
@@ -3844,9 +3723,9 @@ async def _stream_listen(device: Device):
             # The chunk scored below is completed by this payload.
             arrived = em_listen.arrival(payload, loop.time())
             heard = em_listen.captured(payload, arrived)
-            while len(buf) >= CHUNK_BYTES:
-                frame   = bytes(buf[:CHUNK_BYTES])
-                del buf[:CHUNK_BYTES]
+            while len(buf) >= em_wire.CHUNK_BYTES:
+                frame   = bytes(buf[:em_wire.CHUNK_BYTES])
+                del buf[:em_wire.CHUNK_BYTES]
                 samples = np.frombuffer(frame, dtype=np.int16)
 
                 # A ringing timer alarm is the one case where our own speaker
@@ -5137,7 +5016,6 @@ CONTROL_HANDLERS = {
 }
 
 
-
 async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
     """
     Handle a /control WebSocket connection from a device.
@@ -5303,7 +5181,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await device.send_control({
             "type": "ack",
             "device_id": device_id,
-            "features": CONTROLLER_FEATURES,
+            "features": em_wire.CONTROLLER_FEATURES,
             # The device's wall clock. An Echo has no RTC that survives a
             # power cut and boots reading 2010; under emOS nothing ever
             # corrects it, because bionic resolves through Android's property
@@ -5459,7 +5337,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             if ring:
                 meter = dict(_d.led_scene["meter_anim"])
                 meter["ttlSec"] = em_scenes.meter_ttl(
-                    len(pcm_bytes) / (SPEAKER_RATE * 2))
+                    len(pcm_bytes) / (em_wire.SPEAKER_RATE * 2))
                 await _d.send_led_anim(meter)
             try:
                 await _run_post_turn_playback(_d, pcm_bytes)
@@ -5884,7 +5762,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     continue
                 # Checked before the mic-frame guards below, which would
                 # otherwise drop this on the header-length test.
-                if raw and raw[0] == BLE_ADVERTS_TYPE:
+                if raw and raw[0] == em_wire.BLE_ADVERTS_TYPE:
                     try:
                         body = json.loads(raw[1:])
                     except Exception:
@@ -5896,7 +5774,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                         device.device_id, body.get("adverts") or []
                     )
                     continue
-                if raw and raw[0] == BLE_GATT_TYPE:
+                if raw and raw[0] == em_wire.BLE_GATT_TYPE:
                     em_ble_proxy.gatt_from_device(device.device_id, raw[1:])
                     continue
                 if raw and raw[0] == em_listen.FRAME_TYPE:
@@ -5916,14 +5794,14 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                             session, pcm, asyncio.get_event_loop().time()):
                         _put_voice_frame(device, chunk)
                     continue
-                if len(raw) <= MIC_HEADER_LEN:
+                if len(raw) <= em_wire.MIC_HEADER_LEN:
                     continue
-                if raw[0] != MIC_FRAME_TYPE:
+                if raw[0] != em_wire.MIC_FRAME_TYPE:
                     continue
-                if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
+                if len(raw) == em_wire.MIC_HEADER_LEN + 1 and raw[em_wire.MIC_HEADER_LEN] in (em_wire.VAD_END_TYPE, em_wire.VAD_NO_SPEECH_TIMEOUT_TYPE):
                     sentinel = (
                         esphome.VAD_SENTINEL_TIMEOUT
-                        if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
+                        if raw[em_wire.MIC_HEADER_LEN] == em_wire.VAD_NO_SPEECH_TIMEOUT_TYPE
                         else esphome.VAD_SENTINEL_END
                     )
                     q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
@@ -5939,7 +5817,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                         log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
                     continue
                 _now = asyncio.get_event_loop().time()
-                pcm = raw[MIC_HEADER_LEN:]
+                pcm = raw[em_wire.MIC_HEADER_LEN:]
                 # Keep bounded pre-roll only while capture is enabled. The
                 # capture object owns the ring and post-roll limits.
                 if device.wake_clip_capture or device.wake_capture.active is not None:
@@ -6279,8 +6157,8 @@ async def main():
                 router,
                 SERVER_HOST,
                 SERVER_PORT,
-                ping_interval=WS_PING_INTERVAL_S,
-                ping_timeout=WS_PING_TIMEOUT_S,
+                ping_interval=em_wire.WS_PING_INTERVAL_S,
+                ping_timeout=em_wire.WS_PING_TIMEOUT_S,
                 max_size=10 * 1024 * 1024,
             ))
             if tls_ctx is not None:
@@ -6289,8 +6167,8 @@ async def main():
                     SERVER_HOST,
                     SERVER_TLS_PORT,
                     ssl=tls_ctx,
-                    ping_interval=WS_PING_INTERVAL_S,
-                    ping_timeout=WS_PING_TIMEOUT_S,
+                    ping_interval=em_wire.WS_PING_INTERVAL_S,
+                    ping_timeout=em_wire.WS_PING_TIMEOUT_S,
                     max_size=10 * 1024 * 1024,
                 ))
                 log.info(f"Device-link TLS (wss) listening on {SERVER_HOST}:{SERVER_TLS_PORT}")

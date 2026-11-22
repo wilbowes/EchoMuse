@@ -25,7 +25,7 @@ import ast
 import _sources
 
 BASE = ("em_state", "em_http", "em_events", "em_shell", "em_tasks",
-        "em_dbwriter", "em_db")
+        "em_dbwriter", "em_db", "em_wire")
 ABOVE_BASE = ("em_api", "em_controller", "em_esphome")
 
 

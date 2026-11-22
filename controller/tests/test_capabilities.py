@@ -372,7 +372,7 @@ def test_the_controller_announces_its_own_features_and_the_device_reads_them():
     types are ignored in both directions. The strings must therefore match
     across the two languages for the same reason every other capability does.
     """
-    py = CONTROLLER.read_text()
+    py = (ROOT / "controller" / "em_wire.py").read_text()
     go = CONTROL_GO.read_text()
 
     block = py[py.index("CONTROLLER_FEATURES = ["):]
@@ -400,7 +400,8 @@ def test_private_listening_is_negotiated_in_both_directions():
     sys.path.insert(0, str(ROOT / "controller"))
     import em_listen
     py = CONTROLLER.read_text()
-    assert f'"{em_listen.FEATURE}"' in py[py.index("CONTROLLER_FEATURES = ["):][:200]
+    import em_wire
+    assert em_listen.FEATURE in em_wire.CONTROLLER_FEATURES
     assert f'"{em_listen.CAPABILITY}" in (self.capabilities' in py
     assert em_listen.CAPABILITY in device_capabilities()
     assert re.search(r'FeatureListenSession\s*=\s*"listen_session"', CONTROL_GO.read_text())

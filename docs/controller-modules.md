@@ -17,8 +17,8 @@ A name that kept its leading underscore is still private to its new module.
 One that lost it is now a module's interface, and callers say
 `module.name(...)`; em_api re-exports nothing.
 
-`em_controller` has not been split yet, and `em_esphome` only in part (see
-"Moved out of em_esphome" below). Only `handle_control` changed shape there: one `_on_<type>` handler per control
+`em_controller` and `em_esphome` are being split the same way, in parts (see
+"Moved out of em_controller" and "Moved out of em_esphome" below). Only `handle_control` changed shape there: one `_on_<type>` handler per control
 message, looked up in `CONTROL_HANDLERS` (#910).
 
 ## The modules
@@ -53,6 +53,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_static` | Routes: the pages and first-run setup. |
 | `em_routes_system` | Routes: status, controller settings, support bundle. |
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
+| `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
 
@@ -432,6 +433,17 @@ Grouped by where each one lives now.
 | `_forget_oww_models` | `em_state.forget_oww_models` |
 | `_wake_arbiter` | `em_state.wake_arbiter` |
 | `_loop_lag_peak_ms` | `em_state.loop_lag_peak_ms` |
+
+## Moved out of em_controller (2026-11)
+
+| Was in em_controller | Now |
+|---|---|
+| `CHUNK_BYTES`, `MIC_HEADER_LEN` | `em_wire` (same names) |
+| `SPEAKER_RATE`, `SPEAKER_PERIOD`, `SPEAKER_BYTES`, `SPEAKER_PERIOD_SECONDS` | `em_wire` |
+| `VOICE_LEAD_S`, `SPEAKER_PRIME_SECONDS` | `em_wire` |
+| `WS_PING_INTERVAL_S`, `WS_PING_TIMEOUT_S` | `em_wire` |
+| `MIC_FRAME_TYPE`, `VAD_END_TYPE`, `VAD_NO_SPEECH_TIMEOUT_TYPE`, `BLE_ADVERTS_TYPE`, `BLE_GATT_TYPE`, `SPEAKER_FRAME_TYPE`, `SPEAKER_EOS_TYPE` | `em_wire` |
+| `CONTROLLER_FEATURES` | `em_wire` |
 
 ## Moved out of em_esphome (2026-11)
 

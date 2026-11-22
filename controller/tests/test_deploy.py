@@ -442,10 +442,8 @@ def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
     threshold — the device starts playing it at EOS instead. Exhaustion must
     fire the callback too, or short answers play with no ring at all.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
-    fn = src[src.index("async def _meter_at_playback_start"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    import _sources
+    fn = _sources.def_source("_meter_at_playback_start")
 
     body = fn.split("async for")[1]
     assert "if not fired:" in body.rsplit("\n", 4)[-4:][0] or "if not fired" in body, \
@@ -2191,11 +2189,12 @@ def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
     unannounced loses every advertisement with no error at either end.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
+    wire = (CONTROLLER / "em_wire.py").read_text()
 
-    assert "BLE_ADVERTS_TYPE" in src, "the data-plane frame code must be named"
+    assert "em_wire.BLE_ADVERTS_TYPE" in src, "the data-plane frame code must be named"
     # Double-quoted: the prose around it uses backticks, so this matches the
     # announcement itself rather than the comment explaining it.
-    assert '"ble_adverts_data"' in src, (
+    assert '"ble_adverts_data"' in wire, (
         "the controller must announce the feature, or no device will ever "
         "use the data plane"
     )
@@ -2204,15 +2203,15 @@ def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
     # the field itself is gone.
     ack = re.search(r"send_control\(\{[^}]*\"type\": \"ack\"[^}]*\}", src, re.S)
     assert ack, "could not find the ack send_control call — did it move?"
-    assert "CONTROLLER_FEATURES" in ack.group(0), (
+    assert "em_wire.CONTROLLER_FEATURES" in ack.group(0), (
         "the ack must carry the controller's feature list"
     )
 
     # The advert branch must precede the mic guards, which would otherwise
     # drop a 0x06 frame on the mic header-length test and lose it silently.
     handler = src[src.index("async def handle_data"):]
-    ble = handler.index("BLE_ADVERTS_TYPE")
-    mic = handler.index("!= MIC_FRAME_TYPE")
+    ble = handler.index("em_wire.BLE_ADVERTS_TYPE")
+    mic = handler.index("!= em_wire.MIC_FRAME_TYPE")
     assert ble < mic, (
         "the BLE frame branch must come before the mic-frame guards, or the "
         "frame is dropped by a length check written for PCM"
