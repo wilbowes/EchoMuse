@@ -9,12 +9,13 @@ import asyncio
 import logging
 
 import em_device
+import em_scenes
 
 log = logging.getLogger("echomuse")
 
 
-# LEDs
-NUM_LEDS = 12
+# The ring's size has one definition, em_scenes' (the frames it builds).
+NUM_LEDS = em_scenes.NUM_LEDS
 
 
 def _make_leds(r, g, b):
