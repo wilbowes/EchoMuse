@@ -2696,7 +2696,7 @@ def cancel_voice_turn(device_id: str, abort_ha: bool = False,
     is going to start on this connection (barge-in during thinking). See
     EchoMuseSatellite.cancel_turn.
 
-    Called from em_controller.handle_button_event() when voice_lock is held,
+    Called from em_button_events.handle_button_event() when voice_lock is held,
     and from _barge_watcher.
     """
     server = get_server(device_id)

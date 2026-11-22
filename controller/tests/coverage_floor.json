@@ -12,6 +12,7 @@
  "em_boards.py": 99.0,
  "em_broadcast.py": 99.0,
  "em_button.py": 99.0,
+ "em_button_events.py": 16.0,
  "em_cacerts.py": 92.0,
  "em_chunked.py": 98.0,
  "em_config_sections.py": 99.0,
