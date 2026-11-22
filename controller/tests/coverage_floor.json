@@ -43,6 +43,7 @@
  "em_labels.py": 99.0,
  "em_leds.py": 23.0,
  "em_limiter.py": 90.0,
+ "em_link_gate.py": 30.0,
  "em_linkauth.py": 99.0,
  "em_listen.py": 95.0,
  "em_loglevel.py": 97.0,

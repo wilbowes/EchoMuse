@@ -84,7 +84,7 @@ def _names_in_call(call):
 def test_an_approved_pairing_rotates_before_the_auth_decision():
     fn = _fn(_tree("em_controller.py"), "handle_control")
     clears = [c for c in _calls(fn, "run_in_executor") if "clear_device_token" in _names_in_call(c)]
-    auth = _calls(fn, "_link_auth_ok")
+    auth = _calls(fn, "link_auth_ok")
     assert clears and auth
     assert clears[0].lineno < auth[0].lineno
 

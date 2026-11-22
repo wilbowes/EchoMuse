@@ -57,7 +57,6 @@ Device WebSocket protocol:
 
 import asyncio
 import contextlib
-import hmac
 import json
 import logging
 import os
@@ -86,7 +85,6 @@ import em_auth as auth
 import em_api as api
 import em_pki
 import em_hostip
-import em_linkauth
 import em_pairing
 import em_config_types
 import em_dbwriter
@@ -122,6 +120,7 @@ import em_alarm
 import em_wake_model
 import em_wake_claim
 import em_barge_watcher
+import em_link_gate
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -181,11 +180,6 @@ SERVER_PORT  = int(os.environ.get("SERVER_PORT", "8767"))
 # it up from the tls_port mDNS TXT property and dial wss iff they hold the
 # pushed CA file (see device/internal/client/tlscreds.go).
 SERVER_TLS_PORT = int(os.environ.get("SERVER_TLS_PORT", "8770"))
-# Enforcing posture: reject device connections that are not TLS + a valid
-# per-device token. Leave 0 until the whole fleet shows tls=true —
-# a plain, tokenless connection is the legacy default and must keep
-# working during the rollout.
-REQUIRE_DEVICE_TLS = os.environ.get("REQUIRE_DEVICE_TLS", "0") == "1"
 API_PORT     = int(os.environ.get("API_PORT", "8768"))
 # The address devices are told to dial. Detected from the routing table when
 # unset — never a literal, which used to send every unconfigured deployment
@@ -1924,112 +1918,6 @@ async def handle_button_event(device: em_device.Device, event: dict):
 
 # ─── Control plane handler ────────────────────────────────────────────────────
 
-async def _link_auth_ok(
-    ws: WebSocketServerProtocol, device_id: str, secure: bool, plane: str
-) -> bool:
-    """
-    Device-link auth gate, applied to all three WS planes once the
-    device_id is known.
-
-    Rules (rollout-safe by construction):
-      - a presented token that MISMATCHES a stored one always rejects;
-      - a stored token with NO token presented is allowed unless
-        REQUIRE_DEVICE_TLS — the DB row is minted before the files land
-        on the device, and rejecting in that window would cut off the
-        shell plane that the credential push itself rides on;
-      - a presented token for a device with NOTHING on record is ignored,
-        not rejected (see below);
-      - REQUIRE_DEVICE_TLS=1 requires TLS + a matching token, full stop.
-
-    That third rule used to be a rejection, and it made deleting a device a
-    one-way door. Delete removes the row, the token is a column on it, and the
-    device re-reads its credential file on every dial — so it presented a token
-    nothing recognised and was refused on all three planes, INCLUDING the shell
-    plane the controller would otherwise push fresh credentials over. The
-    device retried forever behind a pulsing orange ring, and the dashboard had
-    nothing to show because as far as it was concerned the device did not
-    exist.
-
-    Rejecting there also never bought anything. The rule immediately above
-    admits a connection presenting no token at all, so an unrecognised token
-    was being treated as worse than none while anyone could simply omit the
-    header. A device with a stale credential now comes back as pending and
-    waits for approval, which is the decision a human should be making anyway.
-
-    `REQUIRE_DEVICE_TLS=1` installs are unaffected: the last rule still
-    demands a token that matches a stored one, so a deleted device is refused
-    there regardless and re-provisioning over USB stays the intended path.
-    """
-    presented = None
-    try:
-        presented = ws.request.headers.get("X-EM-Token")
-    except AttributeError:
-        pass
-
-    loop = asyncio.get_event_loop()
-    expected, confirmed = await loop.run_in_executor(
-        None, db.get_device_link_auth, device_id)
-
-    verdict = em_linkauth.decide(
-        presented=presented,
-        expected=expected,
-        confirmed=confirmed,
-        secure=secure,
-        require_tls=REQUIRE_DEVICE_TLS,
-    )
-    if not verdict.ok:
-        log.warning(f"[{plane}] {device_id}: {verdict.reason} — rejecting")
-        # Only for a device with a row and a token, so ids nobody issued
-        # cannot grow the map. The dashboard shows it on the Link row.
-        if expected:
-            em_device_view.note_link_refused(device_id, verdict.reason)
-        return False
-    if presented and expected and not confirmed:
-        # First sight of the device holding its token: from now on it must.
-        if await loop.run_in_executor(
-                None, db.confirm_device_token, device_id, presented):
-            log.info(f"[{plane}] {device_id}: link token confirmed — "
-                     f"a connection without it will be refused from now on")
-    if plane == "control":
-        em_device_view.clear_link_refused(device_id)
-    if verdict.stale_token:
-        # Allowed, but worth seeing in the log: almost always a device that was
-        # deleted and has come back carrying the credential from its previous
-        # life, which is the answer to "why is this in pending again".
-        log.warning(
-            f"[{plane}] {device_id}: {verdict.reason}. "
-            f"Treating as an unregistered device; it will need approval."
-        )
-    return True
-
-
-async def _presented_its_token(ws, device_id: str) -> bool:
-    """Whether this connection's X-EM-Token is the device's stored token."""
-    try:
-        presented = ws.request.headers.get("X-EM-Token")
-    except AttributeError:
-        return False
-    expected = await asyncio.get_event_loop().run_in_executor(
-        None, db.get_device_token, device_id)
-    return bool(presented and expected and hmac.compare_digest(presented, expected))
-
-
-def _peer_ip(ws) -> str | None:
-    try:
-        return ws.remote_address[0]
-    except (AttributeError, TypeError, IndexError):
-        return None
-
-
-def _not_from_control(device: "em_device.Device", ws, secure: bool) -> str | None:
-    """Why a /data or /shell connection is not the device's own, or None."""
-    return em_linkauth.follows_control(
-        control_peer=_peer_ip(device.control_ws),
-        control_secure=bool(getattr(device, "secure", False)),
-        peer=_peer_ip(ws),
-        secure=secure,
-    )
-
 
 # ─── Control-plane messages ─────────────────────────────────────────────────
 #
@@ -2691,7 +2579,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             await loop.run_in_executor(None, db.clear_device_token, device_id)
             log.info(f"[control] {device_id}: pairing approved — admitting to issue credentials")
 
-        if not await _link_auth_ok(ws, device_id, secure, "control"):
+        if not await em_link_gate.link_auth_ok(ws, device_id, secure, "control"):
             # Said before closing, so the device can show "hold the button to
             # pair" rather than "no controller" (firmware with `pairing`;
             # older firmware ignores it). A pairing device is told pending.
@@ -2914,7 +2802,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # An approval (a new device, or an approved pairing) issues link
         # credentials unless this connection already has working ones.
         if em_pairing.approved(device_id):
-            if secure and await _presented_its_token(ws, device_id):
+            if secure and await em_link_gate.presented_its_token(ws, device_id):
                 em_pairing.done(device_id)
             else:
                 em_tasks.spawn(em_credentials.issue_credentials(device_id))
@@ -3353,7 +3241,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
 
         device_id = msg["device_id"]
 
-        if not await _link_auth_ok(ws, device_id, secure, "data"):
+        if not await em_link_gate.link_auth_ok(ws, device_id, secure, "data"):
             await ws.close()
             return
 
@@ -3368,7 +3256,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
             await ws.close()
             return
 
-        why = _not_from_control(device, ws, secure)
+        why = em_link_gate.not_from_control(device, ws, secure)
         if why:
             log.warning(f"[data] {device_id}: {why} — rejecting")
             device = None   # the finally must not treat the live device as ours
@@ -3550,12 +3438,12 @@ async def handle_shell(ws: WebSocketServerProtocol, path: str, secure: bool = Fa
         await ws.close()
         return
 
-    if not await _link_auth_ok(ws, device_id, secure, "shell"):
+    if not await em_link_gate.link_auth_ok(ws, device_id, secure, "shell"):
         await ws.close()
         return
 
     live = em_state.devices.get(device_id)
-    why = "device is not connected" if live is None else _not_from_control(live, ws, secure)
+    why = "device is not connected" if live is None else em_link_gate.not_from_control(live, ws, secure)
     if why:
         log.warning(f"[shell] {device_id}: {why} — rejecting")
         await ws.close()
@@ -3817,7 +3705,7 @@ async def main():
                     max_size=10 * 1024 * 1024,
                 ))
                 log.info(f"Device-link TLS (wss) listening on {SERVER_HOST}:{SERVER_TLS_PORT}")
-            if REQUIRE_DEVICE_TLS:
+            if em_link_gate.REQUIRE_DEVICE_TLS:
                 log.info("REQUIRE_DEVICE_TLS=1 — plain/tokenless device connections will be rejected")
 
             await esphome.start_esphome_servers(em_state.devices, SERVER_HOST)
