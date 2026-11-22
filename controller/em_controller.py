@@ -121,6 +121,7 @@ import em_leds
 import em_playback
 import em_alarm
 import em_wake_model
+import em_wake_claim
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -487,7 +488,7 @@ async def _barge_watcher(device: em_device.Device, playback_started: asyncio.Eve
                     if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
                         # Capture time already carries the link's least
                         # delay; its smoothed RTT would count it twice.
-                        won_by = await _claim_wake(
+                        won_by = await em_wake_claim.claim_wake(
                             device, fired_heard, levels.measure(device.mic_gain_db),
                             over_playback=True)
                     verdict = em_barge.cede(
@@ -1229,78 +1230,6 @@ async def _private_listen(device: em_device.Device) -> None:
     log.info(f"[{device.device_id}] no longer listening privately")
 
 
-def _arbitration_slack() -> float:
-    return em_listen.MAX_ARB_SLACK_S
-
-
-def _arbitration_hold() -> float:
-    """Hold claims whenever two or more Echoes could claim; see
-    em_listen.ARB_HOLD_S. One with no HA stands down first, so does not count."""
-    return em_listen.arbitration_hold(
-        em_listen.detector(d.listen_view, d.oww_trigger_capable)
-        for d in list(em_state.devices.values()) if esphome.can_serve_turn(d.device_id)
-    )
-
-
-async def _claim_wake(device: "em_device.Device", heard_at: float | None,
-                      level: tuple[float, float] | None = None,
-                      by: str = "controller",
-                      over_playback: bool = False) -> str:
-    """Claim the utterance for `device`; returns the winner's id.
-
-    `level` is the wake's (level, peak) in dBFS. Its level is what the arbiter
-    compares across Echoes (em_arbiter.pick), and it is logged with its
-    capture time so contested wakes can be paired later; see em_wakelevel.
-    `over_playback` says this Echo heard the wake over its own speaker, which
-    the reading then contains, so the contest is decided on time.
-    """
-    hold = _arbitration_hold()
-    won_by = await em_state.wake_arbiter.contest(
-        device.device_id, device.wake_arb_ms / 1000.0,
-        heard_at=heard_at, slack_s=_arbitration_slack(), hold_s=hold,
-        level=level[0] if level is not None else None,
-        gains=device.adc_gains, over_playback=over_playback,
-        ringing=device.timer_alarm_ringing,
-    )
-    now = asyncio.get_event_loop().time()
-    if hold > 0:
-        ago = (now - heard_at) * 1000.0 if heard_at is not None else 0.0
-        log.info(f"[{device.device_id}] arbitration (held {hold * 1000:.0f}ms): "
-                 f"heard {ago:.0f}ms ago, won by {won_by} "
-                 f"({em_state.wake_arbiter.last_why})")
-    if level is not None:
-        heard_wall = time.time() - (now - (heard_at if heard_at is not None else now))
-        em_dbwriter.submit(db.log_device, device.device_id, "info", "controller", em_wakelevel.log_line(
-            level[0], level[1], device.noise_floor, device.mic_gain_db,
-            heard_wall, by))
-    return won_by
-
-
-def _device_level(ev: dict) -> tuple[float, float] | None:
-    """The level an Echo measured for its own wake, if its firmware sends one."""
-    if ev.get("level") is None or ev.get("peak") is None:
-        return None
-    return ev["level"], ev["peak"]
-
-
-def _wake_dating(device: em_device.Device, ev: dict) -> tuple[float, str]:
-    """When a device wake was heard, and how that was worked out.
-
-    The Echo's own capture instant, mapped through its clock, survives any
-    time in flight; age plus half an RTT assumes the message was not delayed,
-    which is exactly when it matters. The latter is for firmware that does
-    not send capturedMono, and until the first ping reply maps the clock.
-    """
-    t = device.device_clock.to_local(ev.get("captured_mono"), ev["arrived"])
-    if t is not None:
-        return t, "device clock"
-    return em_listen.heard_at(ev["arrived"], ev["age_ms"], device.rtt_est.srtt), "age + RTT"
-
-
-def _wake_heard_at(device: em_device.Device, ev: dict) -> float:
-    return _wake_dating(device, ev)[0]
-
-
 async def _private_wake_turn(device: em_device.Device, ev: dict) -> None:
     """
     One wake from a privately listening Echo: arbitrate, then run the turn on
@@ -1352,8 +1281,8 @@ async def _private_wake_turn(device: em_device.Device, ev: dict) -> None:
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
-        won_by = await _claim_wake(device, _wake_heard_at(device, ev),
-                                   _device_level(ev), by="device",
+        won_by = await em_wake_claim.claim_wake(device, em_wake_claim.wake_heard_at(device, ev),
+                                   em_wake_claim.device_level(ev), by="device",
                                    over_playback=bool(ev.get("barge")))
     if not serves or won_by != device.device_id:
         wake_info = device.last_wake
@@ -1443,8 +1372,8 @@ async def _private_barge(device: em_device.Device, ev: dict) -> None:
     serves = esphome.can_serve_turn(device.device_id)
     won_by = device.device_id
     if serves and device.wake_arb_ms > 0 and len(em_state.devices) > 1:
-        won_by = await _claim_wake(device, _wake_heard_at(device, ev),
-                                   _device_level(ev), by="device",
+        won_by = await em_wake_claim.claim_wake(device, em_wake_claim.wake_heard_at(device, ev),
+                                   em_wake_claim.device_level(ev), by="device",
                                    over_playback=True)
     verdict = em_barge.cede(
         serves=serves, won_by=won_by,
@@ -2031,7 +1960,7 @@ async def _stream_listen(device: em_device.Device):
                             else:
                                 # Already includes the link's least delay.
                                 heard_at = heard
-                            won_by = await _claim_wake(
+                            won_by = await em_wake_claim.claim_wake(
                                 device, heard_at,
                                 device.wake_levels.measure(device.mic_gain_db),
                                 over_playback=bool(ringing or device.speaking))
@@ -2825,7 +2754,7 @@ async def _on_oww_wake(device: em_device.Device, msg: dict) -> None:
         else:
             try:
                 device.listen_wakes.put_nowait(ev)
-                _heard, _how = _wake_dating(device, ev)
+                _heard, _how = em_wake_claim.wake_dating(device, ev)
                 log.info(
                     f"[{device_id}] on-device wake: score="
                     f"{ev['score']:.3f} age={ev['age_ms']}ms "

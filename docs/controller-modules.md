@@ -57,6 +57,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
 | `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
+| `em_wake_claim` | Claiming a wake when several Echoes heard it: arbitration windows, when a wake was heard, the claim. |
 | `em_wake_model` | The controller-scored wake and barge models per Echo: cache, reset off the loop, buffer trim. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
@@ -463,6 +464,8 @@ Grouped by where each one lives now.
 | `_reset_wake_model`, `_trim_oww_raw_buffer` | `em_wake_model.reset_model`, `trim_raw_buffer` |
 | `_acquire_wake_model`, `_acquire_barge_model` | `em_wake_model.acquire_wake_model`, `acquire_barge_model` |
 | `_OWW_RAW_BUFFER_KEEP` | `em_wake_model` (same name) |
+| `_claim_wake`, `_wake_heard_at`, `_wake_dating`, `_device_level` | `em_wake_claim.claim_wake`, `wake_heard_at`, `wake_dating`, `device_level` |
+| `_arbitration_slack`, `_arbitration_hold` | `em_wake_claim` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 

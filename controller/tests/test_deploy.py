@@ -1978,7 +1978,7 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     src = (CONTROLLER / "em_controller.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     serves = body.index("can_serve_turn")
-    claim  = body.index("await _claim_wake(")
+    claim  = body.index("await em_wake_claim.claim_wake(")
     assert serves < claim, (
         "the capability check must come BEFORE the arbitration claim — "
         "after it, the unlinked device has already taken the window"
@@ -2251,14 +2251,14 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     body = src[src.index("async def _barge_watcher"):]
     body = body[:body.index("\nasync def ", 1)]
 
-    assert "await _claim_wake(" in body, (
+    assert "await em_wake_claim.claim_wake(" in body, (
         "the barge watcher must arbitrate — without it a second Echo answers "
         "the same interrupting utterance"
     )
     # Same ordering rule as the wake path: a device that cannot finish a turn
     # must not take the window first.
     serves = body.index("can_serve_turn")
-    claim  = body.index("await _claim_wake(")
+    claim  = body.index("await em_wake_claim.claim_wake(")
     assert serves < claim, (
         "can_serve_turn must precede the claim, or an unlinked device takes "
         "the window and then dies no_ha"
