@@ -1015,7 +1015,7 @@ class Device:
                 await self.send_data(bytes([em_wire.SPEAKER_FRAME_TYPE]) + chunk)
                 offset += em_wire.SPEAKER_BYTES
         finally:
-            # NOT where speaking clears — see _run_post_turn_playback. This
+            # NOT where speaking clears — see em_playback.run_post_turn_playback. This
             # returns when the last byte is written to the socket, which
             # completes near-instantly however slow the link is; the device
             # still has its whole buffer to play.

@@ -40,7 +40,7 @@ def test_the_announcement_path_raises_the_meter_and_clears_it():
         n for n in ast.walk(tree)
         if isinstance(n, ast.AsyncFunctionDef) and n.name == "_standalone_play"))
     raised = play.index("send_led_anim(meter)")
-    played = play.index("_run_post_turn_playback(")
+    played = play.index("em_playback.run_post_turn_playback(")
     cleared = play.index("leds_off(")
     assert raised < played < cleared
     assert "em_scenes.announcement_ring(" in play
