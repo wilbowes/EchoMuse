@@ -56,7 +56,6 @@ Device WebSocket protocol:
 """
 
 import asyncio
-import collections
 import contextlib
 import hmac
 import json
@@ -121,6 +120,7 @@ import em_loglevel
 import em_leds
 import em_playback
 import em_alarm
+import em_wake_model
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -268,85 +268,6 @@ async def _send_gatt(device_id: str, payload: bytes) -> bool:
     device = em_state.devices.get(device_id)
     return device is not None and await device.send_gatt(payload)
 
-def _reset_wake_model(model) -> "asyncio.Future":
-    """Reset an openwakeword model off the event loop; await the result before
-    the model scores again.
-
-    reset() re-seeds the feature window from embeddings of 4s of random noise:
-    58ms on a desktop against 1.6ms to score a frame, and ~400ms on the HA
-    host. Called on the loop it stalled every Echo's speaker audio, LED frames
-    and control messages on every controller-scored wake (measured
-    2026-09-22: `event loop stalled 360ms`, and a neighbour's wake read 368ms
-    late). Scoring already ran in the executor for less than a thirtieth of
-    that cost."""
-    return asyncio.get_event_loop().run_in_executor(None, model.reset)
-
-
-# openWakeWord's AudioFeatures keeps ~10s of raw audio (160k Python ints) and
-# converts the whole deque to a list on every predict() to take the last
-# ~1.7k samples. Nothing else reads it, and trimming it changes no score
-# (tools/trim_check.py: 1200 frames, 0 differing, max delta 0). This is the
-# idle-CPU hot path the wake loop hits 12.5 times a second per device.
-_OWW_RAW_BUFFER_KEEP = 8 * 1280 + 480  # 8 chunks + the mel tail
-
-
-def _trim_oww_raw_buffer(model):
-    try:
-        pre = model.preprocessor
-        buf = pre.raw_data_buffer
-        if buf.maxlen != _OWW_RAW_BUFFER_KEEP:
-            pre.raw_data_buffer = collections.deque(buf, maxlen=_OWW_RAW_BUFFER_KEEP)
-    except Exception as exc:
-        # Never fail wake-model acquisition over an optimisation, but say when
-        # the buffer is gone (a renamed one) instead of silently paying the copy.
-        log.warning("wake model raw-audio buffer not trimmed (%s) — every "
-                    "predict() keeps copying the full 10s buffer", exc)
-    return model
-
-
-async def _acquire_wake_model(device: "em_device.Device", name: str, speex: bool):
-    """Return the device's wake model, reusing the cached one when the wake word
-    and speex setting are unchanged, else building a fresh one and replacing any
-    previous entry for this device (#512).
-
-    A cache hit is reset() so a reused model is indistinguishable from a fresh
-    build; a miss is a freshly constructed model (already noise-seeded), so it
-    is NOT reset. Either way the caller's WarmupGate stays un-warmed, which is
-    correct for both."""
-    loop = asyncio.get_event_loop()
-    cached = em_state.oww_models.get(device.device_id)
-    if cached is not None and cached[0] == name and cached[1] == speex:
-        model = cached[2]
-        await _reset_wake_model(model)
-        _trim_oww_raw_buffer(model)
-        return model
-    model = await loop.run_in_executor(
-        None,
-        lambda: _trim_oww_raw_buffer(em_oww_models.model_class()(
-            wakeword_models=[name],
-            enable_speex_noise_suppression=speex,
-        )),
-    )
-    em_state.oww_models[device.device_id] = (name, speex, model)
-    em_state.live_oww_models.add(model)
-    return model
-
-
-async def _acquire_barge_model(device: "em_device.Device", name: str):
-    """Return the device's barge-in model, reusing the cached one when the wake
-    word is unchanged, else building a fresh one and replacing any previous
-    entry (#512). The barge watcher resets the model itself after acquiring it,
-    so no reset here. The barge watcher is gated by voice_lock (one turn per
-    device), so two barge watchers never score one model concurrently."""
-    cached = em_state.oww_barge_models.get(device.device_id)
-    if cached is not None and cached[0] == name:
-        return cached[1]
-    model = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: _trim_oww_raw_buffer(em_oww_models.model_class()(wakeword_models=[name]))
-    )
-    em_state.oww_barge_models[device.device_id] = (name, model)
-    em_state.live_oww_models.add(model)
-    return model
 
 def get_device(device_id: str) -> em_device.Device | None:
     return em_state.devices.get(device_id)
@@ -401,11 +322,11 @@ async def _barge_watcher(device: em_device.Device, playback_started: asyncio.Eve
     # Reused across reconnects via the module cache (#512): a new Device is
     # created per connection, so caching on the Device rebuilt this every time.
     name = device.oww_model
-    model = await _acquire_barge_model(device, name)
+    model = await em_wake_model.acquire_barge_model(device, name)
     # name is the raw owwModel value; scoring needs the openwakeword prediction
     # key (path → stem).
     barge_pred_key = em_oww_models.prediction_key(name)
-    await _reset_wake_model(model)
+    await em_wake_model.reset_model(model)
     # reset() seeds the classifier's window with embeddings of random noise,
     # so the first FEATURE_WINDOW chunks score that noise as much as the room.
     # This watcher is where that hurt most: it reset and scored immediately,
@@ -1581,7 +1502,7 @@ async def _stream_listen(device: em_device.Device):
     # Reused across reconnects via the module cache (#512): a fresh Device is
     # created per connection, so building on the Device leaked a model per
     # reconnect. A cache hit is reset() to match a fresh build.
-    model = await _acquire_wake_model(device, current_model_name, current_speex_ns)
+    model = await em_wake_model.acquire_wake_model(device, current_model_name, current_speex_ns)
     # NB: for custom models owwModel is a file path but openwakeword keys
     # the prediction dict by the filename stem — never score by the raw name.
     model_key = em_oww_models.prediction_key(current_model_name)
@@ -1631,7 +1552,7 @@ async def _stream_listen(device: em_device.Device):
                 try:
                     # Replaces this device's cached model (dropping the old
                     # one), so a changed wake word does not accumulate models.
-                    new_model = await _acquire_wake_model(
+                    new_model = await em_wake_model.acquire_wake_model(
                         device, new_name, new_speex
                     )
                     model             = new_model
@@ -2024,7 +1945,7 @@ async def _stream_listen(device: em_device.Device):
                         # stale — the start of the command. Nothing scores
                         # with the model until listening resumes, which
                         # awaits it first.
-                        model_reset = _reset_wake_model(model)
+                        model_reset = em_wake_model.reset_model(model)
                         warmup.reset()
                         buf.clear()
                         device.cancel_event.clear()
@@ -2210,7 +2131,7 @@ async def _stream_listen(device: em_device.Device):
                                 f"drained {drained} stale frames post-turn"
                             )
                         await model_reset
-                        await _reset_wake_model(model)
+                        await em_wake_model.reset_model(model)
                         warmup.reset()
                         buf.clear()
                         # mic_start without lock_mic — device stays on ch6 omni
@@ -2225,7 +2146,7 @@ async def _stream_listen(device: em_device.Device):
                             f"[{device.device_id}] Voice turn active — "
                             f"ignoring wake"
                         )
-                        await _reset_wake_model(model)
+                        await em_wake_model.reset_model(model)
                         warmup.reset()
 
     except asyncio.CancelledError:

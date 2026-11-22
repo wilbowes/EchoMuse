@@ -325,7 +325,7 @@ class Device:
         # cancel, phase-dependent) and the turn loop re-enters a fresh
         # turn. The barge watcher uses a dedicated OWW instance (the main wake
         # listener task is blocked awaiting the turn), cached module-side per
-        # device_id and reused across reconnects — see _acquire_barge_model.
+        # device_id and reused across reconnects — see em_wake_model.acquire_barge_model.
         self.barge_in_enabled = False
         # False until config is pushed, so a device connecting before then
         # keeps the historical tap-starts-a-turn behaviour.
