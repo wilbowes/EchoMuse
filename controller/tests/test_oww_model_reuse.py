@@ -26,10 +26,7 @@ def _controller_src() -> str:
 
 
 def _listener_src() -> str:
-    src = _controller_src()
-    start = src.index("async def _stream_listen")
-    end = src.index("async def ", start + 1)
-    return src[start:end]
+    return _sources.def_source("_stream_listen")
 
 
 def test_wake_and_barge_have_separate_module_caches():
@@ -149,6 +146,7 @@ def test_a_device_that_goes_private_releases_its_models():
 
     import em_controller   # imports without openwakeword since it became lazy
     import em_private_listen
+    import em_wake_listen
 
     dev = types.SimpleNamespace(device_id="d1", private_listening=True, mic_capable=True,
                                 listen_view=em_listen.ListenView(em_listen.STATE_LOCAL, False))
@@ -165,7 +163,7 @@ def test_a_device_that_goes_private_releases_its_models():
     real = em_private_listen.private_listen
     em_private_listen.private_listen = fake_private
     try:
-        asyncio.run(em_controller.wake_word_listener(dev))
+        asyncio.run(em_wake_listen.wake_word_listener(dev))
     finally:
         em_private_listen.private_listen = real
         em_state.devices.pop("d1", None)

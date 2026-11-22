@@ -1823,26 +1823,24 @@ def test_the_wake_listener_is_started_through_its_supervisor():
     that the call site goes through the supervisor, and nothing else enforces
     that.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     # The supervisor's OWN create_task is the one legitimate use, so check
     # everywhere else. Splitting on the def keeps this honest if the helper
     # moves.
-    start = src.index("def _supervise_wake_listener")
+    start = src.index("def supervise_wake_listener")
     end = src.index("async def wake_word_listener")
     outside = src[:start] + src[end:]
     assert "create_task(wake_word_listener(" not in outside, (
         "wake_word_listener started with a bare create_task outside its "
         "supervisor — an exception would end it silently and nothing would "
-        "restart it. Use _supervise_wake_listener()."
+        "restart it. Use em_wake_listen.supervise_wake_listener()."
     )
-    assert "_supervise_wake_listener(device)" in outside
+    assert "em_wake_listen.supervise_wake_listener(device)" in outside
 
 
 def test_the_supervisor_attaches_a_done_callback():
     """Without one the task ends and no code ever learns that it did."""
-    src = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("def _supervise_wake_listener"):]
-    body = body[:body.index("async def wake_word_listener")]
+    body = _sources.def_source("supervise_wake_listener")
     assert "add_done_callback" in body
     # A restart that ignores cancellation would fight ordinary teardown.
     assert "cancelled()" in body
@@ -1870,7 +1868,7 @@ def test_a_stuck_pause_can_be_recovered():
     turn is legitimate — the spinner TTL alone runs to 135s — and only the
     combination is impossible.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     assert "OWW_PAUSE_STUCK_S" in src
     assert "oww_paused_since" in src
     stuck = src[src.index("oww_paused stuck for") - 2000:
@@ -1974,7 +1972,7 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     ordering is the whole guard: a check placed after the claim would leave
     the claim taken.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     serves = body.index("can_serve_turn")
     claim  = body.index("await em_wake_claim.claim_wake(")
@@ -1993,7 +1991,7 @@ def test_the_button_path_stands_down_the_same_way():
     The button is what someone reaches for when the wake word appeared to do
     nothing, so answering it with silence is the worst version of this bug.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     assert src.count("esphome.can_serve_turn") >= 2, (
         "both the wake path and the button path must ask; a turn that cannot "
         "reach HA should never hold the voice lock"
@@ -2007,7 +2005,7 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
     when no other Echo took the utterance would make it disappear exactly on
     the multi-device fleets where the confusion is worst.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     stand = body.index("if not serves:")
     tail  = body[stand:stand + 2000]

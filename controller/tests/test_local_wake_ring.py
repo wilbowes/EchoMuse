@@ -77,8 +77,7 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
     goes plain dark. Slice to the ceding one specifically, or this passes on
     the wrong path's code.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    src = src[src.index("async def _stream_listen"):]
+    src = _sources.def_source("_stream_listen")
     branch = src[src.index("if not serves or won_by != device.device_id:"):]
     # The no-HA sub-branch ends at its own `continue`; ceding is what follows.
     stand = branch.index("if not serves:")

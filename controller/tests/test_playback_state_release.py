@@ -124,7 +124,7 @@ def test_the_wake_listener_still_gates_on_speaking():
     above stops being fatal and the tests above stop protecting anything — so
     a future reader should be told they moved together, not discover it.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     tree = ast.parse(src)
 
     found = False

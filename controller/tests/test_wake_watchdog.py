@@ -28,7 +28,7 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _listener_src() -> str:
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     start = src.index("async def wake_word_listener")
     return src[start:start + 30_000]
 
@@ -73,7 +73,7 @@ def test_past_the_grace_the_ladder_runs_zombie_repair():
 
 
 def test_both_time_sources_are_updated():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.def_source("_stream_listen")
     hd = _sources.code_only(_sources.def_source("em_controller.handle_data"))
     assert "device.data_connected_at =" in hd, \
         "handle_data must timestamp each new connection"
