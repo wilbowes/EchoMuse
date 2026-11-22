@@ -155,10 +155,10 @@ A backup `<db>.pre-v<N>.bak` is taken first, **N being the version left** (v32 �
 ## Controller audio pipeline
 
 1. **Wake word: two paths per Echo from its `listen_state`**
-   (docs/listening.md). `_private_listen`: turns run as tasks, never awaited
+   (docs/listening.md). `em_private_listen.private_listen`: turns run as tasks, never awaited
    (`_private_barge`); end of speech closes the session; session audio is
    routed by `SessionRouter`, never `oww_paused`; controller-only measures are
-   absent, not zero. `_stream_listen`: openwakeword per device on
+   absent, not zero. `em_wake_listen._stream_listen`: openwakeword per device on
    `mic_queue`, **lag bounded by frame age, never queue size**
    (`em_listen.skip_backlog`).
    **Arbitration** (`em_arbiter`): hold `ARB_HOLD_S` 250ms from first heard,
@@ -167,7 +167,7 @@ A backup `<db>.pre-v<N>.bak` is taken first, **N being the version left** (v32 �
    compared (missing, heard over own playback, differing gains). An Echo
    ringing a timer wins before either (#862). Do not return
    to SNR or first-detector-wins. **An Echo with no HA behind it stands down
-   BEFORE the claim** (`can_serve_turn` before `_claim_wake`, `test_deploy.py`)
+   BEFORE the claim** (`can_serve_turn` before `em_wake_claim.claim_wake`, `test_deploy.py`)
    and still records the wake and plays the cue (`record_dropped_wake`);
    `em_arbiter` knows nothing of it.
 2. **Voice turn**: drain → `voice_lock` → mic to HA → TTS → EQ → guard →
@@ -263,12 +263,13 @@ bursts gate on `speaker_busy`, dismissal sends `speaker_flush`,
 
 ## Key Python modules
 
-`docs/controller-modules.md` maps the em_api split. Modules covered in a
-section above are not repeated.
+`docs/controller-modules.md` maps the em_api and em_controller splits (old
+name → new module/name). Modules covered in a section above are not repeated.
 
 | File | Role and rules |
 |------|------|
-| `em_controller.py` | WebSocket server, `Device`, voice pipeline, mDNS. **Runs as `__main__`: nothing imports it by name** (`tests/test_loop_lag_reader.py`) |
+| `em_controller.py` | Entry point: WebSocket routing, `handle_control` (register, auth, teardown) with `CONTROL_HANDLERS`, mDNS, `main`. The only importer of em_api (`tests/test_layering.py`). **Runs as `__main__`: nothing imports it by name** (`tests/test_loop_lag_reader.py`) |
+| em_controller's parts (2026-11) | `em_wire` (link constants that must match the Echo), `em_device` (`Device`), `em_turn` (one voice turn), `em_wake_listen` (wake listener, stream loop), `em_private_listen` (docs/listening.md, controller side), `em_wake_claim`, `em_wake_model`, `em_barge_watcher`, `em_playback`, `em_alarm`, `em_leds`, `em_link_gate`, `em_planes` (/data, /shell), `em_control_handlers` (`on_<type>`), `em_button_events`. Pure decisions stay in their own modules (`em_barge`, `em_arbiter`, `em_linkauth`, `em_button`, `em_wakeword`) |
 | `em_api.py`, `em_routes_*.py` | `create_app` registers each route module's `register(app)`; shared below them: `em_http`, `em_events`, `em_shell`, `em_device_view`, `em_device_config`, `em_ota`, `em_emos_ota`, `em_oww_sync`, `em_reconcile`, `em_payloads`, `em_releases`, `em_process_stats` |
 | `em_state.py` | Process-wide live state; import it, not em_controller |
 | `em_boards.py` | Board → HA model. **Biscuit's model string never changes**; unknown → `Echo (<id>)` |

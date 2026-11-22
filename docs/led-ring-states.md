@@ -244,7 +244,7 @@ Mute is the reference implementation of principle 5, and its behaviour is
 > sends once its audio channel has drained after end of stream, and clears
 > the ring then. The analysis below is kept as the reason for that design.
 
-`_run_post_turn_playback` never learns when playback actually ended
+`em_playback.run_post_turn_playback` never learns when playback actually ended
 (`em_controller.py:746`):
 
 ```python
