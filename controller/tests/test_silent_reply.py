@@ -15,7 +15,8 @@ import _oww_stub
 
 _oww_stub.install()
 try:
-    import em_controller
+    import em_controller  # noqa: F401 — loads the chain under the stub
+    import em_leds
     import em_esphome
 finally:
     _oww_stub.uninstall()
@@ -100,8 +101,8 @@ def test_the_outcome_is_decided_before_the_no_tts_fallback():
 
 
 def test_a_silent_reply_ends_on_the_done_cue_not_the_error_cue():
-    assert em_controller._OUTCOME_ANIM["silent_reply"] == "done_anim"
-    assert em_controller._OUTCOME_ANIM["no_tts"] == "error_anim"
+    assert em_leds._OUTCOME_ANIM["silent_reply"] == "done_anim"
+    assert em_leds._OUTCOME_ANIM["no_tts"] == "error_anim"
 
 
 def test_the_done_cue_is_a_brief_solid_hold_in_the_scenes_own_colour():

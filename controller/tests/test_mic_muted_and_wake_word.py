@@ -199,7 +199,7 @@ def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
     assert "send_led_anim" not in setter and "set_leds" not in setter
     scenes = (ROOT / "controller" / "em_scenes.py").read_text()
     assert "wake_word" not in scenes
-    for fn in ("async def leds_off(", "async def _leds_turn_end("):
+    for fn in ("async def leds_off(", "async def leds_turn_end("):
         assert "wake_word_enabled" not in _block(src, fn, "\n\n\n")
 
 

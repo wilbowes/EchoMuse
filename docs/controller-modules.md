@@ -54,6 +54,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_system` | Routes: status, controller settings, support bundle. |
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
+| `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
@@ -449,6 +450,8 @@ Grouped by where each one lives now.
 | `_push_device_state` | `em_device.push_device_state` |
 | `DATA_RECONNECT_GRACE_S`, `RTT_EXCURSION_MS`, `OWW_MODEL`, `OWW_THRESHOLD` | `em_device` (same names) |
 | `_log_task_exception` | `em_tasks.log_exception` |
+| `leds_off`, `leds_listening`, `leds_spin_green`, `_make_leds`, `_OUTCOME_ANIM`, `NO_HA_HOLD_S`, `NUM_LEDS` | `em_leds` (same names) |
+| `_leds_turn_end` | `em_leds.leds_turn_end` |
 
 ## Moved out of em_esphome (2026-11)
 
