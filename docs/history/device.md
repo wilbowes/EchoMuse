@@ -1270,6 +1270,17 @@ enabled it and nothing happened" this removes.
   (e.g. 9.6 dB caught at 0.88, 9.7 and 10.5 dB missed at 0.07), so the misses
   are the model's all-or-nothing response at that SNR; residue-trained v3
   (11-20) did not move it.
+- 2026-11-22, model-agnostic front-end sweep on the same two donut rounds,
+  shipped Hey_Verona, barge catches by any mic (11-20 of 14 / 11-21 of 7):
+  make-up gain +6/+12/+18/+24 dB 5.75 / 1.75-2.25 (flat: the log-mel front
+  end does not care about level in this range); high-pass 200 Hz 5.75 / 1.75,
+  400 Hz 5.50 / 1.75 (no help); scoring at a 40 ms hop instead of 80 ms
+  6.00 / 3.00, +0.25 and +0.75 tries for double the scorer CPU across four
+  streams. Same audio through livekit-wakeword's conv-attention heads (#838,
+  same features, static [1,16,96] export): small 9.0 / 4.0, medium 7.5 / 4.0;
+  highest score over 31 s of reply with nobody talking (11-20): forge 0.05,
+  small 0.15, medium 0.59 (medium would false-barge). Needs an hour-long
+  reply soak before any of it goes on an Echo.
 
 ## The external audio jack
 
