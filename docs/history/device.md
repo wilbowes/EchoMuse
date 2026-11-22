@@ -1259,6 +1259,17 @@ enabled it and nothing happened" this removes.
   During playback both estimators failed on 15LE (0/7 agreement with the
   best mic; residual echo dominates), so direction must be taken before the
   reply. Scripts: scratchpad lockreplay.py, c95lock.py (not kept).
+- 2026-11-22, AEC3 rematch on the donut after the capture fixes (#975 does
+  not apply: the donut's loopback is clean), offline on 41C8 11-21 round 4
+  and 11-20 round 4, same mics, aligned reference and scorer. Removed during
+  reply, mean of 4 mics: speex (frame 160) 19.9 / 23.5 dB, AEC3 linear 10.0 /
+  16.9, AEC3 full 13.4 / 28.4. Barge catches by any mic over audio-found
+  tries: speex 2.25/7 and 5.75/14, AEC3 linear 0 and 1.75, AEC3 full 0 and 0
+  (its suppressor removes the talker with the echo). Speex stays. Same
+  rounds: missed and caught tries sit at the same ~10 dB over the residue
+  (e.g. 9.6 dB caught at 0.88, 9.7 and 10.5 dB missed at 0.07), so the misses
+  are the model's all-or-nothing response at that SNR; residue-trained v3
+  (11-20) did not move it.
 
 ## The external audio jack
 
