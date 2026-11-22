@@ -1,9 +1,9 @@
 """
-Deployment-shape guards — not logic tests. The controller Dockerfile
-COPYs each module explicitly, so a new em_*.py that works fine on bare
-metal crash-loops the container at import time if the COPY line is
-forgotten (bitten by em_scenes.py 2026-07-10 and em_oww_models.py
-2026-07-19).
+Deployment-shape guards — not logic tests. A module the controller
+Dockerfile does not COPY works fine on bare metal and crash-loops the
+container at import time (bitten by em_scenes.py 2026-07-10 and
+em_oww_models.py 2026-07-19, when each module had its own COPY line; one
+glob has copied them all since #1252).
 """
 
 import _sources
