@@ -148,6 +148,7 @@ def test_a_device_that_goes_private_releases_its_models():
     import types
 
     import em_controller   # imports without openwakeword since it became lazy
+    import em_private_listen
 
     dev = types.SimpleNamespace(device_id="d1", private_listening=True, mic_capable=True,
                                 listen_view=em_listen.ListenView(em_listen.STATE_LOCAL, False))
@@ -161,12 +162,12 @@ def test_a_device_that_goes_private_releases_its_models():
     em_state.devices["d1"] = dev
     em_state.oww_models["d1"] = ("m", False, object())
     em_state.oww_barge_models["d1"] = ("m", object())
-    real = em_controller._private_listen
-    em_controller._private_listen = fake_private
+    real = em_private_listen.private_listen
+    em_private_listen.private_listen = fake_private
     try:
         asyncio.run(em_controller.wake_word_listener(dev))
     finally:
-        em_controller._private_listen = real
+        em_private_listen.private_listen = real
         em_state.devices.pop("d1", None)
         em_state.oww_models.clear()
         em_state.oww_barge_models.clear()

@@ -105,9 +105,7 @@ def test_the_private_path_darkens_a_loser_and_cues_a_device_with_no_ha():
     """The same two exits on the private-listening path (docs/listening.md),
     which returns where the stream path continues. Both must also close the
     session, or the Echo keeps sending until its own ack timeout."""
-    src = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("async def _private_wake_turn"):]
-    body = body[:body.index("\nasync def ")]
+    body = _sources.def_source("_private_wake_turn")
     branch = body[body.index("if not serves or won_by != device.device_id:"):]
     branch = branch[:branch.index("await device.listen_ack(session)")]
     code = "\n".join(l for l in branch.splitlines() if not l.lstrip().startswith("#"))

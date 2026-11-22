@@ -538,7 +538,7 @@ def test_nothing_waits_when_the_announcement_already_ended():
 
 def test_the_private_listener_uses_the_rule():
     import _sources
-    body = _sources.code_only(_sources.def_source("_private_listen"))
+    body = _sources.code_only(_sources.def_source("private_listen"))
     assert "em_announce.wake_takes_turn(ev, device.barge_in_enabled)" in body
     assert "em_announce.stop_then_turn(device, ev, _private_wake_turn)" in body
     # Still declined when the rule says no.

@@ -145,7 +145,7 @@ def test_an_echo_with_no_mic_is_not_listened_to_and_gets_no_wake_word_install():
     loop = _sources.code_only(_sources.def_source("wake_word_listener"))
     no_mic, private = loop.find("device.mic_capable"), loop.find("device.private_listening")
     assert 0 <= no_mic < private, "the no-mic branch must come first"
-    waits = _sources.code_only(_sources.def_source("_no_mic"))
+    waits = _sources.code_only(_sources.def_source("no_mic"))
     assert "mic_start" not in waits
     sync = _sources.code_only(_sources.def_source("em_oww_sync.reconcile"))
     assert re.search(r"not live\.mic_capable", sync)

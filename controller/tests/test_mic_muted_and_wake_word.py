@@ -205,8 +205,7 @@ def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
 
 def test_a_private_wake_is_declined_with_the_wake_word_off():
     """The Echo scores its own wake word (#602), so each wake is declined, after the mic mute check and with its own reason."""
-    src = _sources.all_source()
-    turn = _block(src, "async def _private_wake_turn(", "\n\n\n")
+    turn = _sources.def_source("_private_wake_turn")
     gate = turn.index("if not device.wake_word_enabled:")
     close = turn.index('await device.listen_close(session, "wake_off")', gate)
     assert close < turn.index("Wake word detected"), \

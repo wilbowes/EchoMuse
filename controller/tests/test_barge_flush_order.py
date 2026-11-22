@@ -20,6 +20,7 @@ import em_device
 import em_controller  # noqa: E402 — must follow the stub
 import em_wake_claim  # noqa: E402
 import em_turn  # noqa: E402
+import em_private_listen  # noqa: E402
 import em_state  # noqa: E402
 from _sources import code_only, def_source  # noqa: E402
 
@@ -70,7 +71,7 @@ def test_a_private_barge_flushes_before_it_claims(monkeypatch, winner):
     monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
     monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-    asyncio.run(em_controller._private_barge(d, _wake_event()))
+    asyncio.run(em_private_listen._private_barge(d, _wake_event()))
 
     assert events == ["speaker_flush", "claim"]
     assert d.barge_ceded is (winner != "dev1")
@@ -91,7 +92,7 @@ def test_a_barge_while_thinking_sends_no_flush(monkeypatch):
     monkeypatch.setattr(em_controller.esphome, "cancel_voice_turn", lambda *_a, **_k: None)
     monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-    asyncio.run(em_controller._private_barge(d, _wake_event()))
+    asyncio.run(em_private_listen._private_barge(d, _wake_event()))
 
     assert events == ["claim"]
 
@@ -131,7 +132,7 @@ def test_the_turn_loop_waits_for_the_claim_a_flush_outran(monkeypatch, winner):
         monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
         monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-        barge = asyncio.create_task(em_controller._private_barge(d, _wake_event()))
+        barge = asyncio.create_task(em_private_listen._private_barge(d, _wake_event()))
         await flushed.wait()  # the reply has ended; the turn unwinds now
         await em_turn._await_barge_decision(d)
         seen = (d.cancel_event.is_set(), d.barge_ceded)
@@ -152,7 +153,7 @@ def test_the_turn_loop_waits_before_it_stops_the_watcher():
 def test_every_barge_exit_marks_the_decision_made():
     watcher = code_only(def_source("barge_watcher"))
     assert "finally:\n        device.barge_decided.set()" in watcher
-    listen = code_only(def_source("_private_listen"))
+    listen = code_only(def_source("private_listen"))
     assert "await _private_barge(device, ev)\n            finally:\n                device.barge_decided.set()" in listen
 
 
@@ -174,7 +175,7 @@ def test_a_private_barge_marks_the_turn_before_it_flushes(monkeypatch):
     monkeypatch.setattr(em_controller.esphome, "note_barged", lambda _id: events.append("barged"))
     monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-    asyncio.run(em_controller._private_barge(d, _wake_event()))
+    asyncio.run(em_private_listen._private_barge(d, _wake_event()))
 
     assert events == ["barged", "speaker_flush", "claim"]
 
