@@ -53,6 +53,7 @@ import em_eq
 import em_limiter
 import em_mbc
 import em_tasks
+import em_wire
 
 log = logging.getLogger("echomuse.player")
 # Under `echomuse.` on purpose (#378). It was the bare name "player", which
@@ -61,11 +62,12 @@ log = logging.getLogger("echomuse.player")
 # only by accident: with DEBUG unset the root level is INFO and a logger
 # with no level of its own inherits that.
 
-SPEAKER_RATE  = 48000
-SPEAKER_BYTES = 4096                     # bytes per 0x02 period (mono S16)
+# The music plane's frames are the voice plane's: one definition (em_wire).
+SPEAKER_RATE  = em_wire.SPEAKER_RATE
+SPEAKER_BYTES = em_wire.SPEAKER_BYTES    # bytes per 0x02 period (mono S16)
 BYTES_PER_SEC = SPEAKER_RATE * 2
-SPEAKER_FRAME_TYPE = 0x02
-SPEAKER_EOS_TYPE   = 0x03
+SPEAKER_FRAME_TYPE = em_wire.SPEAKER_FRAME_TYPE
+SPEAKER_EOS_TYPE   = em_wire.SPEAKER_EOS_TYPE
 
 # Music rides its own plane on firmware that can mix (the "audio_mix"
 # capability), so a voice turn ducks it instead of pausing it. On older
