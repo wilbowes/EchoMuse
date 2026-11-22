@@ -2187,7 +2187,8 @@ def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
     src = (CONTROLLER / "em_controller.py").read_text()
     wire = (CONTROLLER / "em_wire.py").read_text()
 
-    assert "em_wire.BLE_ADVERTS_TYPE" in src, "the data-plane frame code must be named"
+    assert "em_wire.BLE_ADVERTS_TYPE" in _sources.def_source("handle_data"), \
+        "the data-plane frame code must be named"
     # Double-quoted: the prose around it uses backticks, so this matches the
     # announcement itself rather than the comment explaining it.
     assert '"ble_adverts_data"' in wire, (
@@ -2205,7 +2206,7 @@ def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
 
     # The advert branch must precede the mic guards, which would otherwise
     # drop a 0x06 frame on the mic header-length test and lose it silently.
-    handler = src[src.index("async def handle_data"):]
+    handler = _sources.def_source("handle_data")
     ble = handler.index("em_wire.BLE_ADVERTS_TYPE")
     mic = handler.index("!= em_wire.MIC_FRAME_TYPE")
     assert ble < mic, (

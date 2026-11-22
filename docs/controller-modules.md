@@ -58,6 +58,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_link_gate` | Who may hold a device-link plane: token and TLS per WebSocket, /data and /shell following /control. |
+| `em_planes` | The /data and /shell planes of a connected Echo: mic frames, wake clips, BLE frames; the shell socket. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
 | `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
 | `em_private_listen` | Private listening, controller side: the listen report wait, the session loop, private wakes and barge-ins. |
@@ -483,6 +484,7 @@ Grouped by where each one lives now.
 | `wake_word_listener`, `_stream_listen`, `_after_model_release` | `em_wake_listen` (same names) |
 | `OWW_PAUSE_STUCK_S`, `FRESH_CONN_GRACE_S`, `WAKE_RESTART_BACKOFF_S`, `WAKE_RESTART_MAX_BACKOFF_S`, `WAKE_RESTART_HEALTHY_S` | `em_wake_listen` (same names) |
 | `handle_button_event` | `em_button_events` (same name) |
+| `handle_data`, `handle_shell`, `_store_wake_candidate`, `_persist_wake_candidate` | `em_planes` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 

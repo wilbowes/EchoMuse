@@ -74,7 +74,7 @@ def test_past_the_grace_the_ladder_runs_zombie_repair():
 
 def test_both_time_sources_are_updated():
     src = _sources.def_source("_stream_listen")
-    hd = _sources.code_only(_sources.def_source("em_controller.handle_data"))
+    hd = _sources.code_only(_sources.def_source("em_planes.handle_data"))
     assert "device.data_connected_at =" in hd, \
         "handle_data must timestamp each new connection"
     # Both ends anchored from the SAME start, or the slice silently inverts:
