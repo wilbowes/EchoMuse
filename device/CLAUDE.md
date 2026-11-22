@@ -148,6 +148,7 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
 | `pkg/board/` | Board identity (idme `device_type_id`), parts BY NAME, `Resolve`, emOS thermal tuning. `guard_test.go` fails on hardware numbers anywhere else |
 | `internal/wakeword/` | Pure-Go openWakeWord feature pipeline behind `Inferer`; golden fixture `testdata/` (`gen_fixture.py`) |
 | `internal/wakeword/ort/` | ONNX Runtime, **dlopen'd, never linked**, so a device without it boots. `DefaultOptions` (1 thread, XNNPACK, no spinning) is measured — more threads raise CPU |
+| `internal/wakeword/melnative/` | The melspectrogram on pffft (NEON), replacing ORT's for that one model: 29× cheaper on C95. Held to the golden fixture on the host and, at every load, to the installed model (`Checked`); disagreement keeps ORT and says why in the scorer's info. Shares `aec/src/pffft` under renamed symbols (`pffft_rename.h`): without it the link fails on duplicates |
 | `internal/wakeword/shadow/` | On-device scoring; `Push` never blocks |
 | `internal/wakeword/fixture/` | One tolerance policy for the host test and `tools/oww_probe`; tolerances relative to the tensor's scale |
 | `internal/listen/` | Private-listening gate and `Resolve`; pure, clock-injected |
