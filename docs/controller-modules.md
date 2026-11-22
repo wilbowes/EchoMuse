@@ -56,6 +56,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_barge_watcher` | The barge-in watcher: scores the mic during a reply and cuts it on the wake word. |
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
+| `em_link_gate` | Who may hold a device-link plane: token and TLS per WebSocket, /data and /shell following /control. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
 | `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
 | `em_wake_claim` | Claiming a wake when several Echoes heard it: arbitration windows, when a wake was heard, the claim. |
@@ -468,6 +469,8 @@ Grouped by where each one lives now.
 | `_claim_wake`, `_wake_heard_at`, `_wake_dating`, `_device_level` | `em_wake_claim.claim_wake`, `wake_heard_at`, `wake_dating`, `device_level` |
 | `_arbitration_slack`, `_arbitration_hold` | `em_wake_claim` (same names) |
 | `_barge_watcher` | `em_barge_watcher.barge_watcher` |
+| `_link_auth_ok`, `_presented_its_token`, `_not_from_control` | `em_link_gate.link_auth_ok`, `presented_its_token`, `not_from_control` |
+| `_peer_ip`, `REQUIRE_DEVICE_TLS` | `em_link_gate` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 
