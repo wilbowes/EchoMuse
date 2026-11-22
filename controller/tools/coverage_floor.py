@@ -6,7 +6,9 @@ controller em_*.py must be covered at least as well as its floor in
 tests/coverage_floor.json. A floor is a module's figure when it was last set,
 less one point for the run-to-run noise of timing-dependent branches, and is
 only ever raised. A module with no floor fails until one is set, so a new
-module's coverage is a decision someone made.
+module's coverage is a decision someone made. The one exception is a pure
+move: floors may be re-split between the modules it touches when their
+combined line coverage does not fall (CLAUDE.md, #1250).
 
     python -m pytest tests/ --cov --cov-report=json:coverage.json
     python tools/coverage_floor.py check coverage.json
