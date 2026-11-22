@@ -1281,6 +1281,18 @@ enabled it and nothing happened" this removes.
   highest score over 31 s of reply with nobody talking (11-20): forge 0.05,
   small 0.15, medium 0.59 (medium would false-barge). Needs an hour-long
   reply soak before any of it goes on an Echo.
+- 2026-11-22, false-barge soak on 41C8 (office, normal volume 71/127, 30
+  stories, 38.5 min of reply scored on the device's own scorer inputs, people
+  talking in another room): fires per model and rule, via
+  controller/tools/barge_replay.py. forge Hey_Verona 0.25/0.5: 1 (a tap at
+  0.49). livekit small 0.15/0.3: 20; 0.20/0.40: 1; 0.25/0.50: 0. livekit
+  medium 0.45/0.7: 2; 0.55/0.8: 1. Barge catches on the 11-20 / 11-21 rounds
+  for small: 9.0 / 4.0 at 0.15/0.3, 8.5 / 4.0 at 0.20/0.40, 7.5 / 4.0 at
+  0.25/0.50 (forge 5.75 / 2.25). So small at the shipped barge rule is the
+  candidate; medium false-barges. Open: its idle wake threshold. On
+  synthetic positives small at 0.50 recalled 10% vs forge 26% (#838 results),
+  and the wake threshold is also the barge rule's one-frame bar, so quiet
+  wakes at 0.5 vs 0.3 need a real-voice round before it ships.
 
 ## The external audio jack
 
