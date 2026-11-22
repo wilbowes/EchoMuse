@@ -1292,7 +1292,9 @@ enabled it and nothing happened" this removes.
   candidate; medium false-barges. Open: its idle wake threshold. On
   synthetic positives small at 0.50 recalled 10% vs forge 26% (#838 results),
   and the wake threshold is also the barge rule's one-frame bar, so quiet
-  wakes at 0.5 vs 0.3 need a real-voice round before it ships.
+  wakes at 0.5 vs 0.3 need a real-voice round before it ships. Wil listened
+  to all four fires at realistic bars: reply residue in every one, none the
+  people talking elsewhere, so they are true false barges (forge ~1.6/h).
 
 ## The external audio jack
 
