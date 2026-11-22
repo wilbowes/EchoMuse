@@ -317,4 +317,4 @@ def test_a_muted_device_still_runs_the_turn_rather_than_going_silent():
         "a muted device refuses the conversation by returning — HA's "
         "ask_question will then wait on its answer future forever"
     )
-    assert "_run_voice_locked" in body
+    assert "em_turn.run_voice_locked" in body

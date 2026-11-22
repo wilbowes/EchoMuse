@@ -420,8 +420,7 @@ def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
 
     The spinner must therefore stay up until the meter has something to show.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.def_source("run_voice_locked")
     fn = src[src.index("async def post_turn_play_esphome"):]
     fn = fn[:fn.index("\n            # P0-1")]
 
@@ -2270,7 +2269,7 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
 
     Folding them into one flag is how both devices answered.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.def_source("run_voice_locked")
     assert "barge_ceded" in src, "the ceded case needs its own flag"
 
     # The ceded branch must be tested BEFORE the branch that starts the
@@ -2297,7 +2296,7 @@ def test_the_no_ha_barge_records_where_nothing_overwrites_it():
     before the ring reads it. The branch also has to clear `barge_detected`
     first, because `_leds_turn_end` suppresses its own cue while it is set.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.def_source("run_voice_locked")
     ceded = src.index("device.barge_detected and device.barge_ceded")
     start = src.index("Barge-in: starting interrupting turn")
     branch = src[ceded:start]

@@ -13,7 +13,7 @@ import em_ble_gatt
 # Mic
 CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
 # NOTE: VOICE_PREROLL_DISCARD lives in em_esphome.py (esphome.VOICE_PREROLL_DISCARD)
-# — it's used there in _stream_mic_audio, and _run_voice_locked below reads it
+# — it's used there in _stream_mic_audio, and em_turn.run_voice_locked reads it
 # via that single source of truth rather than keeping a second copy here that
 # could drift out of sync (a duplicate here was previously dead code — see
 # v2.6.3 changelog — resist the temptation to reintroduce it).

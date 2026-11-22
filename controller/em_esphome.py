@@ -2619,7 +2619,7 @@ async def trigger_voice_turn(
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
 
-    Called from em_controller._run_voice_locked(). Finds the active HA
+    Called from em_turn.run_voice_locked(). Finds the active HA
     connection for this device and delegates to
     EchoMuseSatellite.run_esphome_voice_turn().
 
