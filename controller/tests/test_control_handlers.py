@@ -23,6 +23,7 @@ import _oww_stub
 
 _oww_stub.install()
 
+import em_device
 import em_controller  # noqa: E402 — must follow the stub
 
 SPEC = Path(__file__).resolve().parents[2] / "docs" / "device-controller-interface.md"
@@ -37,7 +38,7 @@ def _drop_the_stub():
 
 
 def _device(device_id="dev1"):
-    return em_controller.Device(device_id, "10.0.0.1", [], None)
+    return em_device.Device(device_id, "10.0.0.1", [], None)
 
 
 def _run(coro):

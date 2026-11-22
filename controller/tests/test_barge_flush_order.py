@@ -16,6 +16,7 @@ import _oww_stub
 
 _oww_stub.install()
 
+import em_device
 import em_controller  # noqa: E402 — must follow the stub
 import em_state  # noqa: E402
 from _sources import code_only, def_source  # noqa: E402
@@ -28,7 +29,7 @@ def _drop_the_stub():
 
 
 def _barging_device(events, monkeypatch):
-    d = em_controller.Device("dev1", "10.0.0.1", [], None)
+    d = em_device.Device("dev1", "10.0.0.1", [], None)
     d.speaking = True
     d.barge_in_enabled = True
     d.wake_arb_ms = 700

@@ -285,7 +285,9 @@ em_controller imports em_api; `em_routes_*` only from em_api and each other;
 base modules never reach upward), `tests/test_size_ratchet.py` (modules over
 1,500 lines or functions over 150 may not grow; `controller/tools/size_ratchet.py
 --update` after a shrink; a raise goes in the same change), and
-`tests/coverage_floor.json` (never lowered; a new module needs a floor).
+`tests/coverage_floor.json` (never lowered; a new module needs a floor; a pure
+move may re-split floors between the modules involved only if their combined
+line coverage does not fall, with both figures in the commit).
 
 **emOS's off-target tools ARE its suite**: each `#include`s `init.c` and drives
 the real functions. Add one wherever a wrong answer is SILENT on hardware. CI

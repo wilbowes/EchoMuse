@@ -155,7 +155,7 @@ def test_controller_and_device_announce_the_same_name():
 
 
 def test_frames_go_only_to_a_device_that_announced_it():
-    send = _func("em_controller.py", "send_gatt", "Device")
+    send = _func("em_device.py", "send_gatt", "Device")
     assert "self.ble_connect_capable" in ast.unparse(send)
     data = (CONTROLLER.parent / "device/internal/client/data.go").read_text()
     assert "frameTypeBleGatt = byte(0x08)" in data

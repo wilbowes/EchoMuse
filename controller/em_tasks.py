@@ -40,3 +40,21 @@ def _finished(task: asyncio.Task) -> None:
 def live_count() -> int:
     """Tasks started with spawn and not yet finished."""
     return len(_live)
+
+
+def log_exception(task: asyncio.Task) -> None:
+    """
+    Standard done-callback for fire-and-forget asyncio.create_task() calls.
+
+    Without this, an exception raised inside a task nobody awaits vanishes
+    silently — asyncio only surfaces it via a "Task exception was never
+    retrieved" warning at garbage-collection time, easy to miss in normal
+    logs. Attach via task.add_done_callback(_log_task_exception) at every
+    fire-and-forget create_task() call site (see M1 in the 2026-07-05
+    review — currently applied to the button-triggered voice turn task).
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error(f"Unhandled exception in background task {task.get_name()}: {exc}", exc_info=exc)
