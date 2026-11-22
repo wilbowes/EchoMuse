@@ -37,7 +37,7 @@ log = logging.getLogger("echomuse.announce")
 # replies, rather than leaving HA holding _is_announcing.
 #
 # The layer below is already bounded (audio_duration * 2 + 10s in
-# em_controller._run_post_turn_playback), which is what the layer below always
+# em_playback.run_post_turn_playback), which is what the layer below always
 # looks like.
 ANNOUNCE_TIMEOUT_S = 120.0
 
