@@ -20,6 +20,7 @@
  "em_console_pw.py": 80.0,
  "em_controller.py": 13.0,
  "em_crashlog.py": 99.0,
+ "em_control_handlers.py": 27.0,
  "em_credentials.py": 31.0,
  "em_db.py": 78.0,
  "em_dbwriter.py": 92.0,

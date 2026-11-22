@@ -247,7 +247,7 @@ def test_the_stored_rule_runs_where_the_device_reports_listening():
     """On the listen_state report, not at registration: syncListenState is sent
     after the ack, so at connect time listen_reported is still None and a check
     there reads "not private" for a private Echo."""
-    _, branch = _sources.find_def("_on_listen_state")
+    _, branch = _sources.find_def("on_listen_state")
 
     assert any("stored_off_unsupported" in ast.unparse(n)
                for n in ast.walk(branch)), (
@@ -375,7 +375,7 @@ def test_home_assistant_is_made_to_read_a_state_it_did_not_set():
 
 
 def test_the_temporary_on_refreshes_home_assistant():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     at = src.index("em_wakeword.stored_off_unsupported(")
     assert "update_wake_word(device_id, True, refresh=True)" in src[at:at + 600]
     esp = (CONTROLLER / "em_esphome.py").read_text()

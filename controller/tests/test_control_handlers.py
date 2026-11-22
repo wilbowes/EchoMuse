@@ -25,6 +25,7 @@ _oww_stub.install()
 
 import em_device
 import em_controller  # noqa: E402 — must follow the stub
+import em_control_handlers
 
 SPEC = Path(__file__).resolve().parents[2] / "docs" / "device-controller-interface.md"
 
@@ -100,7 +101,7 @@ def test_a_light_change_before_the_first_stats_report_still_reaches_ha(lux_pushe
     a light switched on in the first ~30s after connect never reached HA."""
     d = _device()
     assert d.stats is None
-    _run(em_controller._on_ambient_light(d, {"type": "ambient_light", "lux": 42}))
+    _run(em_control_handlers.on_ambient_light(d, {"type": "ambient_light", "lux": 42}))
     assert lux_pushes == [("dev1", 42)]
     assert d.stats is None, "a lux reading is not a stats report"
 
@@ -108,7 +109,7 @@ def test_a_light_change_before_the_first_stats_report_still_reaches_ha(lux_pushe
 def test_a_light_change_updates_the_held_stats(lux_pushes):
     d = _device()
     d.stats = {"cpu": 10, "ambientLux": 3}
-    _run(em_controller._on_ambient_light(d, {"type": "ambient_light", "lux": 400}))
+    _run(em_control_handlers.on_ambient_light(d, {"type": "ambient_light", "lux": 400}))
     assert d.stats == {"cpu": 10, "ambientLux": 400}
     assert lux_pushes == [("dev1", 400)]
 
@@ -118,15 +119,15 @@ def test_a_reading_that_is_not_an_integer_is_ignored(lux_pushes, lux):
     d = _device()
     d.stats = {}
     msg = {"type": "ambient_light"} if lux is None else {"type": "ambient_light", "lux": lux}
-    _run(em_controller._on_ambient_light(d, msg))
+    _run(em_control_handlers.on_ambient_light(d, msg))
     assert lux_pushes == [] and d.stats == {}
 
 
 # ── answers to a request the controller is waiting on ───────────────────────
 
 @pytest.mark.parametrize("handler, attr", [
-    ("_on_sendspin_token", "sendspin_token_waiter"),
-    ("_on_wifi_scan_result", "wifi_scan_future"),
+    ("on_sendspin_token", "sendspin_token_waiter"),
+    ("on_wifi_scan_result", "wifi_scan_future"),
 ])
 def test_an_answer_resolves_the_waiting_request(handler, attr):
     async def go():
@@ -134,24 +135,24 @@ def test_an_answer_resolves_the_waiting_request(handler, attr):
         fut = asyncio.get_running_loop().create_future()
         setattr(d, attr, fut)
         msg = {"type": "x", "payload": 1}
-        await getattr(em_controller, handler)(d, msg)
+        await getattr(em_control_handlers, handler)(d, msg)
         assert fut.result() is msg
     _run(go())
 
 
 @pytest.mark.parametrize("handler, attr", [
-    ("_on_sendspin_token", "sendspin_token_waiter"),
-    ("_on_wifi_scan_result", "wifi_scan_future"),
+    ("on_sendspin_token", "sendspin_token_waiter"),
+    ("on_wifi_scan_result", "wifi_scan_future"),
 ])
 def test_an_answer_nobody_is_waiting_for_is_dropped(handler, attr):
     async def go():
         d = _device()
         setattr(d, attr, None)
-        await getattr(em_controller, handler)(d, {"type": "x"})   # must not raise
+        await getattr(em_control_handlers, handler)(d, {"type": "x"})   # must not raise
         done = asyncio.get_running_loop().create_future()
         done.set_result("first")
         setattr(d, attr, done)
-        await getattr(em_controller, handler)(d, {"type": "x"})   # nor here
+        await getattr(em_control_handlers, handler)(d, {"type": "x"})   # nor here
         assert done.result() == "first"
     _run(go())
 
@@ -164,8 +165,8 @@ def test_a_device_log_line_is_relayed_once_with_its_level(monkeypatch):
     async def push(device_id, level, source, message):
         sent.append((device_id, level, source, message))
     monkeypatch.setattr(em_controller.em_events, "push_log", push)
-    _run(em_controller._on_log(_device(), {"type": "log", "level": "warn", "message": "m"}))
-    _run(em_controller._on_log(_device(), {"type": "log"}))
+    _run(em_control_handlers.on_log(_device(), {"type": "log", "level": "warn", "message": "m"}))
+    _run(em_control_handlers.on_log(_device(), {"type": "log"}))
     assert sent == [("dev1", "warn", "device", "m"), ("dev1", "info", "device", "")]
 
 
@@ -176,12 +177,12 @@ def test_sendspin_status_is_held_and_pushed(monkeypatch):
         events.append(event)
     monkeypatch.setattr(em_controller.em_events, "push", push)
     d = _device()
-    _run(em_controller._on_sendspin_status(d, {"type": "sendspin_status",
+    _run(em_control_handlers.on_sendspin_status(d, {"type": "sendspin_status",
                                                "status": {"state": "playing"}}))
     assert d.sendspin == {"state": "playing"}
     assert events == [{"type": "device_update", "device_id": "dev1",
                        "state": {"sendspin": {"state": "playing"}}}]
-    _run(em_controller._on_sendspin_status(d, {"type": "sendspin_status", "status": None}))
+    _run(em_control_handlers.on_sendspin_status(d, {"type": "sendspin_status", "status": None}))
     assert d.sendspin is None, "null means the player stopped"
 
 
@@ -202,7 +203,7 @@ def test_a_solicited_pong_records_one_rtt_sample():
         d = _device()
         d.ping_sent[7] = asyncio.get_running_loop().time() - 0.05
         d.ping_busy[7] = False
-        await em_controller._on_pong(d, {"type": "pong", "id": 7})
+        await em_control_handlers.on_pong(d, {"type": "pong", "id": 7})
         assert 7 not in d.ping_sent and 7 not in d.ping_busy
         return d.drain_rtt()
     window = _run(go())
@@ -215,6 +216,6 @@ def test_an_unsolicited_pong_is_not_a_measurement():
     an RTT."""
     d = _device()
     d.ping_sent[7] = 0.0
-    _run(em_controller._on_pong(d, {"type": "pong"}))
-    _run(em_controller._on_pong(d, {"type": "pong", "id": 8}))
+    _run(em_control_handlers.on_pong(d, {"type": "pong"}))
+    _run(em_control_handlers.on_pong(d, {"type": "pong", "id": 8}))
     assert d.ping_sent == {7: 0.0}
