@@ -14,7 +14,7 @@ because openwakeword seeds its feature buffer with random noise in the
 constructor; without the seed the two models start differently and any
 difference measures that instead.
 
-The controller trims through em_controller._trim_oww_raw_buffer (#176) to
+The controller trims through em_wake_model.trim_raw_buffer (#176) to
 the same 8*1280+480 samples used here. Needs openwakeword, which the
 controller test venv does not install: run it where the controller's
 dependencies are (the controller image, or any venv with openwakeword),

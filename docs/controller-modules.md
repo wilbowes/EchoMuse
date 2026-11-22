@@ -57,6 +57,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
 | `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
+| `em_wake_model` | The controller-scored wake and barge models per Echo: cache, reset off the loop, buffer trim. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
@@ -459,6 +460,9 @@ Grouped by where each one lives now.
 | `start_timer_alarm`, `stop_timer_alarm` | `em_alarm` (same names) |
 | `_ringing_devices`, `_hold_alarms`, `_dismiss_by_speech` | `em_alarm.ringing_devices`, `hold_alarms`, `dismiss_by_speech` |
 | `_release_alarm_holds`, `_ring_timer_alarm`, `_alarm_burst_pcm`, `_wait_for_turn_audio`, `_alarm_pcm_cache`, `_ALARM_HOLD_MARGIN_S` | `em_alarm` (same names) |
+| `_reset_wake_model`, `_trim_oww_raw_buffer` | `em_wake_model.reset_model`, `trim_raw_buffer` |
+| `_acquire_wake_model`, `_acquire_barge_model` | `em_wake_model.acquire_wake_model`, `acquire_barge_model` |
+| `_OWW_RAW_BUFFER_KEEP` | `em_wake_model` (same name) |
 
 ## Moved out of em_esphome (2026-11)
 

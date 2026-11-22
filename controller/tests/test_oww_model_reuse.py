@@ -22,7 +22,7 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _controller_src() -> str:
-    return (CONTROLLER / "em_controller.py").read_text()
+    return _sources.all_source()
 
 
 def _listener_src() -> str:
@@ -66,7 +66,7 @@ def test_wake_listener_acquires_from_cache_not_a_bare_constructor():
     # The whole bug was `OWWModel(...)` inline in the listener. Both the initial
     # load and the reload path must go through the cache helper instead.
     listener = _listener_src()
-    assert "_acquire_wake_model(" in listener, \
+    assert "em_wake_model.acquire_wake_model(" in listener, \
         "the listener must acquire its model from the cache"
     for ctor in ("OWWModel(", "em_oww_models.model_class()("):
         assert ctor not in listener, \
@@ -79,9 +79,9 @@ def test_reused_model_is_reset_but_a_fresh_one_is_not():
     # reset to equal a fresh build — but a freshly built one must NOT be, or
     # the un-warmed WarmupGate beside it would be wrong.
     src = _controller_src()
-    acq = src.index("async def _acquire_wake_model")
+    acq = src.index("async def acquire_wake_model")
     body = src[acq:src.index("async def ", acq + 1)]
-    hit = body.index("_reset_wake_model(model)")
+    hit = body.index("reset_model(model)")
     build = body.index("em_oww_models.model_class()(")
     assert hit < build, \
         "the cache hit must reset() before the miss path builds a new model"
@@ -103,7 +103,7 @@ def test_wake_routing_is_not_held_behind_the_reset():
     # Frames that arrive while the reset runs must already route to the turn;
     # awaiting it before oww_paused.set() drains the start of the command.
     listener = _listener_src()
-    start = listener.index("model_reset = _reset_wake_model(model)")
+    start = listener.index("model_reset = em_wake_model.reset_model(model)")
     route = listener.index("device.oww_paused.set()", start)
     assert "await model_reset" not in listener[start:route]
 
@@ -135,7 +135,7 @@ def test_barge_watcher_uses_the_cache():
     src = _controller_src()
     watcher = src[src.index("async def _barge_watcher"):]
     watcher = watcher[:watcher.index("async def ", 1)]
-    assert "_acquire_barge_model(" in watcher, \
+    assert "em_wake_model.acquire_barge_model(" in watcher, \
         "the barge watcher must acquire its model from the cache"
     assert "OWWModel(" not in watcher, \
         "the barge watcher must not construct OWWModel directly"
