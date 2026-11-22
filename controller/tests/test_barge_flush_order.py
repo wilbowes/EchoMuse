@@ -18,6 +18,7 @@ _oww_stub.install()
 
 import em_device
 import em_controller  # noqa: E402 — must follow the stub
+import em_wake_claim  # noqa: E402
 import em_state  # noqa: E402
 from _sources import code_only, def_source  # noqa: E402
 
@@ -63,10 +64,10 @@ def test_a_private_barge_flushes_before_it_claims(monkeypatch, winner):
         events.append("claim")
         return winner
 
-    monkeypatch.setattr(em_controller, "_claim_wake", claim)
+    monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
     monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
     monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
-    monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+    monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
     asyncio.run(em_controller._private_barge(d, _wake_event()))
 
@@ -84,10 +85,10 @@ def test_a_barge_while_thinking_sends_no_flush(monkeypatch):
         events.append("claim")
         return "dev1"
 
-    monkeypatch.setattr(em_controller, "_claim_wake", claim)
+    monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
     monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
     monkeypatch.setattr(em_controller.esphome, "cancel_voice_turn", lambda *_a, **_k: None)
-    monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+    monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
     asyncio.run(em_controller._private_barge(d, _wake_event()))
 
@@ -99,7 +100,7 @@ def test_the_stream_watcher_flushes_before_it_claims():
     # in the source: exactly one flush, ahead of the claim.
     src = code_only(def_source("_barge_watcher"))
     assert src.count("speaker_flush") == 1
-    assert src.index("speaker_flush") < src.index("_claim_wake(")
+    assert src.index("speaker_flush") < src.index("em_wake_claim.claim_wake(")
 
 
 # The flush ends the reply, so the device reports playback complete and the
@@ -124,10 +125,10 @@ def test_the_turn_loop_waits_for_the_claim_a_flush_outran(monkeypatch, winner):
             return winner
 
         monkeypatch.setattr(d, "send_control", send_control)
-        monkeypatch.setattr(em_controller, "_claim_wake", claim)
+        monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
         monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
         monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
-        monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+        monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
         barge = asyncio.create_task(em_controller._private_barge(d, _wake_event()))
         await flushed.wait()  # the reply has ended; the turn unwinds now
@@ -166,11 +167,11 @@ def test_a_private_barge_marks_the_turn_before_it_flushes(monkeypatch):
         events.append("claim")
         return "dev1"
 
-    monkeypatch.setattr(em_controller, "_claim_wake", claim)
+    monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
     monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
     monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
     monkeypatch.setattr(em_controller.esphome, "note_barged", lambda _id: events.append("barged"))
-    monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+    monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
     asyncio.run(em_controller._private_barge(d, _wake_event()))
 

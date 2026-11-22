@@ -97,6 +97,7 @@
  "em_turn_record.py": 30.0,
  "em_turnclock.py": 99.0,
  "em_volume.py": 99.0,
+ "em_wake_claim.py": 50.0,
  "em_wake_model.py": 50.0,
  "em_wake_samples.py": 85.0,
  "em_wakelevel.py": 99.0,
