@@ -54,6 +54,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_system` | Routes: status, controller settings, support bundle. |
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
 | `em_barge_watcher` | The barge-in watcher: scores the mic during a reply and cuts it on the wake word. |
+| `em_button_events` | What an Action-button press does: start or cancel a turn, dismiss an alarm, pass a gesture to HA. |
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_link_gate` | Who may hold a device-link plane: token and TLS per WebSocket, /data and /shell following /control. |
@@ -481,6 +482,7 @@ Grouped by where each one lives now.
 | `_supervise_wake_listener` | `em_wake_listen.supervise_wake_listener` |
 | `wake_word_listener`, `_stream_listen`, `_after_model_release` | `em_wake_listen` (same names) |
 | `OWW_PAUSE_STUCK_S`, `FRESH_CONN_GRACE_S`, `WAKE_RESTART_BACKOFF_S`, `WAKE_RESTART_MAX_BACKOFF_S`, `WAKE_RESTART_HEALTHY_S` | `em_wake_listen` (same names) |
+| `handle_button_event` | `em_button_events` (same name) |
 
 ## Moved out of em_esphome (2026-11)
 

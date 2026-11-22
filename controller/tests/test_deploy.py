@@ -688,8 +688,7 @@ def test_every_deliberate_cancel_also_flushes_the_speaker():
     in one of three places), and fixing them one at a time is how the second
     one survived the first.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     # Each deliberate cancel site, identified by its log line / guard, paired
     # with how far to look for the flush that must accompany it.
