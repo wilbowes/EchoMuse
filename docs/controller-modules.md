@@ -55,6 +55,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
+| `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
 | `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
@@ -452,6 +453,8 @@ Grouped by where each one lives now.
 | `_log_task_exception` | `em_tasks.log_exception` |
 | `leds_off`, `leds_listening`, `leds_spin_green`, `_make_leds`, `_OUTCOME_ANIM`, `NO_HA_HOLD_S`, `NUM_LEDS` | `em_leds` (same names) |
 | `_leds_turn_end` | `em_leds.leds_turn_end` |
+| `_run_post_turn_playback`, `_run_streaming_post_turn_playback`, `_meter_at_playback_start` | `em_playback.run_post_turn_playback`, `run_streaming_post_turn_playback`, `meter_at_playback_start` |
+| `_limiter_for`, `_guard_for` | `em_playback` (same names) |
 
 ## Moved out of em_esphome (2026-11)
 

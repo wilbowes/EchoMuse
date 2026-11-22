@@ -370,10 +370,7 @@ def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
     computes to ~0 and the wait disappears while up to ~5.5s is queued in
     audioChanDepth.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
-    fn = src[src.index("async def _run_streaming_post_turn_playback"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    fn = _sources.def_source("run_streaming_post_turn_playback")
 
     # Named on the API rather than on a variable: `playback_done` was a single
     # Event on the Device and became a queue of per-playback waiters (#373), so
@@ -404,8 +401,7 @@ def test_send_ms_stays_socket_write_time():
     assert "send_seconds" in fn, \
         "socket-write time must be accumulated around the send calls"
 
-    caller = src[src.index("async def _run_streaming_post_turn_playback"):]
-    caller = caller[:caller.index("\nasync def ", 1)]
+    caller = _sources.def_source("run_streaming_post_turn_playback")
     assert "device.playback_send_ms = send_ms" in caller, \
         "send_ms must come from accumulated write time, not the loop duration"
 
@@ -429,7 +425,7 @@ def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
     fn = src[src.index("async def post_turn_play_esphome"):]
     fn = fn[:fn.index("\n            # P0-1")]
 
-    assert "_meter_at_playback_start(pcm_chunks" in fn, \
+    assert "em_playback.meter_at_playback_start(pcm_chunks" in fn, \
         "the meter must be gated on the first audio reaching the device"
 
     # A meter send is legitimate inside the nested helpers (_meter_on, and the
@@ -448,7 +444,7 @@ def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
     fire the callback too, or short answers play with no ring at all.
     """
     import _sources
-    fn = _sources.def_source("_meter_at_playback_start")
+    fn = _sources.def_source("meter_at_playback_start")
 
     body = fn.split("async for")[1]
     assert "if not fired:" in body.rsplit("\n", 4)[-4:][0] or "if not fired" in body, \
@@ -1691,7 +1687,7 @@ def test_an_announcement_clears_the_cancel_flag_before_playing():
     # The literal calls, not the prose: this function's comments name
     # _run_post_turn_playback before either call happens.
     clear = body.find("_d.cancel_event.clear()")
-    play = body.find("await _run_post_turn_playback(")
+    play = body.find("await em_playback.run_post_turn_playback(")
     assert clear != -1, (
         "an announcement no longer clears cancel_event — a cancelled turn "
         "will silently kill every announcement that follows it"
@@ -1769,7 +1765,7 @@ def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
             f"when the audio does"
         )
 
-    for fn_name in ("_run_post_turn_playback", "_run_streaming_post_turn_playback"):
+    for fn_name in ("run_post_turn_playback", "run_streaming_post_turn_playback"):
         fn = _sources.def_source(fn_name)
         assert "_set_speaking(False)" in fn, (
             f"{fn_name} waits for the device's playback_stats and must be what "

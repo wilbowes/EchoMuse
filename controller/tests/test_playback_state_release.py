@@ -30,11 +30,13 @@ this suite (see the source-guard notes in test_deploy.py).
 import ast
 from pathlib import Path
 
+import _sources
+
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
 def _function(name: str) -> ast.AsyncFunctionDef:
-    tree = ast.parse((CONTROLLER / "em_controller.py").read_text())
+    tree = _sources.tree(_sources.find_def(name)[0])
     for node in ast.walk(tree):
         if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == name:
             return node
@@ -61,13 +63,13 @@ def test_speaking_is_cleared_in_a_finally():
     inside a finally. Anywhere else and a dismissed alarm leaves the device
     deaf until the controller restarts.
     """
-    fn = _function("_run_post_turn_playback")
+    fn = _function("run_post_turn_playback")
 
     in_finally = any(
         "_set_speaking" in _calls_in(t.finalbody) for t in _try_blocks(fn)
     )
     assert in_finally, (
-        "_run_post_turn_playback must clear `speaking` from a finally. "
+        "run_post_turn_playback must clear `speaking` from a finally. "
         "Cancellation skips anything after the try, and the wake listener "
         "goes deaf while the flag is set."
     )
@@ -75,7 +77,7 @@ def test_speaking_is_cleared_in_a_finally():
 
 def test_speaker_busy_is_cleared_in_a_finally():
     """The sibling invariant, and the one that was already right."""
-    fn = _function("_run_post_turn_playback")
+    fn = _function("run_post_turn_playback")
 
     released = False
     for t in _try_blocks(fn):
@@ -98,7 +100,7 @@ def test_the_clear_survives_the_cancellation_that_triggered_it():
     shield must be the thing wrapping the _set_speaking call rather than
     something else in the same block.
     """
-    fn = _function("_run_post_turn_playback")
+    fn = _function("run_post_turn_playback")
 
     shielded = False
     for t in _try_blocks(fn):
