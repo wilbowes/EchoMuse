@@ -2039,9 +2039,8 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
     decision itself is already covered by `em_barge.cede` — what is not
     covered is whether the watcher acts on it, and where.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    for name in ("_barge_watcher", "_private_barge"):
-        fn = _fn_body(src, name)
+    for name in ("barge_watcher", "_private_barge"):
+        fn = _sources.def_source(name)
         assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
         assert "(not serves) or won_by !=" not in fn, (
             f"{name} has the decision inlined again — two copies of a "
@@ -2247,9 +2246,7 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     `window_s` (300-700ms), not held until `release()`, so it expired seconds
     before anyone talked over the answer.
     """
-    src  = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("async def _barge_watcher"):]
-    body = body[:body.index("\nasync def ", 1)]
+    body = _sources.def_source("barge_watcher")
 
     assert "await em_wake_claim.claim_wake(" in body, (
         "the barge watcher must arbitrate — without it a second Echo answers "
