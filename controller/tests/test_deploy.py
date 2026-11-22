@@ -8,6 +8,7 @@ forgotten (bitten by em_scenes.py 2026-07-10 and em_oww_models.py
 
 import _sources
 import ast
+import fnmatch
 import re
 from pathlib import Path
 
@@ -16,9 +17,13 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 def test_dockerfile_copies_every_controller_module():
     dockerfile = (CONTROLLER / "Dockerfile").read_text()
-    copied = set(re.findall(r"^COPY\s+(\S+\.py)\s", dockerfile, re.M))
+    # Sources of each COPY into the app directory (globs allowed, one layer for
+    # all modules), never --from stages or directories.
+    patterns = [src for line in re.findall(r"^COPY\s+(?!--)(.+)$", dockerfile, re.M)
+                for src in line.split()[:-1] if src.endswith(".py")]
     modules = {p.name for p in CONTROLLER.glob("em_*.py")} | {"version.py"}
-    missing = sorted(modules - copied)
+    missing = sorted(m for m in modules
+                     if not any(fnmatch.fnmatchcase(m, pat) for pat in patterns))
     assert not missing, (
         f"Dockerfile is missing COPY lines for {missing} — the container "
         f"will crash-loop at import time"

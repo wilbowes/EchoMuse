@@ -121,106 +121,9 @@ RUN mkdir -p /app/static/vendor/fonts && \
 ARG EM_CONTROLLER_VERSION=dev
 ENV EM_CONTROLLER_VERSION=$EM_CONTROLLER_VERSION
 # Controller source
-COPY em_controller.py .
-COPY em_api.py .
-COPY em_db.py .
-COPY em_boards.py .
-COPY em_auth.py .
-COPY em_eq.py .
-COPY em_limiter.py .
-COPY em_mbc.py .
-COPY em_output_mute.py .
-COPY em_scenes.py .
-COPY em_support.py .
-COPY em_shadow.py .
-COPY em_wake_samples.py .
-COPY em_barge.py .
-COPY em_earlytts.py .
-COPY em_ns.py .
-COPY em_speechgate.py .
-COPY em_wav.py .
-COPY em_pki.py .
-COPY em_hostip.py .
-COPY em_ingressauth.py .
-COPY em_routes_activity.py .
-COPY em_routes_auth.py .
-COPY em_routes_config.py .
-COPY em_routes_devices.py .
-COPY em_routes_events.py .
-COPY em_routes_link.py .
-COPY em_routes_oww.py .
-COPY em_routes_provision.py .
-COPY em_routes_shell.py .
-COPY em_routes_static.py .
-COPY em_routes_system.py .
-COPY em_routes_updates.py .
-COPY em_process_stats.py .
-COPY em_device_view.py .
-COPY em_device_config.py .
-COPY em_diagnose.py .
-COPY em_credentials.py .
-COPY em_oidc.py .
-COPY em_linkauth.py .
-COPY em_tcp.py .
-COPY em_pacing.py .
-COPY em_platform.py .
-COPY em_wsclose.py .
-COPY em_rttlog.py .
-COPY em_esphome.py .
-COPY em_ble_health.py .
-COPY em_config_types.py .
-COPY em_dbwriter.py .
-COPY em_device.py .
-COPY em_tasks.py .
-COPY em_ble_gatt.py .
-COPY em_ble_proxy.py .
-COPY em_broadcast.py .
-COPY em_oww_assets.py  ./
-COPY em_oww_check.py   ./
-COPY em_oww_models.py .
-COPY em_pairing.py .
-COPY em_oww_metadata.py .
-COPY em_oww_warmup.py .
-COPY em_arbiter.py .
-COPY em_state.py .
-COPY em_http.py .
-COPY em_events.py .
-COPY em_shell.py .
-COPY em_releases.py .
-COPY em_release_sig.py .
-COPY em_payloads.py .
-COPY em_ota.py .
-COPY em_oww_sync.py .
-COPY em_emos_ota.py .
-COPY em_reconcile.py .
-COPY em_listen.py .
-COPY em_wakelevel.py .
-COPY em_endpoints.py .
-COPY em_health.py .
-COPY em_button.py .
-COPY em_wakeword.py .
-COPY em_tap_burst.py .
-COPY em_player.py .
-COPY em_config_sections.py .
-COPY em_console_pw.py .
-COPY em_labels.py .
-COPY em_crashlog.py .
-COPY em_emos_build.py .
-COPY em_emos_update.py .
-COPY em_recordings.py .
-COPY em_tts_audio.py .
-COPY em_turn_record.py .
-COPY em_turnclock.py .
-COPY em_firmware.py .
-COPY em_announce.py .
-COPY em_runbarrier.py .
-COPY em_volume.py .
-COPY em_wifi.py .
-COPY em_wire.py .
-COPY em_timers.py .
-COPY em_identify.py .
-COPY em_loglevel.py .
-COPY version.py .
+# Every controller module in one layer: one COPY per module reached the
+# builder's 127-layer limit ("max depth exceeded") as em_controller was split.
+COPY em_*.py version.py ./
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
@@ -273,9 +176,6 @@ RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x
 # The add-on sets its own DB_PATH (/data), which overrides this.
 ENV DB_PATH=/app/data/echomuse.db
 RUN mkdir -p /app/data
-COPY em_cacerts.py .
-COPY em_chunked.py .
-COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into
 # the env vars em_controller.py already reads, then execs into it — a no-op
 # outside the add-on, where /data/options.json doesn't exist.
