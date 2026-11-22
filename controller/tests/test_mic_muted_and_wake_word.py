@@ -195,7 +195,7 @@ def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
     """No ring indicator (#286); HA driving the idle ring is #66."""
     src = _sources.all_source()
     setter = _block(src, "def _set_wake_word(", "        # Capabilities before")
-    assert "await leds_" not in setter
+    assert "leds_" not in setter
     assert "send_led_anim" not in setter and "set_leds" not in setter
     scenes = (ROOT / "controller" / "em_scenes.py").read_text()
     assert "wake_word" not in scenes
