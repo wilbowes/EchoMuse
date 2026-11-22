@@ -55,6 +55,7 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
 | `em_barge_watcher` | The barge-in watcher: scores the mic during a reply and cuts it on the wake word. |
 | `em_button_events` | What an Action-button press does: start or cancel a turn, dismiss an alarm, pass a gesture to HA. |
+| `em_control_handlers` | One handler per device-to-controller control message, looked up in em_controller.CONTROL_HANDLERS. |
 | `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
 | `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
 | `em_link_gate` | Who may hold a device-link plane: token and TLS per WebSocket, /data and /shell following /control. |
@@ -485,6 +486,9 @@ Grouped by where each one lives now.
 | `OWW_PAUSE_STUCK_S`, `FRESH_CONN_GRACE_S`, `WAKE_RESTART_BACKOFF_S`, `WAKE_RESTART_MAX_BACKOFF_S`, `WAKE_RESTART_HEALTHY_S` | `em_wake_listen` (same names) |
 | `handle_button_event` | `em_button_events` (same name) |
 | `handle_data`, `handle_shell`, `_store_wake_candidate`, `_persist_wake_candidate` | `em_planes` (same names) |
+| `_on_<type>` for ambient_light, mute_state, volume_state, stats, sendspin_status, sendspin_token, wifi_result, playback_stats, oww_shadow_cross, oww_wake, listen_state, listen_end, ble_adverts, wifi_scan_result, log, pong | `em_control_handlers.on_<type>` |
+| `_note_wear` | `em_control_handlers.note_wear` |
+| `_consider_on_device_wake_sample` | `em_control_handlers` (same name) |
 
 ## Moved out of em_esphome (2026-11)
 

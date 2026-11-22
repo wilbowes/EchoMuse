@@ -190,7 +190,7 @@ def test_stats_relay_allowlist_covers_every_device_stat():
     dbsrc = (root / "em_db.py").read_text()
 
     body = re.search(r'(.*?)\n\s*if msg\.get\("ble"\)',
-                     _sources.def_source("_on_stats"), re.S)
+                     _sources.def_source("on_stats"), re.S)
     assert body, "could not locate the stats handler allowlist"
     allowlist = set(re.findall(r'"(\w+)":\s*msg\.get', body.group(1)))
 

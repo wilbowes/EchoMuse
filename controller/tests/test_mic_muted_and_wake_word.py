@@ -146,13 +146,13 @@ def test_deleting_a_device_forgets_its_choice():
 
 
 def test_the_controller_reports_the_button_mute_to_ha():
-    handler = _sources.def_source("_on_mute_state")
+    handler = _sources.def_source("on_mute_state")
     assert "esphome.update_mic_muted(" in handler
 
 
 def test_the_button_does_not_move_the_wake_word():
     """`mute_state` may read HA's choice but never assign it."""
-    handler = _sources.def_source("_on_mute_state")
+    handler = _sources.def_source("on_mute_state")
     assert "em_wakeword.on_mic_mute(" in handler
     assert not re.search(r"\.wake_word_enabled\s*=", handler)
     assert "esphome.update_wake_word(" not in handler
@@ -161,7 +161,7 @@ def test_the_button_does_not_move_the_wake_word():
 
 def test_unmuting_with_the_wake_word_off_takes_the_stream_back_down():
     """The device restarts its wake stream on unmute; with the wake word off it goes back down."""
-    handler = _sources.def_source("_on_mute_state")
+    handler = _sources.def_source("on_mute_state")
     branch = _block(handler, "em_wakeword.on_mic_mute(", "if device.muted and")
     assert "mic_stop()" in branch
 

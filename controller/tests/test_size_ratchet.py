@@ -24,7 +24,7 @@ def _baseline() -> dict:
 def test_the_measurement_finds_the_known_giants():
     # Guards the guard: a measure that finds nothing passes everything.
     now = size_ratchet.measure()
-    assert "em_controller.py" in now["files"]
+    assert "em_db.py" in now["files"]
     assert "em_controller.handle_control" in now["functions"]
 
 
