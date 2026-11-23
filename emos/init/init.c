@@ -92,6 +92,8 @@
 #ifndef SSH_HOME
 #define SSH_HOME   "/run/ssh"
 #endif
+/* The login shell tinysshd is given: SSH_SH with the console's bionic env. */
+#define SSH_LOGIN  SSH_HOME "/login"
 #ifndef SSH_SAFE_TOP
 #define SSH_SAFE_TOP "/"
 #endif
@@ -4092,12 +4094,26 @@ static const char *ssh_unsafe_dir(void)
     }
 }
 
+/* tinysshd builds the session's environment from scratch, so without this
+ * every /system binary that reads the clock prints bionic's two
+ * `__bionic_open_tzdata_path: ... not set!` lines and falls back to UTC
+ * (15LE, 2026-11-23). Same two variables as the console's envp. */
+static int ssh_login(void)
+{
+    static const char sh[] =
+        "#!" SSH_SH "\n"
+        "ANDROID_ROOT=/system ANDROID_DATA=/data\n"
+        "export ANDROID_ROOT ANDROID_DATA\n"
+        "exec " SSH_SH " \"$@\"\n";
+    return ssh_put(SSH_LOGIN, sh, sizeof sh - 1, 0755) < 0 ? -1 : 0;
+}
+
 /* tinysshd finds root's home and shell with getpwnam(), and Android ships no
  * /etc/passwd; /etc is the ramdisk's own directory (a symlink farm), so this
  * file never reaches /system. */
 static int ssh_passwd(void)
 {
-    static const char pw[] = "root:x:0:0:root:" SSH_HOME ":" SSH_SH "\n";
+    static const char pw[] = "root:x:0:0:root:" SSH_HOME ":" SSH_LOGIN "\n";
     struct stat st;
     if (lstat(SSH_PASSWD, &st) == 0 && S_ISLNK(st.st_mode))
         unlink(SSH_PASSWD);
@@ -4215,7 +4231,7 @@ static void ssh_main(void)
                 sleep(30);
                 continue;
             }
-            if (ssh_passwd() == 0 && ssh_hostkey() == 0
+            if (ssh_login() == 0 && ssh_passwd() == 0 && ssh_hostkey() == 0
                 && (ls = ssh_listen()) >= 0) {
                 fw = ssh_fw_ino();
                 ssh_firewall(1);
