@@ -1307,6 +1307,18 @@ enabled it and nothing happened" this removes.
   catches or buys them with residue; with the gain/high-pass/hop sweep and
   the AEC3 rematch, that is three front-end families with no clean gain on
   the shipped model. Not run on C95 or the soak for that reason.
+- 2026-11-22, a residue floor as a barge gate, offline (minimum statistics,
+  Martin 2001, simplified): fire only when the score rule holds AND the
+  scorer's own post-AEC audio is G dB over the minimum of its smoothed
+  300-3400 Hz frame power over the last 1.6 s of reply. Same 11-20 / 11-21
+  donut rounds and the 41C8 38.5 min soak, via barge_replay.py. livekit
+  small 0.15/0.3: false barges 21 -> 13 / 12 / 10 at G = 3 / 6 / 9 dB,
+  catches 9.00/14 and 4.00/7 at 3 and 6 dB, 8.00/14 at 9 dB. At 0.20/0.40
+  and 0.25/0.50 the soak already had 1 and 0 fires, so the gate only costs
+  catches there. forge's one fire (a tap at 0.49) survives every gate. So
+  the floor halves small's fires at the low bar but leaves 16-20/h, nowhere
+  near forge's ~1.6/h: it does not unlock 0.15/0.3. Tracker item 3 closed,
+  no.
 
 ## The external audio jack
 
