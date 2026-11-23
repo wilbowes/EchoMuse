@@ -108,7 +108,7 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
     (cost unmeasured).
   - `[aec] far:` logs only while `aecEnabled`; read `mean` beside `rms`
     (`mean≈±rms` is a DC offset, not audio).
-- **Barge-in** (controller `_barge_watcher`): device `speaker_flush` drains and
+- **Barge-in** (controller `em_barge_watcher.barge_watcher`): device `speaker_flush` drains and
   discards until EOS. `bargeInThreshold` (0.05–0.10) sits below `owwThreshold`
   by design (echo depresses speech-over-TTS scores). **A barge must abort HA's
   run before starting the interrupting turn** (`controller/CLAUDE.md`).
@@ -469,7 +469,7 @@ with no known mechanism; do not call it the cause.
   Mute red and volume cyan are device-local.
 - Outcomes by rhythm, not colour, from `device.last_turn_outcome` (set in
   `em_turn_record.persist_turn` **and `em_turn_record.record_dropped_turn`**, consumed by
-  `_leds_turn_end`); **`no_ha` alone uses colour** (orange), after a 600ms
+  `em_leds.leds_turn_end`); **`no_ha` alone uses colour** (orange), after a 600ms
   listening hold.
 - **Start a device-local pulse ONCE per state** (`pulseKind`); phase from
   elapsed time (`pulsePhase`).
