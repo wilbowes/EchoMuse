@@ -43,9 +43,11 @@ install there.
 - **Not standalone.** You need a working Home Assistant with an
   [Assist pipeline](https://www.home-assistant.io/voice_control/). Home
   Assistant does the speech recognition, the understanding and the voice.
-- **Not ready out of the box.** The Echo needs a one-time unlock over USB
-  first, which [firebreak](https://github.com/bboe/firebreak) runs from one
-  command. If a step goes wrong the Echo can end up soft-bricked, and the XDA
+- **Needs an unlocked Echo.** EchoMuse starts from an Echo that is already
+  unlocked. [firebreak](https://github.com/bboe/firebreak) does the unlock
+  from one command, and its author, bboe, helps with it in
+  `#support-device-unlocking` on our [Discord](https://discord.gg/vAPHMDvREG).
+  If a step goes wrong the Echo can end up soft-bricked, and the XDA
   thread for [the Dot](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) or [the Echo](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-2nd-gen-2017-radar.4801290/) covers recovering it.
 - **Not for other Echo models, yet.** The Echo Dot 2nd gen and the Echo 2nd
   gen are supported. The Echo Dot 3rd gen is planned.
@@ -69,7 +71,8 @@ install there.
    `unlock fireos5` leaves it on FireOS 5, `unlock fireos6` (the default) on
    FireOS 6, and the [rooting guide](docs/rooting.md) explains the choice.
    The Echo has one, to FireOS 6. **You
-   do this at your own risk.**
+   do this at your own risk.** For help with it, ask bboe in
+   `#support-device-unlocking` on the Discord.
 2. **Start the controller**, as an add-on:
 
    [![Add the EchoMuse repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fwilbowes%2FEchoMuse)

@@ -11,6 +11,14 @@ faults worth checking before you file, and
 
 ## Rooting and unlocking
 
+**EchoMuse starts from an unlocked Echo, and
+[firebreak](rooting.md#unlocking-with-firebreak) does the unlock.** bboe, who
+wrote it, helps with unlocking in `#support-device-unlocking` on the
+[Discord](https://discord.gg/vAPHMDvREG). If a run fails or stalls, run
+`uvx firebreak@latest report` and paste what it prints there. R0rt1z2's
+[XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/)
+is the reference for the exploit underneath.
+
 ### Should I unlock my Dot to FireOS 5 or FireOS 6?
 **Either works.** firebreak's `unlock fireos5` leaves the Dot on FireOS 5,
 where you can install emOS or keep FireOS with root. `unlock fireos6`, the
@@ -19,44 +27,6 @@ has FireOS 6 only. [firebreak](rooting.md#unlocking-with-firebreak) moves a Dot
 between them.
 
 More in [rooting](rooting.md).
-
-### The unlock won't run on my Mac.
-**Use [firebreak](rooting.md#unlocking-with-firebreak).** It runs on macOS,
-Linux and Windows. Everything after it, including the
-provisioning wizard, runs from a Chromium-based browser on any OS.
-
-### `brick.sh` refuses with "restricted on locked hw", or `fastbrick.sh` sits at "Sending payload...".
-**Use [firebreak](rooting.md#unlocking-with-firebreak) instead.** amonet's
-scripts pick the exploit image from the Dot's LK, which fastboot reports as
-`lk_build_desc`, and know only one FireOS 6 LK, `63cb91b-20221007_072309`.
-FireOS 6 4310, 4313 and 4315 ship `41fb3ce-20221007_151724`, which then gets
-the wrong image and refuses it. amonet 2.0.0's `fastbrick.sh` hides the
-refusal: its retry loop swallows the error, so it waits at "Sending
-payload..." instead of failing.
-
-firebreak sends the right image for every LK in
-[its table](https://github.com/bboe/firebreak#bootloaders), so the Dot does
-not need a FireOS update first. With amonet's scripts, letting Amazon update
-the Dot to FireOS 6574.1 moves it to `63cb91b`
-([#567](https://github.com/wilbowes/EchoMuse/issues/567)).
-
-Turn **off** any file manager that auto-mounts USB devices. It grabs the
-handshake and makes later adb steps fail with unhelpful errors.
-
-### fastboot sees the Dot, but `getvar` never answers (Linux).
-**Check TLP's USB autosuspend.** On a laptop running TLP, the Dot's fastboot
-device can be suspended between commands, so a query that answered once then
-times out. Add the Dot's fastboot USB ID to TLP's denylist in
-`/etc/tlp.conf` and reboot:
-
-```
-USB_DENYLIST+="0bb4:0c01"
-```
-
-`0bb4:0c01` is what one Dot reported in fastboot; check yours with `lsusb`.
-`systemctl is-active tlp` reading `inactive` does not rule this out, because
-TLP's udev helper still applies the policy
-([#697](https://github.com/wilbowes/EchoMuse/issues/697)).
 
 ### The wizard stops at Escrow Boot Image and mentions `boot_a_x`.
 **The Echo has amonet v1's partition table under a v2 unlock.** Installing
@@ -69,14 +39,6 @@ Two owners got past it by installing amonet v2 again, as a zip from TWRP
 that ourselves and can't tell you it is safe:** it rewrites the partition
 table and the bootloader, and an Echo on which it fails partway may not
 start. Ask on the XDA thread first and quote the wizard's error line.
-
-### Sideloading FireOS 5.5.5.4 fails with a red flash of the ring.
-Sideload it again. It generally works on the second attempt.
-
-### Deeper questions about the unlock itself.
-For a failed firebreak run, run `uvx firebreak@latest report` and paste what it
-prints in `#support-device-unlocking` on the Discord. amonet itself is
-R0rt1z2's work, and the [XDA thread](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) is the reference for it.
 
 ### Did I brick it?
 **Probably not permanently.** A Dot stuck in preloader is usually

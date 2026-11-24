@@ -10,8 +10,13 @@
 > 2nd gen has only `unlock fireos6`, and EchoMuse runs on it as emOS only.
 
 EchoMuse needs an Echo Dot 2nd gen or an Echo 2nd gen that is already
-unlocked and running FireOS 5 (Dot only), or FireOS 6 for emOS. Two separate jobs get you there, and they carry very different
-risk.
+unlocked and running FireOS 5 (Dot only), or FireOS 6 for emOS. **The unlock
+is a prerequisite that EchoMuse doesn't do itself.** firebreak does it, and
+bboe, who wrote firebreak, helps with it in `#support-device-unlocking` on the
+[Discord](https://discord.gg/vAPHMDvREG). R0rt1z2's XDA thread for each device
+is the reference for the exploit underneath.
+
+Two separate jobs get you there, and they carry very different risk.
 
 ## Hardware
 
