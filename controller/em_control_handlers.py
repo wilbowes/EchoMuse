@@ -179,6 +179,7 @@ async def on_stats(device: em_device.Device, msg: dict) -> None:
         # allowlist: it is a state, not a metric, and
         # the hourly rollup averages numbers.
         "aecRef":        msg.get("aecRef"),
+        "ssh":           msg.get("ssh"),  # {listening, hostKey}; a state
     }
     # Shadow summary → hourly rollup. Present only while the
     # device is scoring, so its presence is also the "was it
