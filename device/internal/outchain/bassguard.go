@@ -48,6 +48,10 @@ type bassGuard struct {
 	// two-band path bit-exact.
 	upper *upperBands
 	hold  *holdMin
+
+	// The right channel's crossover, for stepStereo only (#273). The gain is
+	// shared, so a bass note on one side cannot move the image.
+	lpR, hpR [2]biquad
 }
 
 func newBassGuard(fs float64, band GuardBand) *bassGuard {
@@ -59,7 +63,46 @@ func newBassGuard(fs float64, band GuardBand) *bassGuard {
 	lo, hi := butter2(band.CrossoverHz, fs, false), butter2(band.CrossoverHz, fs, true)
 	g.lp = [2]biquad{lo, lo}
 	g.hp = [2]biquad{hi, hi}
+	g.lpR, g.hpR = g.lp, g.hp
 	return g
+}
+
+// stepStereo is step on a stereo frame (#273): each channel split at the
+// crossover, and ONE gain, from the low band of larger magnitude, applied to
+// both low bands. With L == R it computes exactly what step does, on each
+// side. Never called with the stock-sound bands (upper != nil): the chain
+// permits stereo only without stock sound, whose order is mono by design.
+// step is deliberately not refactored to share this body, so the mono path's
+// code, and its float rounding on the device, stay as they were.
+func (g *bassGuard) stepStereo(xl, xr float64) (float64, float64) {
+	lowL := g.lp[1].step(g.lp[0].step(xl))
+	highL := g.hp[1].step(g.hp[0].step(xl))
+	lowR := g.lpR[1].step(g.lpR[0].step(xr))
+	highR := g.hpR[1].step(g.hpR[0].step(xr))
+	if !g.enabled {
+		return lowL + highL, lowR + highR
+	}
+	louder := lowL
+	if math.Abs(lowR) > math.Abs(lowL) {
+		louder = lowR
+	}
+	gain := g.bassGain(louder)
+	return lowL*gain + highL, lowR*gain + highR
+}
+
+// split starts the right channel's crossover from the left's state, which is
+// what it would hold had it run on the dual-mono audio before.
+func (g *bassGuard) split() { g.lpR, g.hpR = g.lp, g.hp }
+
+// merge folds the right channel's crossover state into the left's, as their
+// mean, when the chain goes back to one channel.
+func (g *bassGuard) merge() {
+	for i := range g.lp {
+		g.lp[i].z1 = (g.lp[i].z1 + g.lpR[i].z1) / 2
+		g.lp[i].z2 = (g.lp[i].z2 + g.lpR[i].z2) / 2
+		g.hp[i].z1 = (g.hp[i].z1 + g.hpR[i].z1) / 2
+		g.hp[i].z2 = (g.hp[i].z2 + g.hpR[i].z2) / 2
+	}
 }
 
 func (g *bassGuard) step(x float64) float64 {
@@ -107,6 +150,10 @@ func (g *bassGuard) reset() {
 	for i := range g.lp {
 		g.lp[i].reset()
 		g.hp[i].reset()
+	}
+	for i := range g.lpR {
+		g.lpR[i].reset()
+		g.hpR[i].reset()
 	}
 	g.gainDb = 0
 	if g.upper != nil {

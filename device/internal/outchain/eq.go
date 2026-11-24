@@ -70,6 +70,23 @@ func (e *eq) step(x float64) float64 {
 	return x
 }
 
+// clone is a second EQ in the same state, for the right channel when the
+// chain goes stereo (#273): on the dual-mono audio before, the two would have
+// held the same state.
+func (e *eq) clone() eq {
+	return eq{fs: e.fs, sections: append([]biquad(nil), e.sections...)}
+}
+
+// merge takes the mean of its own and the right channel's state, when the
+// chain goes back to processing one channel: neither side's alone, so the
+// mono output carries on from both without a step.
+func (e *eq) merge(r *eq) {
+	for i := 0; i < len(e.sections) && i < len(r.sections); i++ {
+		e.sections[i].z1 = (e.sections[i].z1 + r.sections[i].z1) / 2
+		e.sections[i].z2 = (e.sections[i].z2 + r.sections[i].z2) / 2
+	}
+}
+
 func (e *eq) reset() {
 	for i := range e.sections {
 		e.sections[i].reset()
