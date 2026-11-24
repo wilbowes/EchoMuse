@@ -112,6 +112,9 @@ check("the bytes are dd'd to a file and pulled for the browser to decode",
   /dd if=\$\{lkDev\} of=\/tmp\/em_lk\.bin/.test(connect)
   && /c\.pull\('\/tmp\/em_lk\.bin'\)/.test(connect)
   && /subarray\(0, 8\)[\s\S]{0,120}padStart\(2, '0'\)/.test(connect));
+check("lkDev is pinned to a partition node before it reaches a shell line",
+  connect.includes("/^\\/dev\\/block\\/mmcblk0p\\d+$/.test(lkDev)")
+  && connect.indexOf("test(lkDev)") < connect.indexOf("dd if=${lkDev}"));
 
 if (failures) {
   console.error(`\n${failures} failure(s)`);

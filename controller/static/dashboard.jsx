@@ -4795,7 +4795,8 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
         // way the emOS donor check reads them: TWRP 3.2.3's BusyBox od has no
         // -A, so no `od` may run on the device here (#903).
         const lkDev = pick('LKDEV');
-        if (lkDev) {
+        // Nothing but a partition node may reach the `dd` shell line.
+        if (/^\/dev\/block\/mmcblk0p\d+$/.test(lkDev)) {
           await c.shell(`dd if=${lkDev} of=/tmp/em_lk.bin bs=8 count=1 2>/dev/null`);
           const e = await c.pull('/tmp/em_lk.bin');
           await c.shell('rm -f /tmp/em_lk.bin');
