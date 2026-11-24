@@ -171,8 +171,8 @@ int main(void)
     if (symlink("/nonexistent/passwd", SSH_PASSWD)) {}
     ok(ssh_passwd() == 0, "writes passwd over a symlink");
     got = slurp(SSH_PASSWD);
-    ok(got && strcmp(got, "root:x:0:0:root:" SSH_HOME ":" SSH_SH "\n") == 0,
-       "passwd names root, the ramdisk home and the shell");
+    ok(got && strcmp(got, "root:x:0:0:root:" SSH_HOME ":" SSH_LOGIN "\n") == 0,
+       "passwd names root, the ramdisk home and the login wrapper");
     ok(lstat(SSH_PASSWD, &st) == 0 && S_ISREG(st.st_mode),
        "passwd is a regular file, not the old symlink");
 
@@ -237,6 +237,22 @@ int main(void)
 
     kill(svc, SIGKILL);
     waitpid(svc, NULL, 0);
+
+    /* ── ssh_login: the session gets the console's bionic env ── */
+    ok(ssh_login() == 0, "login wrapper written");
+    ok(stat(SSH_LOGIN, &st) == 0 && (st.st_mode & 0777) == 0755,
+       "login wrapper is 0755");
+    /* The stub stands in for /system/bin/sh twice: as the wrapper's #!
+     * interpreter (so it must run the script) and as the shell exec'd. */
+    put(SSH_SH, "#!/bin/sh\ncase \"$1\" in " SSH_LOGIN ") exec /bin/sh \"$@\";; esac\n"
+        "{ env; printf 'argv:%s|' \"$@\"; } > " T "/env.out\n", 0755);
+    if (system("env -i " SSH_LOGIN " -c 'echo hi there' >/dev/null 2>&1")) {}
+    got = slurp(T "/env.out");
+    ok(got && strstr(got, "ANDROID_ROOT=/system\n") && strstr(got, "ANDROID_DATA=/data\n"),
+       "from an empty env, the shell gets ANDROID_ROOT and ANDROID_DATA");
+    ok(got && strstr(got, "\nargv:-c|argv:echo hi there|")
+       && got[strlen(got) - 1] == '|',
+       "the shell gets tinysshd's arguments unchanged");
     if (system("rm -rf " T)) {}
 
     printf("%s\n", failures ? "SSH CHECK FAILED" : "ssh: all checks pass");
