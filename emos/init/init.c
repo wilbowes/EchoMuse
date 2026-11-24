@@ -92,6 +92,11 @@
 #ifndef SSH_HOME
 #define SSH_HOME   "/run/ssh"
 #endif
+#ifndef SSH_SAFE_TOP
+#define SSH_SAFE_TOP "/"
+#endif
+/* A bare tmpfs is 1777; tinysshd refuses keys under a dir others can write. */
+#define RUN_MOUNT_OPTS "size=4m,mode=0755"
 #ifndef SSH_PASSWD
 #define SSH_PASSWD "/etc/passwd"
 #endif
@@ -3120,7 +3125,7 @@ int main(int argc, char **argv)
      * touches the eMMC. 4MB is ample for a 256KB x2 syslog rotation. */
     mkdir("/tmp", 01777);          /* rootfs is a ramdisk: RAM-backed, as on stock */
     mkdir("/run", 0755);
-    mount("tmpfs", "/run", "tmpfs", 0, "size=4m");
+    mount("tmpfs", "/run", "tmpfs", 0, RUN_MOUNT_OPTS);
 
     mkdir("/data/emos", 0755);
 
@@ -4065,6 +4070,28 @@ static int ssh_copy_keys(void)
     return keys;
 }
 
+/* tinysshd refuses authorized_keys when any directory from the home up to /
+ * is group- or world-writable, sticky or not: with /run a bare 1777 tmpfs it
+ * refused every key (15LE, 2026-11-23). Returns the first such directory, or
+ * NULL when the whole path is safe. */
+static const char *ssh_unsafe_dir(void)
+{
+    static char p[256];
+    snprintf(p, sizeof p, "%s", SSH_HOME);
+    for (;;) {
+        struct stat st;
+        if (stat(p, &st) != 0 || (st.st_mode & 022))
+            return p;
+        if (!strcmp(p, SSH_SAFE_TOP) || !strcmp(p, "/"))
+            return NULL;
+        char *sl = strrchr(p, '/');
+        if (sl == p)
+            p[1] = 0;
+        else
+            *sl = 0;
+    }
+}
+
 /* tinysshd finds root's home and shell with getpwnam(), and Android ships no
  * /etc/passwd; /etc is the ramdisk's own directory (a symlink farm), so this
  * file never reaches /system. */
@@ -4181,6 +4208,13 @@ static void ssh_main(void)
         if (want && ssh_copy_keys() < 1)
             want = 0;
         if (want && ls < 0) {
+            const char *bad = ssh_unsafe_dir();
+            if (bad) {
+                netlog("ssh: %s is writable by others, so tinysshd would "
+                       "refuse every key; not listening\n", bad);
+                sleep(30);
+                continue;
+            }
             if (ssh_passwd() == 0 && ssh_hostkey() == 0
                 && (ls = ssh_listen()) >= 0) {
                 fw = ssh_fw_ino();

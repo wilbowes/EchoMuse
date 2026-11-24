@@ -23,6 +23,7 @@
 #define LEDDIR     T "/led"
 #define SSH_DIR    T "/data"
 #define SSH_HOME   T "/home"
+#define SSH_SAFE_TOP T
 #define SSH_PASSWD T "/passwd"
 #define SSH_BIN    T "/tinysshd"
 #define SSH_SH     T "/sh"
@@ -151,6 +152,13 @@ int main(void)
        && (st.st_mode & 0777) == 0600, "authorized_keys is 0600");
     ok(stat(SSH_HOME, &st) == 0 && (st.st_mode & 022) == 0,
        "home is not group- or world-writable (tinysshd refuses that)");
+    ok(ssh_unsafe_dir() == NULL, "home and every parent up to the top are safe");
+    chmod(T, 01777);
+    const char *bad = ssh_unsafe_dir();
+    ok(bad && strcmp(bad, T) == 0,
+       "a sticky world-writable parent is found (/run as a bare tmpfs, 15LE)");
+    chmod(T, 0755);
+    ok(strstr(RUN_MOUNT_OPTS, "mode=0755") != NULL, "init mounts /run 0755");
     struct stat before, after;
     stat(SSH_HOME "/.ssh/authorized_keys", &before);
     sleep(1);
