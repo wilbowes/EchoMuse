@@ -27,6 +27,7 @@
 #define SSH_BIN    T "/tinysshd"
 #define SSH_SH     T "/sh"
 #define SSH_PORT   22922
+#define FW_MARK    T "/fw-up"
 #define main       init_main_unused
 
 #include "init.c"
@@ -195,6 +196,15 @@ int main(void)
     got = slurp(T "/fw.log");
     ok(got && strstr(got, "-I INPUT -p tcp --dport 22922 -j ACCEPT"),
        "on: port opened in the filter");
+
+    /* net respawned: firewall() flushed INPUT and replaced the mark. */
+    unlink(T "/fw.log");
+    unlink(FW_MARK);
+    put(FW_MARK, "", 0644);
+    WAIT_FOR(slurp(T "/fw.log") != NULL, 5);
+    got = slurp(T "/fw.log");
+    ok(got && strstr(got, "-I INPUT -p tcp --dport 22922 -j ACCEPT"),
+       "filter flushed while listening: port admitted again");
 
     unlink(SSH_DIR "/enabled");
     WAIT_FOR(banner(NULL)[0] == 0, 5);
