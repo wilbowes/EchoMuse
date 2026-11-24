@@ -323,7 +323,7 @@ def test_the_wifi_tools_follow_the_userspace_not_the_kernel(arch, board, tools):
 ])
 def test_tinysshd_rides_in_every_image_when_the_release_has_it(arch, board):
     import em_emos_ota as ota
-    files = {"init": new_init("arm64"), "init32": new_init("arm"),
+    files = {"init": new_init("arm64"), "init32": new_init("arm"), "e2fsck": b"E",
              **{n: n.encode() for n in ota.SBIN_ASSETS}}
     _, sbin, _, err = ota.select_payload(dict(files, tinysshd=b"ts"), arch,
                                          "emos-v0.12", board)
