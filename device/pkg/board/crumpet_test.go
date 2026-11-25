@@ -9,6 +9,9 @@ func TestMeasuredCrumpetProfile(t *testing.T) {
 		t.Fatalf("identity resolved to %s", IDOf(b))
 	}
 	l := Resolve(root, b)
+	if l.RingLED0 != 210 {
+		t.Fatalf("LED 0 angle = %v, want 210", l.RingLED0)
+	}
 	if l.Capture == nil || *l.Capture != (PCMAddr{0, 1}) ||
 		l.Playback == nil || *l.Playback != (PCMAddr{0, 6}) ||
 		l.Loopback == nil || *l.Loopback != (PCMAddr{0, 7}) {

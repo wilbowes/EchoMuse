@@ -10,8 +10,10 @@ var Crumpet = &Board{
 }
 
 var crumpetHardware = &Hardware{
-	Keys:     []Input{{Name: "gpio-keys"}, {Name: "gpio-privacy"}},
-	LEDRing:  I2C{Driver: "is31fl3236"},
+	Keys:    []Input{{Name: "gpio-keys"}, {Name: "gpio-privacy"}},
+	LEDRing: I2C{Driver: "is31fl3236"},
+	// LED 0 is 210 degrees clockwise from volume-up (measured on Dot3New).
+	RingLED0: 210,
 	Capture:  PCM{Name: "TDM_Capture"},
 	Playback: PCM{Name: "DL1_Playback"},
 	// Four-channel tap test on this C78MP8, 2026-10-30: ch0 by plus,
