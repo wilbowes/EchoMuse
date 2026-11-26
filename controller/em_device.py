@@ -22,6 +22,7 @@ import em_mbc
 import em_pacing
 import em_platform
 import em_player
+import em_playstart
 import em_rttlog
 import em_scenes
 import em_shadow
@@ -420,6 +421,11 @@ class Device:
         # previous one, so the hazard those calls guarded against is gone by
         # construction rather than by discipline.
         self._playback_waiters: collections.deque = collections.deque()
+        # The start half of the above (#203): per-playback waiters the device's
+        # `playback_started` resolves, on firmware announcing `playback_start`.
+        # Same queue shape for the same reason — one playback's start must
+        # resolve only its own waiter.
+        self.playback_start = em_playstart.StartReport()
         # Outcome of the most recently persisted turn, set by em_esphome and
         # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
         self.last_turn_outcome: str | None = None
@@ -474,15 +480,24 @@ class Device:
     # One waiter per playback. See _playback_waiters for why this is a queue
     # and not a single Event.
 
-    def begin_playback(self) -> asyncio.Event:
-        """Register a waiter for this playback and return it."""
-        ev = asyncio.Event()
-        self._playback_waiters.append(ev)
-        return ev
-
-    def end_playback(self, ev: asyncio.Event) -> None:
+    def begin_playback(self) -> em_playstart.Playback:
         """
-        Retire a waiter, whether or not the device ever reported.
+        Register waiters for BOTH ends of this playback and return them.
+
+        The start waiter lives here, beside the end one, because every voice
+        stream must register one: a timer burst and an announcement go through
+        the same begin_playback, and registering starts only where the meter
+        is wanted let their `playback_started` resolve the turn's waiter and
+        raise the meter on the wrong audio (#203).
+        """
+        ended = asyncio.Event()
+        started = self.playback_start.begin()
+        self._playback_waiters.append(ended)
+        return em_playstart.Playback(ended, started)
+
+    def end_playback(self, playback: em_playstart.Playback) -> None:
+        """
+        Retire both waiters, whether or not the device ever reported.
 
         Must be called from a finally: a playback cancelled mid-stream (a
         barge-in, a mute, a dropped device) never gets its report, and a
@@ -491,9 +506,10 @@ class Device:
         in this file are reached more than once by design.
         """
         try:
-            self._playback_waiters.remove(ev)
+            self._playback_waiters.remove(playback.ended)
         except ValueError:
             pass
+        self.playback_start.end(playback.started)
 
     def signal_playback_done(self) -> None:
         """
@@ -675,6 +691,20 @@ class Device:
         was only ever "immediate" for audio not yet sent.
         """
         return "output_chain" in (self.capabilities or [])
+
+    @property
+    def playback_start_capable(self) -> bool:
+        """
+        Whether this firmware reports the moment a voice stream starts
+        playing (#203), rather than leaving the controller to estimate it from
+        the first period it puts on the wire.
+
+        The device is the only side that knows: it is the instant its ALSA
+        write begins. Without the report the estimate is kept — it errs by up
+        to the prime window, which is a ring that looks responsive, where
+        assuming the report would leave it dark on every device in the field.
+        """
+        return "playback_start" in (self.capabilities or [])
 
     @property
     def timer_alarm_ringing(self) -> bool:

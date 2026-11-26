@@ -378,7 +378,7 @@ def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
     # what the old attribute was called.
     assert "begin_playback()" in fn, \
         "streamed playback must register a playback waiter"
-    assert "playback_ev.wait()" in fn, \
+    assert "playback.ended.wait()" in fn, \
         "streamed playback must await the device's playback_stats"
     assert "end_playback(" in fn, \
         ("the waiter must be retired in a finally, or a cancelled playback "
@@ -424,8 +424,17 @@ def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
     fn = src[src.index("async def post_turn_play_esphome"):]
     fn = fn[:fn.index("\n            # P0-1")]
 
-    assert "em_playback.meter_at_playback_start(pcm_chunks" in fn, \
+    assert "on_start=meter_on" in fn, \
         "the meter must be gated on the first audio reaching the device"
+    assert "meter_at_playback_start" not in fn, \
+        "the wrapper must be applied by the playback, not at setup"
+
+    # And the wrapper is applied AFTER the playback registered its own start
+    # waiter, so a timer or announcement report cannot take it.
+    stream = _sources.def_source("run_streaming_post_turn_playback")
+    assert stream.index("playback = device.begin_playback()") < \
+        stream.index("em_playstart.meter_at_playback_start("), \
+        "the meter must watch the waiter this playback registered"
 
     # A meter send is legitimate inside the nested helpers (_meter_on, and the
     # dead-man refresher). What must not exist is one in the function's OWN
@@ -443,12 +452,15 @@ def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
     fire the callback too, or short answers play with no ring at all.
     """
     import _sources
-    fn = _sources.def_source("meter_at_playback_start")
+    fn = _sources.def_source("_estimate_at_playback_start")
 
     body = fn.split("async for")[1]
-    assert "if not fired:" in body.rsplit("\n", 4)[-4:][0] or "if not fired" in body, \
+    assert "if not fired:" in body, \
         "the generator must fire on exhaustion for sub-prime-length responses"
-    assert "SPEAKER_PRIME_SECONDS" in fn, \
+    assert "await on_start()" in fn.rsplit("if not fired:", 1)[1], \
+        "exhaustion must raise the meter, not just stop counting"
+    assert "SPEAKER_PRIME_SECONDS" in _sources.def_source(
+        "run_streaming_post_turn_playback"), \
         "the threshold must track the device's actual prime window"
 
 

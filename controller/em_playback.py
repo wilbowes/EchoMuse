@@ -14,6 +14,7 @@ import em_device
 import em_eq
 import em_limiter
 import em_mbc
+import em_playstart
 import em_wire
 
 log = logging.getLogger("echomuse")
@@ -82,7 +83,7 @@ async def run_post_turn_playback(device: em_device.Device, voice_response: bytes
     device.speaker_busy += 1
     # Created inside the try, torn down in the finally; None until then, so an
     # error in the EQ step does not turn the finally into a NameError.
-    playback_ev = cancel_task = done_task = stream_task = timeout_task = None
+    playback = cancel_task = done_task = stream_task = timeout_task = None
     try:
         _t_eq0 = asyncio.get_event_loop().time()
         speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -95,8 +96,8 @@ async def run_post_turn_playback(device: em_device.Device, voice_response: bytes
             f"{em_eq.describe_activity(_limiter, _guard)}"
         )
         cancel_task    = asyncio.create_task(device.cancel_event.wait())
-        playback_ev    = device.begin_playback()
-        done_task      = asyncio.create_task(playback_ev.wait())
+        playback       = device.begin_playback()
+        done_task      = asyncio.create_task(playback.ended.wait())
         stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
         t_stream_start = asyncio.get_event_loop().time()
         # Opens the delivery window measured against the device's
@@ -165,7 +166,7 @@ async def run_post_turn_playback(device: em_device.Device, voice_response: bytes
         # Every helper task ends here, on every exit. These cancels used to sit
         # at the end of the try, so a playback that was itself cancelled (a
         # barge-in, a dismissed timer chime) left two Event.wait() tasks
-        # pending: the one on playback_ev surfaced as "Task was destroyed but
+        # pending: the one on the playback Event surfaced as "Task was destroyed but
         # it is pending!" once the Event was dropped (dev add-on, 2026-09-25),
         # and the one on cancel_event, which lives as long as the device, never
         # surfaced at all. The stream task kept sending too. Same teardown as
@@ -185,7 +186,8 @@ async def run_post_turn_playback(device: em_device.Device, voice_response: bytes
         # cancelled playback — barge-in, mute, a device that dropped — never
         # gets its report, and a waiter left queued would take the NEXT
         # playback's report and desynchronise every one after it.
-        device.end_playback(playback_ev)
+        if playback is not None:
+            device.end_playback(playback)
 
         # The real end of audio, not the end of the socket write. The device
         # reports playback_stats once its audio channel drains after EOS, and
@@ -212,37 +214,8 @@ async def run_post_turn_playback(device: em_device.Device, voice_response: bytes
             await asyncio.shield(device._set_speaking(False))
 
 
-async def meter_at_playback_start(pcm_chunks, on_start):
-    """
-    Pass PCM through untouched, firing `on_start` when the device will have
-    begun playing it.
-
-    The device holds audio until roughly em_wire.SPEAKER_PRIME_SECONDS is queued, or
-    until EOS for a response shorter than that (primePeriods, pcm_speaker.go).
-    Counting bytes handed to the streamer tracks that closely enough — the
-    socket write completes near-instantly however slow the link is, which is
-    the same property that makes send_ms useless as a delivery measure.
-
-    Exhaustion fires it too, so a two-word answer still gets a meter. If the
-    stream is cancelled or yields nothing, it never fires and the spinner
-    simply stays up until the turn's ring cleanup — the failure direction
-    that looks like "still working" rather than "dead".
-    """
-    prime_bytes = int(em_wire.SPEAKER_PRIME_SECONDS * em_wire.SPEAKER_RATE * 2)
-    sent = 0
-    fired = False
-    async for chunk in pcm_chunks:
-        yield chunk
-        if not fired:
-            sent += len(chunk)
-            if sent >= prime_bytes:
-                fired = True
-                await on_start()
-    if not fired:
-        await on_start()
-
-
-async def run_streaming_post_turn_playback(device: em_device.Device, pcm_chunks) -> int:
+async def run_streaming_post_turn_playback(device: em_device.Device, pcm_chunks,
+                                           on_start=None) -> int:
     """
     Play decoded HA TTS while the HTTP response is still arriving.
 
@@ -270,9 +243,20 @@ async def run_streaming_post_turn_playback(device: em_device.Device, pcm_chunks)
     # are still writing has a waiter to resolve. A fresh Event per playback
     # cannot carry a stale set from the previous response, which is what the
     # clear() this replaces was for.
-    playback_ev = device.begin_playback()
+    playback = device.begin_playback()
+    # The meter is raised from this playback's own start waiter, registered
+    # above with its end waiter. The device holds audio until roughly the
+    # prime window is queued, so the byte count the controller sends leads the
+    # speaker; only this waiter is the instant its ALSA write begins.
+    meter_task = None
+    if on_start is not None:
+        started = playback.started if device.playback_start_capable else None
+        pcm_chunks, meter_task = em_playstart.meter_at_playback_start(
+            pcm_chunks, on_start,
+            int(em_wire.SPEAKER_PRIME_SECONDS * em_wire.SPEAKER_RATE * 2),
+            started)
     cancel_task = asyncio.create_task(device.cancel_event.wait())
-    done_task   = asyncio.create_task(playback_ev.wait())
+    done_task   = asyncio.create_task(playback.ended.wait())
     stream_task = asyncio.create_task(
         device.stream_speaker_chunks(pcm_chunks, stream_eq)
     )
@@ -344,7 +328,10 @@ async def run_streaming_post_turn_playback(device: em_device.Device, pcm_chunks)
         # reports, not when the last byte reached the socket. In the finally so
         # a cancel or an error leaves the tile idle rather than stuck Speaking.
         await device._set_speaking(False)
-        device.end_playback(playback_ev)
+        if meter_task is not None:
+            meter_task.cancel()
+            await asyncio.gather(meter_task, return_exceptions=True)
+        device.end_playback(playback)
         for t in (cancel_task, done_task):
             t.cancel()
         if not stream_task.done():
