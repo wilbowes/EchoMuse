@@ -14,14 +14,17 @@
 //
 //	go run ./tools/aec_replay -in C1.s24 -out out/C1
 //
+// -mic picks one microphone for the whole run; it and -mics are alternatives,
+// never both: two selections would silently ignore one of them.
+//
 // A turn locks to one microphone and the next turn to another. -mics replays
 // that (seconds:channel pairs), with one filter following the microphone in
 // use, or with -per-mic one per microphone as the firmware runs it (#814):
 //
 //	go run ./tools/aec_replay -in C1.s24 -out out/C1 -mics 0:6,12.6:2,30:6,32:3 -per-mic
 //
-// -tail sets the software tap's length only. On the hardware reference, which
-// is all this tool uses, the canceller keeps its own 64ms.
+// -tail is refused unless it is 64: on the hardware reference, which is all
+// this tool uses, the canceller keeps its own 64ms and ignores the value.
 //
 // There is no playback-level option: since #638 the volume is applied in
 // software before the loopback, so the reference already carries it. A
@@ -53,7 +56,8 @@ const (
 func main() {
 	in := flag.String("in", "", "raw capture (.s24)")
 	out := flag.String("out", "", "output directory")
-	tail := flag.Int("tail", 300, "speex filter tail for the software tap, ms; no effect here, the hardware reference keeps 64")
+	tail := flag.Int("tail", -1, "speex filter tail, ms. Ignored on the hardware reference this tool uses, which keeps 64ms; passing a value other than 64 is refused")
+	micFlag := flag.Int("mic", -1, "microphone channel (0-7) throughout; exclusive with -mics")
 	gainDb := flag.Float64("gain", 24, "mic gain, dB (micGainDb)")
 	load := flag.String("load", "", "start from a saved echo path (aec.ExportState) instead of cold")
 	save := flag.String("save", "", "write the echo path learnt by the end of this run")
@@ -64,6 +68,14 @@ func main() {
 	if *in == "" || *out == "" {
 		flag.Usage()
 		os.Exit(2)
+	}
+	tailMs, err := hardwareRefTail(*tail)
+	if err != nil {
+		log.Fatal(err)
+	}
+	micsSpec, err := resolveMics(*micFlag, *mics)
+	if err != nil {
+		log.Fatal(err)
 	}
 	raw, err := os.ReadFile(*in)
 	if err != nil {
@@ -76,7 +88,7 @@ func main() {
 	arr := board.BiscuitMics()
 	bf := beamformer.New(arr)
 	c := aec.NewFrame(arr.NumMics(), arr.AECFrame)
-	c.SetParams(true, 0, *tail)
+	c.SetParams(true, 0, tailMs)
 	c.SetHardwareRef(true)
 	gain := math.Pow(10, *gainDb/20)
 	if *load != "" {
@@ -93,7 +105,7 @@ func main() {
 	step := batch * frameBytes
 	if *prime {
 		pb, pc := beamformer.New(arr), aec.NewFrame(arr.NumMics(), arr.AECFrame)
-		pc.SetParams(true, 0, *tail)
+		pc.SetParams(true, 0, tailMs)
 		pc.SetHardwareRef(true)
 		var primed []byte
 		for pass := 0; pass < 2; pass++ {
@@ -110,7 +122,7 @@ func main() {
 			log.Fatal(err)
 		}
 	}
-	plan, err := parseMics(*mics)
+	plan, err := parseMics(micsSpec)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -190,6 +202,19 @@ func (p micPlan) at(t float64) int {
 	return ch
 }
 
+// resolveMics turns the two microphone flags into the one -mics specification
+// parseMics takes. Both set is refused rather than silently dropping -mic:
+// that is the same class of quiet ignore -tail had.
+func resolveMics(mic int, mics string) (string, error) {
+	if mic >= 0 && mics != "" {
+		return "", fmt.Errorf("-mic and -mics both select microphones; pass one")
+	}
+	if mic >= 0 {
+		return fmt.Sprintf("0:%d", mic), nil
+	}
+	return mics, nil
+}
+
 func writeWAV(path string, pcm []byte) error {
 	h := make([]byte, 44)
 	copy(h, "RIFF")
@@ -205,4 +230,14 @@ func writeWAV(path string, pcm []byte) error {
 	copy(h[36:], "data")
 	binary.LittleEndian.PutUint32(h[40:], uint32(len(pcm)))
 	return os.WriteFile(path, append(h, pcm...), 0o644)
+}
+
+// hardwareRefTail is the only tail this tool can honour: the canceller sets
+// its own 64ms on the hardware-reference path, so any other value would be
+// silently ignored and produce a run that looks different from what was asked.
+func hardwareRefTail(tail int) (int, error) {
+	if tail == -1 || tail == 64 {
+		return 64, nil
+	}
+	return 0, fmt.Errorf("-tail has no effect on the hardware reference this tool uses (the canceller keeps 64ms); pass 64 or omit it")
 }
