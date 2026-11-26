@@ -175,6 +175,7 @@ async def run_voice_locked(device: em_device.Device, trigger_label: str = "unkno
                         em_leds.leds_spin_green(device, stop_spin)
                     )
                 meter_refresh_task = None
+                meter_on = None
                 if device.led_anim_capable:
                     # Playback ring: throb with the response's live audio
                     # level (device-side "meter" pattern, RMS measured at
@@ -216,7 +217,9 @@ async def run_voice_locked(device: em_device.Device, trigger_label: str = "unkno
                             _refresh_meter_dead_man()
                         )
 
-                    pcm_chunks = em_playback.meter_at_playback_start(pcm_chunks, _meter_on)
+                    # The wrapper is applied by the playback itself, after it
+                    # has registered this playback's start waiter (#203).
+                    meter_on = _meter_on
 
                 if device.private_listening:
                     # Defensive, for a turn that reached TTS without an end
@@ -259,7 +262,7 @@ async def run_voice_locked(device: em_device.Device, trigger_label: str = "unkno
 
                 try:
                     return await em_playback.run_streaming_post_turn_playback(
-                        device, pcm_chunks
+                        device, pcm_chunks, on_start=meter_on
                     )
                 finally:
                     if meter_refresh_task is not None:

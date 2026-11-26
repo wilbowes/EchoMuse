@@ -401,6 +401,17 @@ async def on_playback_stats(device: em_device.Device, msg: dict) -> None:
         )
 
 
+async def on_playback_started(device: em_device.Device, msg: dict) -> None:
+    """Device reports that a voice stream began playing (#203).
+
+    The device's ALSA write beginning is the only witness. Resolves the oldest
+    outstanding per-playback start waiter, so the meter ring is raised from the
+    device rather than from the first period sent, which leads the speaker by
+    the prime window.
+    """
+    device.playback_start.signal()
+
+
 async def on_oww_shadow_cross(device: em_device.Device, msg: dict) -> None:
     device_id = device.device_id
     # On-device scoring reached the wake threshold. Recorded

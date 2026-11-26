@@ -282,6 +282,7 @@ CONTROL_HANDLERS = {
     "sendspin_token":   em_control_handlers.on_sendspin_token,
     "wifi_result":      em_control_handlers.on_wifi_result,
     "playback_stats":   em_control_handlers.on_playback_stats,
+    "playback_started": em_control_handlers.on_playback_started,
     "oww_shadow_cross": em_control_handlers.on_oww_shadow_cross,
     "oww_wake":         em_control_handlers.on_oww_wake,
     "listen_state":     em_control_handlers.on_listen_state,
