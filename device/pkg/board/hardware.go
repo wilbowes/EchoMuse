@@ -217,6 +217,11 @@ type MicArray struct {
 	// EchoRef is a channel carrying the device's own playback in the same
 	// frame as the microphones, -1 when there is none.
 	EchoRef int
+	// EchoRefSide is which of the playback's two channels EchoRef loops
+	// back: 0 left (the zero value), 1 right. The AEC's de-aliasing matches
+	// the reference against that channel of the output, which only matters
+	// once the two differ (stereo over the jack, #273).
+	EchoRefSide int
 	// AECHeadroomDb is how far under micGainDb the microphones are extracted
 	// while the canceller is armed, given back after it, so the echo of loud
 	// playback does not clip the S16 extraction (clipping is distortion no
@@ -265,6 +270,10 @@ var biscuitMics = MicArray{
 	},
 	Centre:  6,
 	EchoRef: 8,
+
+	// ch8 is the RIGHT of the stereo loopback, ch7 the left: L=440Hz
+	// arrived on ch7 and R=1200Hz on ch8 (SETUP.md, 2026-08-29).
+	EchoRefSide: 1,
 }
 
 // BiscuitMics is biscuit's array, for tools that read biscuit's captures.

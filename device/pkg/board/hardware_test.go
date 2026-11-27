@@ -254,6 +254,10 @@ func TestEveryCaptureStatesItsMicArray(t *testing.T) {
 		if a.EchoRef >= 0 && (a.EchoRef < a.NumMics() || a.EchoRef >= a.Channels) {
 			t.Errorf("%s: loopback ch%d is a mic or outside the frame", b.ID, a.EchoRef)
 		}
+		// A side is the left or the right, and only a loopback has one.
+		if a.EchoRefSide < 0 || a.EchoRefSide > 1 || (a.EchoRef < 0 && a.EchoRefSide != 0) {
+			t.Errorf("%s: loopback side %d (loopback ch%d)", b.ID, a.EchoRefSide, a.EchoRef)
+		}
 		// A microphone the firmware reads is one mute must silence in
 		// hardware too.
 		if len(hw.MicMutes) == 0 {
@@ -466,6 +470,15 @@ func TestTLVInputGainsCoverEveryChannelAndAreOff(t *testing.T) {
 		}
 	}
 	checkTable(t, tlvInputGains, want, "0")
+}
+
+// Biscuit's ch8 loops back the playback's RIGHT channel (SETUP.md,
+// 2026-08-29), and radar reads the same array (its tap test, 2026-10-23).
+// The AEC's de-aliasing matches on that side once the two differ (#273).
+func TestBiscuitsLoopbackIsTheRightChannel(t *testing.T) {
+	if a := BiscuitMics(); a.EchoRef != 8 || a.EchoRefSide != 1 {
+		t.Errorf("biscuit loopback ch%d side %d, want ch8 side 1 (right)", a.EchoRef, a.EchoRefSide)
+	}
 }
 
 func checkTable(t *testing.T, table []Ctl, want map[string]bool, value string) {
