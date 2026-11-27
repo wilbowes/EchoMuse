@@ -487,6 +487,9 @@ func main() {
 		// A Bluetooth link's results have nowhere to go now, and a
 		// controller that comes back starts from no links.
 		bleBridge.DropAll()
+		// The controller's duck went with the link: it will not send
+		// `duck off` for that turn, so the local duck must not wait for it.
+		localDuck.Reset()
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker. Safe to
 		// repeat — StopAnim only bumps the animator generation, and the pulse
@@ -681,7 +684,7 @@ func main() {
 	// The depth is read at duck time rather than latched, so a config change
 	// takes effect on the next turn without a restart.
 	controlClient.OnDuck(func(on bool) {
-		localDuck.Confirm()
+		localDuck.Confirm(on)
 		if on {
 			pcmSpeaker.SetDuck(config.Get().DuckDb)
 		} else {
