@@ -1,5 +1,45 @@
 # Changelog
 
+## 2.28.0-ea.2 (Early Access)
+
+Sign in to the dashboard through your own identity provider, and find an Echo by flashing its ring. Pair with firmware v2.20.0-ea.2 and emOS emos-v0.12-ea.2, which this controller offers.
+
+**This release upgrades the controller's database to v34, and that cannot be undone in place.** A backup of the v33 database, `echomuse.db.pre-v33.bak`, is written beside it first. To go back to 2.28.0-ea.1 you must restore that backup, losing anything recorded since; an older controller refuses to start on a v34 database. Each migration now runs in a single transaction, so one that fails leaves the database as it was (#1202).
+
+### New
+
+- **Sign in through an OpenID Connect provider** (Authentik, Keycloak and the like), with dashboard roles taken from the provider's groups. Password sign-in stays on unless you turn it off. With it off, a local account cannot get you in if the provider is down: unset `OIDC_PASSWORD_LOGIN` and restart the controller (#868).
+- **Identify an Echo from the dashboard.** Its ring flashes violet for 30 seconds over everything else, mute included. Needs firmware v2.20.0-ea.2 (#860).
+- **SSH into an Echo running emOS**, switched on per Echo from its settings (#1168).
+- **Keep as many wake samples as you choose** (it was a fixed 50 per Echo), **and export an Echo's samples as one zip,** grouped by label (#1174, #962).
+
+### Improved
+
+- One frame at the wake threshold now barges in during a reply, as a deliberate wake word often holds the lower barge-in bar for a single frame (#1223).
+- A wake word the Echo acted on during an announcement now takes the turn (#1236).
+- The leftover echo of an interrupted reply no longer ends the interrupting turn early (#1226).
+- An armv7 Echo's encrypted link uses ChaCha20: decrypting a reply takes 1.0% of a core instead of 3.4% (#1213).
+- Uploading firmware no longer freezes the dashboard while it is processed.
+
+### Fixed
+
+- The setup wizard no longer stops at Connect Device with "Cannot read properties of undefined" (#1206).
+
+### Known issues
+
+- The end of the wake word can reach speech-to-text in front of the command, as in "Auto, play…" or "Remnant" (#1173).
+- A command spoken straight on from the wake word can lose its first word (#987, #1070).
+- Both 3.5 mm jack channels can be silent on emOS (#999).
+- The emOS update refuses an amonet 1 Echo that boots from slot B (#973).
+- An Echo that restarts and rejoins a playing Sendspin group can fall out of sync until the next track.
+- A Sendspin stream that Music Assistant starts within a moment of the Echo connecting can lose its first two seconds.
+- A fleet setting saved while an Echo has its own value for it changes nothing on that Echo, and the fleet page does not say so.
+- A turn is occasionally logged as empty although its recording holds clear speech (#815).
+
+### Thanks
+
+@anthony-hull (#868), @midiland (#1174, #962), @AndyVaile (#1206).
+
 ## 2.28.0-ea.1 (Early Access)
 
 The Echo Dot 3rd gen joins the setup wizard, and Home Assistant gets each Echo's CPU temperature. Pair with firmware v2.20.0-ea.1 and emOS emos-v0.12-ea.1, which this controller offers.
