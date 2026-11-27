@@ -270,6 +270,10 @@ var biscuitMics = MicArray{
 	},
 	Centre:  6,
 	EchoRef: 8,
+	// Three evenly spaced edge mics beside the centre's wake stream: at 3 m
+	// over full-volume replies ch6 caught 4.25 of 11 barge-ins and ch0/2/4
+	// 8.25 (15LE, 2026-11-20). Radar shares the array.
+	ReplyTaps: 3,
 
 	// ch8 is the RIGHT of the stereo loopback, ch7 the left: L=440Hz
 	// arrived on ch7 and R=1200Hz on ch8 (SETUP.md, 2026-08-29).

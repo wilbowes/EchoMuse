@@ -134,16 +134,25 @@ func (d *DataClient) pushTaps(tapped [][]byte) {
 	}
 }
 
-// tapChannels is the first n distinct channels of all, in order, without
-// sel (a board can have more beam directions than microphones).
+// tapChannels picks n of all's distinct channels, without sel, spaced
+// evenly round the array from all's first (a board can have more beam
+// directions than microphones). Evenly, not the first n: on six mics three
+// adjacent ones all face the last turn's direction, and the lock is not
+// reliable enough to bet a reply on (15LE at 3 m, 2026-11-20: ch0/2/4
+// caught 8.25 of 11 barge-ins, ch6 alone 4.25).
 func tapChannels(all []int, sel, n int) []int {
-	out := make([]int, 0, n)
+	var cand []int
 	seen := map[int]bool{sel: true}
 	for _, c := range all {
-		if !seen[c] && len(out) < n {
+		if !seen[c] {
 			seen[c] = true
-			out = append(out, c)
+			cand = append(cand, c)
 		}
+	}
+	n = min(n, len(cand))
+	out := make([]int, n)
+	for i := range out {
+		out[i] = cand[i*len(cand)/n]
 	}
 	return out
 }

@@ -22,3 +22,23 @@ func TestTapsSkipTheStreamsOwnMic(t *testing.T) {
 		}
 	}
 }
+
+// On six perimeter mics with the stream on the centre, the taps are every
+// other mic, not the three beside the last turn's direction.
+func TestTapsSpreadRoundSixMics(t *testing.T) {
+	all := []int{2, 3, 4, 5, 0, 1}
+	for _, c := range []struct {
+		sel, n int
+		want   []int
+	}{
+		{6, 3, []int{2, 4, 0}},
+		{6, 2, []int{2, 5}},
+		{2, 3, []int{3, 4, 0}}, // the stream on a perimeter mic: never tapped
+		{6, 9, []int{2, 3, 4, 5, 0, 1}},
+		{6, 0, []int{}},
+	} {
+		if got := tapChannels(all, c.sel, c.n); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("sel %d n %d: %v, want %v", c.sel, c.n, got, c.want)
+		}
+	}
+}
