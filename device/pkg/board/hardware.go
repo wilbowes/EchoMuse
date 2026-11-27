@@ -362,8 +362,9 @@ var biscuitHardware = &Hardware{
 		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
 		Voicing:   biscuitVoicing,
 
-		// L/R through the jack, Dining Room Dot, 2026-10-03 (the #273
-		// community patch; sascha-hemi on FireOS 6 with hot-plug). Insert
+		// L/R through the jack on FireOS, 2026-10-03 (the #273 community
+		// patch; sascha-hemi on FireOS 6 with hot-plug), and on emOS with a
+		// left/right test track and hot-plug, 2026-11-20 to 11-27. Insert
 		// switches Ext_Speaker_Amp_Switch off, and the speaker plays only
 		// with it on (docs/history/device.md, 2026-11-19).
 		StereoJack: true,
