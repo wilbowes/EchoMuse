@@ -717,7 +717,7 @@ jobs:
           mkdir -p emos/build
           docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
             '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
-               -static -O2 -Wall -o build/init init/init.c'
+               -static -O2 -Wall -Wextra -Werror -o build/init init/init.c'
       - name: Check it is a static aarch64 binary
         # Same reasoning as the firmware check above, plus the static half:
         # both properties are silent when wrong and fatal on the device.
@@ -731,7 +731,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD/emos":/emos -w /emos echomuse-compiler bash -lc \
             '/opt/android/ndk/21.4.7075529/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang \
-               -static -O2 -Wall -o build/init32 init/init.c'
+               -static -O2 -Wall -Wextra -Werror -o build/init32 init/init.c'
       - name: Check it is a static 32-bit ARM binary
         run: |
           file emos/build/init32
@@ -745,6 +745,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # -Wall -Wextra -Werror on every compile here and on the NDK init
+      # builds (#822). What it found in init.c (unchecked snprintf paths,
+      # which GCC 13+ reports and 11 does not, and unchecked write, read,
+      # symlink and system, which Ubuntu's _FORTIFY_SOURCE marks) was fixed
+      # first in its own change. A warning in init.c is cheap here and a
+      # reflash on hardware.
       # WHY THIS EXISTS: emos/ is ~1,900 lines of C that until now nothing in
       # CI compiled, let alone ran. It is also the code with the longest
       # feedback loop in the project — a change reaches a verdict only by
@@ -766,7 +772,7 @@ jobs:
         # handed-back-dark check by design and is not a scenario to assert
         # here without a second invariant set.
         run: |
-          cc -O2 -Wall -o /tmp/ringsim emos/init/ringsim.c -lm
+          cc -O2 -Wall -Wextra -Werror -o /tmp/ringsim emos/init/ringsim.c -lm
           /tmp/ringsim --check
       # The console idle timeout is parsed by hand in C from a file the
       # FIRMWARE writes and INIT reads, in different languages in different
@@ -776,7 +782,7 @@ jobs:
       # reached for because everything else had already failed.
       - name: The console timeout parser reads what the firmware writes
         run: |
-          cc -O2 -o /tmp/tmoutcheck emos/init/tmoutcheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/tmoutcheck emos/init/tmoutcheck.c
           /tmp/tmoutcheck
       # The supplicant's control socket directory is declared inside the conf,
       # and emOS has two confs that declare different ones — em-wifi's own file
@@ -787,24 +793,24 @@ jobs:
       # the ring exactly like a wrong password.
       - name: The control socket is found in whichever conf is in use
         run: |
-          cc -O2 -o /tmp/wpacheck emos/init/wpacheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/wpacheck emos/init/wpacheck.c
           /tmp/wpacheck
-          cc -O2 -o /tmp/cmdlinecheck emos/init/cmdlinecheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/cmdlinecheck emos/init/cmdlinecheck.c
           /tmp/cmdlinecheck
-          cc -O2 -o /tmp/serialcheck emos/init/serialcheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/serialcheck emos/init/serialcheck.c
           /tmp/serialcheck
       # DNS comes from the DHCP lease (#1066), by RFC 2131/2132/3396. A wrong
       # parse keeps the address and the controller and loses only names.
       - name: DNS is taken from the lease, by the spec
         run: |
-          cc -O2 -o /tmp/dnscheck emos/init/dnscheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/dnscheck emos/init/dnscheck.c
           /tmp/dnscheck
       # Every node in /dev comes from the kernel's uevents. A node with the
       # wrong numbers opens something else: on the Echo Dot 3 the old table's
       # ttyGS0 was the jack detector, and the USB console sat silent.
       - name: Device nodes are made the way the kernel describes them
         run: |
-          cc -O2 -o /tmp/devcheck emos/init/devcheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/devcheck emos/init/devcheck.c
           /tmp/devcheck
       # The trial mark is written by the controller and read by init, and it
       # decides whether an image updated over the network is rolled back. Read
@@ -812,7 +818,7 @@ jobs:
       # healthy one back. Neither says why on the device.
       - name: An updated image is on trial exactly when the controller says so
         run: |
-          cc -O2 -o /tmp/trialcheck emos/init/trialcheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/trialcheck emos/init/trialcheck.c
           /tmp/trialcheck
       # SSH is init's own service, independent of EchoMuse. Listening with no
       # key, copying anything but whole ssh-ed25519 lines, or turning it off
@@ -820,7 +826,7 @@ jobs:
       # device. Runs ssh_main for real against a stub tinysshd.
       - name: SSH listens only while the owner wants it, and closes whole
         run: |
-          cc -O2 -o /tmp/sshcheck emos/init/sshcheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/sshcheck emos/init/sshcheck.c
           /tmp/sshcheck
       # em-wifi decides from wpa_supplicant's scan flags which networks it
       # offers. Tested SAE before PSK, it refused every WPA2/WPA3 transition-
@@ -846,7 +852,7 @@ jobs:
       # or not the console-password work is in the tree beside it.
       - name: The C password hash agrees with Python's
         run: |
-          cc -O2 -o /tmp/pwcheck emos/init/pwcheck.c
+          cc -O2 -Wall -Wextra -Werror -o /tmp/pwcheck emos/init/pwcheck.c
           /tmp/pwcheck | tee /tmp/vectors.txt
           # The vectors go in as an ARGUMENT, not on stdin: the heredoc below
           # is already stdin, so a redirect here would be overridden and the
