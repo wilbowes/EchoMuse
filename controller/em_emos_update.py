@@ -3,10 +3,10 @@ Updating emOS on a device that is already running it, over the network (#573).
 
 The image cannot be shipped — it carries the device's own kernel and DTBs — so
 an update is a REBUILD: read the running image off the boot partition, keep its
-kernel and cmdline byte for byte, swap the ramdisk for one built from the
-release's init, and write it back. `em_emos_build` does the packing; this
-module holds every decision around it, so they can be tested without a device
-or aiohttp. `em_emos_ota._run_update_locked` only carries.
+kernel and cmdline byte for byte (on the Dot 3, all but the cmdline's ramdisk
+size), swap the ramdisk for one built from the release's init, and write it
+back. `em_emos_build` does the packing; this module holds every decision
+around it, so they can be tested without a device or aiohttp. `em_emos_ota._run_update_locked` only carries.
 
 amonet 1 and 2 need no separate path. The running image is on mmcblk0p10 on
 both (emos/init/init.c hardcodes it for its own rollback), and everything that
@@ -290,6 +290,43 @@ def reference_problems(image: bytes, device_osr: dict) -> list:
     return problems
 
 
+def _cmdline(image: bytes):
+    """The header's cmdline, or None unless it ends in a NUL followed only by
+    NULs (the field's padding)."""
+    text, nul, rest = image[64:576].partition(b"\0")
+    if not nul or rest.strip(b"\0"):
+        return None
+    return text
+
+
+def _same_cmdline(reference: bytes, image: bytes) -> bool:
+    """Whether the rebuilt image's cmdline is the reference's.
+
+    Byte for byte, except on a board whose bootloader ignores the header's
+    ramdisk size (the Dot 3, `build.CMDLINE_RECIPES`): it is given as
+    `initrd=<addr>,<size>` on the cmdline instead, so a new ramdisk MUST change
+    that one token. There the rebuilt cmdline has to carry exactly one, saying
+    the ramdisk the new header describes, and once it is taken out of both the
+    rest has to be the same tokens in the same order (split on single spaces,
+    so a changed run of spaces is a changed token). Where it sits is not
+    compared: the wizard's first build puts it before `emos.system=`, a
+    rebuild after it.
+    """
+    ref, new = _cmdline(reference), _cmdline(image)
+    if ref is None or new is None:
+        return False
+    ref_toks, new_toks = ref.split(b" "), new.split(b" ")
+    key = build.INITRD_KEY.encode()
+    if not any(t.startswith(key) for t in ref_toks):
+        return ref == new
+    rsize, raddr = struct.unpack("<II", image[16:24])
+    want = f"{build.INITRD_KEY}{raddr:#x},{rsize}".encode()
+    if [t for t in new_toks if t.startswith(key)] != [want]:
+        return False
+    return ([t for t in ref_toks if not t.startswith(key)]
+            == [t for t in new_toks if not t.startswith(key)])
+
+
 def built_problems(reference: bytes, image: bytes, version: str,
                    partition_bytes: int) -> list:
     """Why a rebuilt image must not be written, or [].
@@ -308,8 +345,10 @@ def built_problems(reference: bytes, image: bytes, version: str,
     if _regions(image)[0] != _regions(reference)[0]:
         problems.append("the kernel differs from the one read off the device")
     # Sizes aside (the ramdisk's changes), the header up to the id is the
-    # addresses, the product name and the cmdline.
-    if image[20:576] != reference[20:576] or image[8:16] != reference[8:16]:
+    # addresses, the product name and the cmdline; the cmdline's own ramdisk
+    # size, where it has one, is _same_cmdline's.
+    if (image[20:64] != reference[20:64] or image[8:16] != reference[8:16]
+            or not _same_cmdline(reference, image)):
         problems.append("the load addresses or the command line changed")
     if stored_id(image) != computed_id(image):
         problems.append("the built image's id does not match its contents")

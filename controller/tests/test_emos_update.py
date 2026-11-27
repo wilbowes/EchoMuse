@@ -611,3 +611,56 @@ def test_every_command_ends_with_the_sentinel():
             up.status_cmd(), up.REBOOT_CMD]
     for c in cmds:
         assert c.rstrip().endswith(f"echo {up.OK}"), c
+# ── A board that gives its ramdisk size on the cmdline (the Dot 3) ───────────
+def donut_installed():
+    return eb.build_emos_image(fx.donut_reference(), fx.fake_init(size=4097),
+                               "emos-v0.9", system_part=14, board="donut")["image"]
+def donut_updated(reference):
+    return eb.build_emos_image(reference, new_init(), "emos-v0.10",
+                               board="donut")["image"]
+def with_cmdline(image, edit):
+    """`image` with its cmdline replaced by edit(cmdline), NUL-padded."""
+    out = bytearray(image)
+    out[64:576] = edit(up._cmdline(image)).ljust(512, b"\0")
+    return bytes(out)
+def cmdline_refused(ref, new):
+    problems = up.built_problems(ref, new, "emos-v0.10", 16 << 20)
+    return any("addresses or the command line" in p for p in problems)
+def test_a_donut_rebuild_passes_though_its_cmdline_carries_the_new_size():
+    """initrd=<addr>,<size> is the one cmdline token an update must change
+    (the Dot 3's bootloader ignores the header's size); the check refused it."""
+    ref = donut_installed()
+    new = donut_updated(ref)
+    assert up._cmdline(new) != up._cmdline(ref)
+    assert up.built_problems(ref, new, "emos-v0.10", 16 << 20) == []
+@pytest.mark.parametrize("why,edit", [
+    ("a stale size", lambda c: re.sub(rb"(initrd=\S+),\d+", rb"\1,1", c)),
+    ("a moved address", lambda c: re.sub(rb"initrd=0x[0-9a-f]+",
+                                         b"initrd=0x44100000", c)),
+    ("a second initrd=", lambda c: c + b" initrd=0x44000000,1"),
+    ("no initrd=", lambda c: re.sub(rb" ?initrd=\S+", b"", c)),
+    ("another token added", lambda c: c + b" extra=1"),
+    ("the other tokens reordered", lambda c: b" ".join(c.split(b" ")[::-1])),
+    ("a doubled space", lambda c: c.replace(b" ", b"  ", 1)),
+])
+def test_a_donut_rebuild_is_refused_for(why, edit):
+    ref = donut_installed()
+    assert cmdline_refused(ref, with_cmdline(donut_updated(ref), edit)), why
+def test_an_image_without_initrd_may_not_gain_one():
+    ref = installed()
+    new = with_cmdline(updated(ref), lambda c: c + b" initrd=0x1,1")
+    assert cmdline_refused(ref, new)
+def test_a_cmdline_with_no_terminator_is_refused_not_raised():
+    """Identical on both sides, so only the missing NUL can refuse it."""
+    def unterminated(image):
+        out = bytearray(image)
+        out[64:576] = b"a" * 512
+        return bytes(out)
+    ref = installed()
+    assert cmdline_refused(unterminated(ref), unterminated(updated(ref)))
+def test_bytes_after_the_cmdline_terminator_are_refused():
+    """The same cmdline text, with something in the field's padding."""
+    ref = installed()
+    new = bytearray(updated(ref))
+    new[575] = 0x41
+    assert cmdline_refused(ref, bytes(new))
