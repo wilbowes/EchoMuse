@@ -316,7 +316,13 @@ keeps the gain. Raising a number in the baseline is allowed, in the same
 change, where a reviewer sees it. And CI holds each module's test coverage at
 or above its floor in `tests/coverage_floor.json` (`tools/coverage_floor.py`;
 today's figure less a point, raised and never lowered); a new module needs a
-floor before it merges.
+floor before it merges. 2026-11-22, #1250 (Wil agreed): moving em_controller's
+Device, its best-tested part, to em_device took its tests' coverage with it,
+so em_controller alone fell 23.7 -> 16.8% while the two together rose 23.7 ->
+24.4% with no test removed. A floor cannot tell a deleted test from a moved
+tested function, so a pure move may re-split floors between the modules it
+touches when their combined line coverage does not fall; the commit states
+both figures.
 
 **emOS is C with no test framework, so its off-target tools ARE its suite** —
 `ringsim --check` for the boot ring's invariants, `pwcheck` for the password

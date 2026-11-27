@@ -77,8 +77,7 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
     goes plain dark. Slice to the ceding one specifically, or this passes on
     the wrong path's code.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    src = src[src.index("async def _stream_listen"):]
+    src = _sources.def_source("_stream_listen")
     branch = src[src.index("if not serves or won_by != device.device_id:"):]
     # The no-HA sub-branch ends at its own `continue`; ceding is what follows.
     stand = branch.index("if not serves:")
@@ -90,14 +89,14 @@ def test_the_arbitration_loser_gets_its_ring_turned_off():
     )
     assert "leds_off(device)" in code, \
         "a ceding device must be told to darken its ring"
-    assert "_leds_turn_end" not in code, \
+    assert "leds_turn_end" not in code, \
         "the loser had no turn, so it gets plain off, not an outcome cue"
 
     # And the two exits must stay distinguishable: the stand-down path is the
     # one that cues, and reading it as a cede would take the cue away exactly
     # on a multi-device fleet, which is how this was reported.
     standdown = branch[stand:branch.index("continue", stand)]
-    assert "_leds_turn_end(device)" in standdown, \
+    assert "em_leds.leds_turn_end(device)" in standdown, \
         "a device with no HA cues its state whether or not another Echo won"
 
 
@@ -105,14 +104,12 @@ def test_the_private_path_darkens_a_loser_and_cues_a_device_with_no_ha():
     """The same two exits on the private-listening path (docs/listening.md),
     which returns where the stream path continues. Both must also close the
     session, or the Echo keeps sending until its own ack timeout."""
-    src = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("async def _private_wake_turn"):]
-    body = body[:body.index("\nasync def ")]
+    body = _sources.def_source("_private_wake_turn")
     branch = body[body.index("if not serves or won_by != device.device_id:"):]
     branch = branch[:branch.index("await device.listen_ack(session)")]
     code = "\n".join(l for l in branch.splitlines() if not l.lstrip().startswith("#"))
     assert "listen_close(session" in code
     standdown = code[code.index("if not serves:"):code.index("else:")]
     cede = code[code.index("else:"):]
-    assert "_leds_turn_end(device)" in standdown
-    assert "leds_off(device)" in cede and "_leds_turn_end" not in cede
+    assert "em_leds.leds_turn_end(device)" in standdown
+    assert "leds_off(device)" in cede and "leds_turn_end" not in cede

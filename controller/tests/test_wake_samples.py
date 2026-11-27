@@ -337,10 +337,11 @@ def test_zip_groups_by_label_and_skips_missing_or_foreign_files(fresh_db):
 
 
 def test_zip_keeps_the_newest_clips_when_capped(fresh_db, monkeypatch):
-    # The archive's memory bound is the retention constant itself, so a
-    # caller handing build_zip more rows than retention allows still gets
-    # KEEP_PER_DEVICE of them — taken from the top, rows arriving id DESC.
-    monkeypatch.setattr(samples, "KEEP_PER_DEVICE", 2)
+    # The archive's memory bound is the clamp maximum, not the default
+    # retention, so a device with wakeClipKeep raised still gets every
+    # retained clip — a caller handing build_zip more rows than that still
+    # gets KEEP_MAX of them, taken from the top, rows arriving id DESC.
+    monkeypatch.setattr(samples, "KEEP_MAX", 2)
     rows = []
     for i in range(4):
         name = samples.filename("dev1")
@@ -349,3 +350,52 @@ def test_zip_keeps_the_newest_clips_when_capped(fresh_db, monkeypatch):
     with zipfile.ZipFile(io.BytesIO(samples.build_zip("dev1", rows))) as zf:
         expected = sorted(f"wake/{r['audio_file']}" for r in rows[:2])
         assert sorted(zf.namelist()) == expected
+
+
+def test_zip_stores_pcm_uncompressed(fresh_db):
+    # PCM barely deflates, so the archive stores entries raw — and stored
+    # entries must still read back as the WAV bytes that were written.
+    name = samples.filename("dev1")
+    assert samples.save("dev1", name, _pcm())
+    with zipfile.ZipFile(io.BytesIO(samples.build_zip("dev1", [{"audio_file": name, "label": "wake"}]))) as zf:
+        info = zf.getinfo(f"wake/{name}")
+        assert info.compress_type == zipfile.ZIP_STORED
+        assert zf.read(info) == samples.encode_wav(_pcm())
+
+
+def test_retention_follows_the_configured_clip_count(fresh_db):
+    # A device's wakeClipKeep applies only once the wakeword section is
+    # overridden — the same rule every other section-scoped key follows.
+    db.set_device_config_sections("dev1", ["wakeword"])
+    config = db.get_effective_device_config("dev1")
+    config["wakeClipKeep"] = samples.KEEP_PER_DEVICE + 2
+    db.set_device_config("dev1", config)
+    for i in range(samples.KEEP_PER_DEVICE + 5):
+        db.insert_wake_sample("dev1", {
+            "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
+        })
+    assert len(db.get_wake_samples("dev1", samples.KEEP_MAX)) == samples.KEEP_PER_DEVICE + 2
+
+
+def test_wake_clip_keep_is_clamped_on_both_write_paths(fresh_db):
+    config = db.get_effective_device_config("dev1")
+    config["wakeClipKeep"] = 9999
+    db.set_device_config("dev1", config)
+    assert db.get_device_config("dev1")["wakeClipKeep"] == samples.KEEP_MAX
+
+    fleet = db.get_global_device_config()
+    fleet["wakeClipKeep"] = 0
+    db.set_global_device_config(fleet)
+    assert db.get_global_device_config()["wakeClipKeep"] == samples.KEEP_MIN
+
+
+def test_retention_falls_back_to_the_default_on_a_non_numeric_keep(fresh_db):
+    # The write clamps skip non-numbers rather than inventing a value, so a
+    # stored None (or anything a future path fails to clamp) must not become
+    # an unbounded retention — the prune clamps on read, to the default.
+    db.set_device_config("dev1", {"wakeClipKeep": None})
+    for i in range(samples.KEEP_PER_DEVICE + 5):
+        db.insert_wake_sample("dev1", {
+            "ts": i, "audio_file": samples.filename("dev1"), "kind": "candidate",
+        })
+    assert len(db.get_wake_samples("dev1", samples.KEEP_MAX)) == samples.KEEP_PER_DEVICE

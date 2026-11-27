@@ -1238,6 +1238,102 @@ enabled it and nothing happened" this removes.
   false fire in 49 s of reply-only audio for any set. Geometry-steered beams do
   not beat plain mics on the donut (4 mics, 3 degrees of freedom); talker-learnt
   steering was not tried (no calibration capture on 41C8).
+- 2026-11-21, donut 41C8 moved to the lounge (no other Echo listening), volume
+  21%, Wil at 6, 4 and 8 o'clock, 3 m at 6 and nearer 4 m at 4 and 8. Quiet
+  wake 10/10 first try (crossings 0.51-0.87, peaks 0.79-0.92). Barge over a
+  28 s announcement, one try each, on the 11-20 bench build (taps + stale
+  reads, speex frame 1280): 4 of 8; every miss peaked 0.03 or lower against
+  the 0.25 bar, i.e. nothing heard, and 6 o'clock went 0 of 3. Replaying the
+  captures through speex at 10 ms frames removed 19.4-21 dB of the reply
+  against 14-15 dB at 80 ms (the device's own 14.5-19 dB, which was the
+  "gap at source" of 11-20), and the misses scored 0.57, 0.90 and 0.85 on a
+  tap at 160 against 0.00 at 1280; one miss (the first announcement of a
+  window) scored nothing at any frame. 20 ms frames removed 18.6 dB, 40 ms
+  17.2 dB, and recovered fewer. Bench build at 160: 11 of 12 live (5/6 then
+  6/6, 6 o'clock 4 of 4), +6% of one core during a reply (112% vs 106%),
+  idle unchanged, reply self-score peak 0.09. The one miss (8 o'clock, ~4 m)
+  showed no voice burst in the cancelled audio and scored at most 0.35 with
+  residual suppression: level or model, not residue. The same replay on
+  15LE's 11-20 Dot 2 round gave +0.1-0.4 dB at 160 (9.9-13.9 vs 10.2-14.0),
+  so #1211's one-block filter costs the Dot 2 nothing and donut 6 dB. Not
+  established why: a longer or more diffuse echo path on the donut needing
+  the finer partition is the guess. Captures in
+  em-diag/donut-lounge-2026-11-21 (local).
+- 2026-11-22, reply taps vs ONE locked mic, offline, Hey_Verona, rule = two
+  frames >= 0.25 or one >= 0.5, mean of the capture's frame phases. C95 11-18
+  (4 rounds, 37 attempts over replies, talker still): ch6 alone 6.75, the
+  single mic SRP-PHAT picked at the preceding wake 7.0, energy-burst pick
+  5.5, best-scoring mic at the wake 4.6; ch6 + 3 taps 16.0, all seven 18.9.
+  41C8 11-20 (8 tries): fixed mics 4.25-6.0, locked from the previous try
+  3.5-4.25, all four 6.25. So the taps win by scoring several looks at a
+  near-threshold score, not by finding the talker's side: the best-scoring
+  mic moved between opposite mics from try to try with the talker standing
+  still, on both boards. SRP-PHAT (300-4000 Hz, 7 mics, 5 degree grid) was
+  the only stable direction: 20-30 degrees on all 15 quiet wakes across the
+  4 C95 rounds, where the energy-burst pick landed on 5 different mics.
+  During playback both estimators failed on 15LE (0/7 agreement with the
+  best mic; residual echo dominates), so direction must be taken before the
+  reply. Scripts: scratchpad lockreplay.py, c95lock.py (not kept).
+- 2026-11-22, AEC3 rematch on the donut after the capture fixes (#975 does
+  not apply: the donut's loopback is clean), offline on 41C8 11-21 round 4
+  and 11-20 round 4, same mics, aligned reference and scorer. Removed during
+  reply, mean of 4 mics: speex (frame 160) 19.9 / 23.5 dB, AEC3 linear 10.0 /
+  16.9, AEC3 full 13.4 / 28.4. Barge catches by any mic over audio-found
+  tries: speex 2.25/7 and 5.75/14, AEC3 linear 0 and 1.75, AEC3 full 0 and 0
+  (its suppressor removes the talker with the echo). Speex stays. Same
+  rounds: missed and caught tries sit at the same ~10 dB over the residue
+  (e.g. 9.6 dB caught at 0.88, 9.7 and 10.5 dB missed at 0.07), so the misses
+  are the model's all-or-nothing response at that SNR; residue-trained v3
+  (11-20) did not move it.
+- 2026-11-22, model-agnostic front-end sweep on the same two donut rounds,
+  shipped Hey_Verona, barge catches by any mic (11-20 of 14 / 11-21 of 7):
+  make-up gain +6/+12/+18/+24 dB 5.75 / 1.75-2.25 (flat: the log-mel front
+  end does not care about level in this range); high-pass 200 Hz 5.75 / 1.75,
+  400 Hz 5.50 / 1.75 (no help); scoring at a 40 ms hop instead of 80 ms
+  6.00 / 3.00, +0.25 and +0.75 tries for double the scorer CPU across four
+  streams. Same audio through livekit-wakeword's conv-attention heads (#838,
+  same features, static [1,16,96] export): small 9.0 / 4.0, medium 7.5 / 4.0;
+  highest score over 31 s of reply with nobody talking (11-20): forge 0.05,
+  small 0.15, medium 0.59 (medium would false-barge). Needs an hour-long
+  reply soak before any of it goes on an Echo.
+- 2026-11-22, false-barge soak on 41C8 (office, normal volume 71/127, 30
+  stories, 38.5 min of reply scored on the device's own scorer inputs, people
+  talking in another room): fires per model and rule, via
+  controller/tools/barge_replay.py. forge Hey_Verona 0.25/0.5: 1 (a tap at
+  0.49). livekit small 0.15/0.3: 20; 0.20/0.40: 1; 0.25/0.50: 0. livekit
+  medium 0.45/0.7: 2; 0.55/0.8: 1. Barge catches on the 11-20 / 11-21 rounds
+  for small: 9.0 / 4.0 at 0.15/0.3, 8.5 / 4.0 at 0.20/0.40, 7.5 / 4.0 at
+  0.25/0.50 (forge 5.75 / 2.25). So small at the shipped barge rule is the
+  candidate; medium false-barges. Open: its idle wake threshold. On
+  synthetic positives small at 0.50 recalled 10% vs forge 26% (#838 results),
+  and the wake threshold is also the barge rule's one-frame bar, so quiet
+  wakes at 0.5 vs 0.3 need a real-voice round before it ships. Wil listened
+  to all four fires at realistic bars: reply residue in every one, none the
+  people talking elsewhere, so they are true false barges (forge ~1.6/h).
+- 2026-11-22, late-reverb suppression and a coherence gain on the donut
+  barge rounds, offline, after the device's speex AEC, shipped Hey_Verona at
+  +12 dB, 4 mics, rule two frames >= 0.25 or one >= 0.5, 4 phases. Lebart
+  2001 (exponential decay, Td 50 ms) per mic: T60 0.3 s 5.50/14 and 1.25/7,
+  T60 0.5 s 2.50/14 and 1.50/7, against 5.75/14 and 2.25/7. Allen 1977 /
+  Zelinski 1988 coherence gain (mean pairwise |cross-PSD| over mean
+  auto-PSD, squared, floor 0.15) applied to each mic's own STFT: 7.00/14 and
+  2.00/7, and the reply-only peak rose 0.05 -> 0.29 on 11-20, over the 0.25
+  bar. Both together 6.00/14 and 2.00/7. So enhancement after the AEC loses
+  catches or buys them with residue; with the gain/high-pass/hop sweep and
+  the AEC3 rematch, that is three front-end families with no clean gain on
+  the shipped model. Not run on C95 or the soak for that reason.
+- 2026-11-22, a residue floor as a barge gate, offline (minimum statistics,
+  Martin 2001, simplified): fire only when the score rule holds AND the
+  scorer's own post-AEC audio is G dB over the minimum of its smoothed
+  300-3400 Hz frame power over the last 1.6 s of reply. Same 11-20 / 11-21
+  donut rounds and the 41C8 38.5 min soak, via barge_replay.py. livekit
+  small 0.15/0.3: false barges 21 -> 13 / 12 / 10 at G = 3 / 6 / 9 dB,
+  catches 9.00/14 and 4.00/7 at 3 and 6 dB, 8.00/14 at 9 dB. At 0.20/0.40
+  and 0.25/0.50 the soak already had 1 and 0 fires, so the gate only costs
+  catches there. forge's one fire (a tap at 0.49) survives every gate. So
+  the floor halves small's fires at the low bar but leaves 16-20/h, nowhere
+  near forge's ~1.6/h: it does not unlock 0.15/0.3. Tracker item 3 closed,
+  no.
 
 ## The external audio jack
 

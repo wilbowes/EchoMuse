@@ -25,6 +25,7 @@ import _oww_stub
 _oww_stub.install()
 
 import _sources  # noqa: E402
+import em_device
 import em_controller  # noqa: E402 — must follow the stub
 import em_identify as ident  # noqa: E402
 
@@ -109,15 +110,15 @@ def test_the_route_reports_the_thirty_seconds():
 
 
 def test_the_capability_property_reads_the_register_list():
-    with_it = em_controller.Device("d1", "10.0.0.1", ["identify_ring"], None)
-    without = em_controller.Device("d2", "10.0.0.2", ["led_anim"], None)
+    with_it = em_device.Device("d1", "10.0.0.1", ["identify_ring"], None)
+    without = em_device.Device("d2", "10.0.0.2", ["led_anim"], None)
     assert with_it.identify_ring_capable is True
     assert without.identify_ring_capable is False
 
 
 def test_identify_sends_one_bare_identify_message():
     sent = []
-    d = em_controller.Device("d1", "10.0.0.1", ["identify_ring"], None)
+    d = em_device.Device("d1", "10.0.0.1", ["identify_ring"], None)
 
     async def send_control(msg):
         sent.append(msg)

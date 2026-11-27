@@ -1130,7 +1130,7 @@ function turnSegments(t) {
   return { listen, transcribe, respond, shown: listen + transcribe + respond };
 }
 
-function WakeSampleReview({ deviceId, isAdmin }) {
+function WakeSampleReview({ deviceId, isAdmin, keep }) {
   const [samples, setSamples] = useState([]);
   const [playing, setPlaying] = useState(null);
   const [zipError, setZipError] = useState('');
@@ -1140,7 +1140,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
 
   const load = async () => {
     if (!isAdmin) return;
-    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=50`) || []); }
+    try { setSamples(await API.get(`/api/devices/${deviceId}/wake-samples?limit=${keep ?? 50}`) || []); }
     catch {}
   };
   useEffect(() => {
@@ -1152,7 +1152,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
       Object.values(urlsRef.current).forEach(URL.revokeObjectURL);
       urlsRef.current = {};
     };
-  }, [deviceId, isAdmin]);
+  }, [deviceId, isAdmin, keep]);
 
   const sampleUrl = async sample => {
     if (urlsRef.current[sample.id]) return urlsRef.current[sample.id];
@@ -1214,7 +1214,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   if (!isAdmin || !samples.length) return null;
   return <div style={{ marginTop: 'var(--space-8)', borderTop: '1px solid var(--track)', paddingTop: 'var(--space-6)' }}>
     <div className="em-label" style={{ marginBottom: 'var(--space-4)', display: 'flex', alignItems: 'center' }}>
-      <span style={{ flex: 1 }}>Wake-word samples</span>
+      <span style={{ flex: 1 }}>Wake-word samples · newest {keep ?? 50}</span>
       {zipError && <span role="alert" style={{ color: 'var(--error)', marginRight: 'var(--space-4)' }}>{zipError}</span>}
       <button onClick={downloadZip} title="Download every retained sample as one ZIP, grouped by label" style={{ background: 'none', border: 0, color: 'var(--text2)', cursor: 'pointer' }}>⤓ all (.zip)</button>
     </div>
@@ -1234,7 +1234,7 @@ function WakeSampleReview({ deviceId, isAdmin }) {
   </div>;
 }
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
+function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin, keep }) {
   const [hover, setHover] = useState(null); // index into `recent`
   const mono = "var(--font-mono)";
 
@@ -1408,7 +1408,7 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
           })()}
         </div>
       )}
-      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin}/>
+      <WakeSampleReview deviceId={deviceId} isAdmin={isAdmin} keep={keep}/>
     </div>
   );
 }
@@ -2465,6 +2465,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     stateLabel={state.label.toUpperCase()}
                     stateColor={state.lcd}
                     isAdmin={isAdmin}
+                    keep={cfgEff.wakeClipKeep}
                   />
                 </Panel>
               </div>
@@ -2533,6 +2534,10 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 bleConnectCapable={!device.connected || !!device.bleConnectCapable}
                 blePanel={device.connected && device.bleConnectCapable
                   ? <BleProxyKey deviceId={device.device_id} status={device.bleProxy} isAdmin={isAdmin}/>
+                  : null}
+                sshPanel={device.sshCapable
+                  ? <SshAccess deviceId={device.device_id} status={device.ssh}
+                      own={device.config || {}} isAdmin={isAdmin}/>
                   : null}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
@@ -9695,7 +9700,7 @@ const STAGE_MONO = "var(--font-mono)";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb", "responseLevel", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb", "streamReply", "volumeButtonSound"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "wakeSound", "wakeSoundLevel", "wakeClipCapture", "wakeClipMinScore", "wakeClipKeep"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "wakeMic", "aecEnabled", "aecDelayMs", "aecTailMs", "aecRefSource", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "remoteVolumeArc", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs", "consolePassword", "consoleTimeoutMin", "controllerEndpoints"],
@@ -9716,6 +9721,9 @@ Object.entries(CONFIG_SECTIONS).forEach(([sid, keys]) => {
 // Mirror of em_config_sections.STATE_KEYS — always the device's own,
 // never fleet-inherited, whatever the section scoping says.
 const STATE_KEYS = ['startupVolume'];
+// Mirror of em_config_sections.DEVICE_KEY_DEFAULTS — one Echo's own, never
+// the fleet's: off unless set on that Echo.
+const DEVICE_KEY_DEFAULTS = { sshEnabled: false, sshAuthorizedKeys: '' };
 
 // Effective config = fleet, with the device's own values layered over it for
 // the sections it overrides. This must FILTER rather than blind-merge
@@ -9731,6 +9739,7 @@ function effectiveConfig(globalConfig, device) {
     const sec = KEY_SECTION[k];
     if ((sec && secs.includes(sec)) || STATE_KEYS.includes(k)) out[k] = own[k];
   });
+  Object.entries(DEVICE_KEY_DEFAULTS).forEach(([k, d]) => { out[k] = own[k] ?? d; });
   return out;
 }
 
@@ -9865,7 +9874,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             stockSoundCapable = false,
                             wakeMicCapable = true,
                             sendspinCapable = true, sendspinPanel = null,
-                            bleConnectCapable = true, blePanel = null }) {
+                            bleConnectCapable = true, blePanel = null,
+                            sshPanel = null }) {
   // emosFleet defaults TRUE for the same reason the capability props above do,
   // and for one more: it gates the console password, which is emOS-only, and
   // disabling a setting because we do not KNOW the fleet has an emOS device
@@ -10249,6 +10259,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               <Slider label="Minimum sample score" sub="lower catches more near-misses, but more ordinary speech too"
                 disabled={onDeviceMode(config) !== 'off'}
                 value={config.wakeClipMinScore ?? 0.20} min={0.05} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeClipMinScore', v)}/>
+              <Slider label="Clips kept per device" sub="how many captured clips are kept for review — oldest are pruned as new ones arrive"
+                disabled={onDeviceMode(config) !== 'off'}
+                value={config.wakeClipKeep ?? 50} min={10} max={500} step={10} unit="clips"
+                formatValue={v => Math.round(v)} onChange={v => set('wakeClipKeep', Math.round(v))}/>
               {/* Accessibility first: the ring is the only other sign the Echo
                   is listening. Disabled with the reason on firmware that cannot
                   play it, never a switch that saves and stays silent. */}
@@ -10535,6 +10549,13 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             disabled={!emosFleet}
             onChange={v => set('consoleTimeoutMin', v)}/>
         </div>
+        {subHeader('SSH')}
+        <div style={{ ...inputStyle }}>
+          {/* Per Echo, never fleet: the fleet view says where it lives. */}
+          {sshPanel || <div style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-sm)', color: 'var(--muted)' }}>
+            {scoped ? 'Needs emOS on this Echo, with an image that includes SSH.' : 'Turned on per Echo, in that Echo\'s config.'}
+          </div>}
+        </div>
         {subHeader('Controller address')}
         <div style={{ ...inputStyle }}>
           <ControllerEndpointsField readOnly={scoped || disabled}
@@ -10640,6 +10661,61 @@ function BleProxyKey({ deviceId, status, isAdmin }) {
         </div>
       )}
       {key && <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Home Assistant asks for this on the BT Proxy device. Anyone with it can use this Echo's connections.</div>}
+      {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
+    </div>
+  );
+}
+
+// SshAccess: emOS's SSH server for ONE Echo. Saved on its own, not with
+// "Push config": the keys are this Echo's, never the fleet's
+// (em_config_sections.DEVICE_KEYS). The status line is what the Echo
+// REPORTS (listening on 22, host key fingerprint), never the setting.
+function SshAccess({ deviceId, status, own, isAdmin }) {
+  const mono = "var(--font-mono)";
+  const [on, setOn] = useState(!!own.sshEnabled);
+  const [keys, setKeys] = useState(own.sshAuthorizedKeys || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const dirty = on !== !!own.sshEnabled || keys !== (own.sshAuthorizedKeys || '');
+
+  const save = async () => {
+    setBusy(true); setError(''); setSaved(false);
+    try {
+      const r = await API.post(`/api/devices/${deviceId}/ssh`, { enabled: on, authorized_keys: keys });
+      setKeys(r.authorized_keys);  // normalised, as stored
+      setSaved(true);
+    } catch (e) {
+      setError(e.error || e.message || 'Could not save');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  let line = 'Waiting for the Echo';
+  if (status) line = status.listening ? 'Listening on port 22' : 'Not listening';
+  return (
+    <div style={{ fontFamily: mono, fontSize: 'var(--fs-md)', color: 'var(--text2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-4)', minWidth: 0 }}>
+      <Toggle label="SSH" disabled={!isAdmin}
+        sub="root login with the keys below; runs even when EchoMuse does not"
+        value={on} onChange={setOn}/>
+      <label style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)', minWidth: 0 }}>
+        <span style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Public keys (ssh-ed25519, one per line)</span>
+        <textarea value={keys} disabled={!isAdmin} rows={3} spellCheck={false}
+          onChange={e => setKeys(e.target.value)}
+          placeholder="ssh-ed25519 AAAA… you@laptop"
+          style={{ fontFamily: mono, fontSize: 'var(--fs-sm)', width: '100%', boxSizing: 'border-box', resize: 'vertical' }}/>
+      </label>
+      <div>{line}</div>
+      {status && status.hostKey && (
+        <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)', wordBreak: 'break-all' }}>
+          Host key {status.hostKey}
+        </div>
+      )}
+      {isAdmin && dirty && (
+        <div><Pill small disabled={busy} onClick={save}>{busy ? 'Saving…' : 'Save SSH'}</Pill></div>
+      )}
+      {saved && !dirty && <div style={{ color: 'var(--muted)', fontSize: 'var(--fs-sm)' }}>Saved</div>}
       {error && <div style={{ color: 'var(--error)' }}>{error}</div>}
     </div>
   );

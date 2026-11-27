@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import em_db as db
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 DEV = "G090LF9920671VVV"
@@ -76,9 +77,7 @@ def test_an_unknown_device_has_nothing(fresh_db):
 # ── wiring, by ast (em_controller is not importable in this suite) ──────────
 
 def _fn(name):
-    tree = ast.parse((CONTROLLER / "em_controller.py").read_text())
-    return next(n for n in ast.walk(tree)
-                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+    return _sources.find_def(name)[1]
 
 
 def _calls(fn, attr):
@@ -87,7 +86,7 @@ def _calls(fn, attr):
 
 
 def test_link_auth_passes_the_confirmation_to_the_decision():
-    fn = _fn("_link_auth_ok")
+    fn = _fn("link_auth_ok")
     decide = _calls(fn, "decide")
     assert len(decide) == 1
     assert "confirmed" in {k.arg for k in decide[0].keywords}
@@ -97,5 +96,5 @@ def test_link_auth_passes_the_confirmation_to_the_decision():
 
 def test_data_and_shell_follow_the_control_connection():
     for name in ("handle_data", "handle_shell"):
-        assert _calls(_fn(name), "_not_from_control"), (
+        assert _calls(_fn(name), "not_from_control"), (
             f"{name} must refuse a connection that is not from the device's control plane")

@@ -217,11 +217,23 @@ type MicArray struct {
 	// EchoRef is a channel carrying the device's own playback in the same
 	// frame as the microphones, -1 when there is none.
 	EchoRef int
+	// EchoRefSide is which of the playback's two channels EchoRef loops
+	// back: 0 left (the zero value), 1 right. The AEC's de-aliasing matches
+	// the reference against that channel of the output, which only matters
+	// once the two differ (stereo over the jack, #273).
+	EchoRefSide int
 	// AECHeadroomDb is how far under micGainDb the microphones are extracted
 	// while the canceller is armed, given back after it, so the echo of loud
 	// playback does not clip the S16 extraction (clipping is distortion no
 	// canceller removes). 0 is the default 6dB.
 	AECHeadroomDb float64
+	// AECFrame is the echo canceller's frame in samples at 16kHz; it must
+	// divide the 1280-sample wake chunk (160, 320, 640 or 1280). 0 is the
+	// default 1280: with the 80ms hardware tail the filter is then one block,
+	// speex's cheapest shape, which loses nothing on a Dot 2 (98.6% of its
+	// echo arrives within 16ms). A board whose echo needs a finer split sets
+	// a smaller one, measured on that board.
+	AECFrame int
 	// ReplyTaps is how many other microphones are scored for the wake word
 	// while a reply plays, beside the one the wake stream scores. The talker
 	// may be on any side, and one microphone facing away caught 4-6 of 9-11
@@ -262,6 +274,10 @@ var biscuitMics = MicArray{
 	// over full-volume replies ch6 caught 4.25 of 11 barge-ins and ch0/2/4
 	// 8.25 (15LE, 2026-11-20). Radar shares the array.
 	ReplyTaps: 3,
+
+	// ch8 is the RIGHT of the stereo loopback, ch7 the left: L=440Hz
+	// arrived on ch7 and R=1200Hz on ch8 (SETUP.md, 2026-08-29).
+	EchoRefSide: 1,
 }
 
 // BiscuitMics is biscuit's array, for tools that read biscuit's captures.
@@ -295,6 +311,12 @@ var donutMics = MicArray{
 	// clipped, it reached 14.5-19dB, and replayed barge-ins went from 1 to 8
 	// over the same two replies (2026-11-19).
 	AECHeadroomDb: 12,
+	// Speex at one 80ms block left 41C8's echo 14-15dB down; at 10ms frames
+	// (eight blocks) 19.4-21dB, and replayed live barge misses at 3 m went
+	// from 0 of 4 to 3 of 4 with every hit kept (20ms 18.6dB, 40ms 17.2dB).
+	// Live in the lounge: 11 of 12 barge-ins against 4 of 8 at 1280, for
+	// +6% of one core during a reply (2026-11-21).
+	AECFrame: 160,
 	// Every other microphone: with four, plain mics caught as many
 	// barge-ins as fixed beams (6.75 of 10 against 5.25-7.25, 2026-11-20).
 	ReplyTaps: 3,

@@ -12,6 +12,7 @@ from aiohttp import web
 
 import em_auth as auth
 import em_ble_proxy
+import em_config_sections
 import em_config_types
 import em_db as db
 import em_device_config
@@ -60,6 +61,10 @@ async def _post_global_config(request: web.Request) -> web.Response:
     loop = asyncio.get_event_loop()
 
     explicit_replace = bool(config.pop("replace", False))
+    # Per-Echo only (em_config_sections.DEVICE_KEYS): never stored for the
+    # fleet, so a fleet body cannot turn SSH on everywhere.
+    for key in em_config_sections.DEVICE_KEYS:
+        config.pop(key, None)
     # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
     # newly-added default must not look like a key this body is deleting.
     stored = await loop.run_in_executor(None, db.get_global_device_config_raw)

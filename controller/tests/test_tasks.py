@@ -68,6 +68,25 @@ def test_cancellation_is_not_reported_as_failure(caplog):
     assert not caplog.records
 
 
+def test_log_exception_reports_a_failure_and_ignores_a_cancel(caplog):
+    """The done-callback for tasks started with create_task directly."""
+    async def main():
+        async def boom():
+            raise RuntimeError("voice turn died")
+        failed = asyncio.get_running_loop().create_task(boom(), name="turn")
+        failed.add_done_callback(em_tasks.log_exception)
+        cancelled = asyncio.get_running_loop().create_task(asyncio.sleep(10))
+        cancelled.add_done_callback(em_tasks.log_exception)
+        await asyncio.sleep(0)
+        cancelled.cancel()
+        await asyncio.sleep(0.01)
+
+    with caplog.at_level(logging.ERROR, logger="echomuse.tasks"):
+        asyncio.run(main())
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(msgs) == 1 and "turn" in msgs[0] and "voice turn died" in msgs[0]
+
+
 # ── no discarded tasks in the controller ────────────────────────────────────
 
 

@@ -80,7 +80,7 @@ def test_the_push_checks_the_capability():
 
 
 def test_the_stats_report_reaches_the_push():
-    stats = _sources.code_only(_sources.def_source("_on_stats"))
+    stats = _sources.code_only(_sources.def_source("on_stats"))
     assert "esphome.update_temperatures(device_id, msg.get('cpuTempC'), " \
            "msg.get('maxTempC'))" in stats
 

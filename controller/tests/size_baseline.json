@@ -1,27 +1,26 @@
 {
  "files": {
-  "em_controller.py": 6323,
-  "em_db.py": 3535,
+  "em_db.py": 3581,
   "em_esphome.py": 3169
  },
  "functions": {
-  "em_controller.Device.__init__": 391,
-  "em_controller._barge_watcher": 293,
-  "em_controller._run_post_turn_playback": 172,
-  "em_controller._run_voice_locked": 434,
-  "em_controller._stream_listen": 662,
+  "em_barge_watcher.barge_watcher": 293,
   "em_controller.handle_control": 589,
-  "em_controller.handle_data": 197,
   "em_db.record_device_stats": 206,
-  "em_device_view.merge_device": 180,
+  "em_device.Device.__init__": 391,
+  "em_device_view.merge_device": 183,
   "em_esphome.EchoMuseSatellite._handle_voice_event": 225,
   "em_esphome.EchoMuseSatellite._stream_mic_audio": 374,
   "em_esphome.EchoMuseSatellite.handle_message": 364,
   "em_esphome.EchoMuseSatellite.run_esphome_voice_turn": 376,
   "em_ota._run_update_locked": 229,
+  "em_planes.handle_data": 197,
+  "em_playback.run_post_turn_playback": 172,
   "em_player.MediaSession._feed": 318,
   "em_routes_provision._post_provision_emos_image": 157,
   "em_scenes.resolve": 159,
-  "em_shell.stream_file": 238
+  "em_shell.stream_file": 237,
+  "em_turn.run_voice_locked": 434,
+  "em_wake_listen._stream_listen": 662
  }
 }

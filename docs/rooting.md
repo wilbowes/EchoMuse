@@ -77,14 +77,14 @@ It ships with FireOS 6 only.
 with R0rt1z2's amonet, from one command. It reads the state the Echo is in,
 does the next step, and stops at the target you name. A stopped run picks up
 where it left off. Its README is the source of truth for what each device
-supports; this is a summary of v1.0.0.
+supports; this is a summary of v1.5.0.
 
 | device | command | the Echo ends with |
 | --- | --- | --- |
 | Dot 2nd gen | `unlock` (or `unlock fireos6`) | rooted FireOS 6 on amonet v2, for emOS |
 | Dot 2nd gen | `unlock fireos5` | rooted FireOS 5.5.5.4 on amonet v1.1.0, with TWRP 3.7.0_9-bboe2 |
 | Echo 2nd gen | `unlock` (or `unlock fireos6`) | rooted FireOS 6 on amonet-radar, for emOS |
-| either | `stock` | stock FireOS 6, build 8149 unless you name another, with the Echo erased |
+| either | `stock` | stock FireOS 6, build 8349 unless you name another, with the Echo erased |
 
 Install adb, fastboot and uv as [its
 README](https://github.com/bboe/firebreak#install) says for your OS, then run:
@@ -93,10 +93,10 @@ README](https://github.com/bboe/firebreak#install) says for your OS, then run:
 uvx firebreak@latest unlock
 ```
 
-- `unlock fireos6` roots the FireOS 6 already on the Echo and keeps its
-  setup. With `--factory-reset` it installs FireOS 6 8149 in both slots and
-  erases the Echo. If the wizard reports that FireOS 6 is not in both slots,
-  this is the fix.
+- `unlock fireos6` roots FireOS 6 8349 and keeps the Echo's setup. An older
+  FireOS 6 is updated to 8349 first. With `--factory-reset` it installs
+  FireOS 6 8349 in both slots and erases the Echo. If the wizard reports that
+  FireOS 6 is not in both slots, this is the fix.
 - Do not set up a stock Echo in the Alexa app first. On WiFi it can update to
   a build firebreak does not support.
 - The wizard accepts TWRP 3.7.0_9-bboe2 as amonet v1.1.0's.

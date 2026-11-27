@@ -1,13 +1,14 @@
 """
-Deployment-shape guards — not logic tests. The controller Dockerfile
-COPYs each module explicitly, so a new em_*.py that works fine on bare
-metal crash-loops the container at import time if the COPY line is
-forgotten (bitten by em_scenes.py 2026-07-10 and em_oww_models.py
-2026-07-19).
+Deployment-shape guards — not logic tests. A module the controller
+Dockerfile does not COPY works fine on bare metal and crash-loops the
+container at import time (bitten by em_scenes.py 2026-07-10 and
+em_oww_models.py 2026-07-19, when each module had its own COPY line; one
+glob has copied them all since #1252).
 """
 
 import _sources
 import ast
+import fnmatch
 import re
 from pathlib import Path
 
@@ -16,9 +17,13 @@ CONTROLLER = Path(__file__).resolve().parents[1]
 
 def test_dockerfile_copies_every_controller_module():
     dockerfile = (CONTROLLER / "Dockerfile").read_text()
-    copied = set(re.findall(r"^COPY\s+(\S+\.py)\s", dockerfile, re.M))
+    # Sources of each COPY into the app directory (globs allowed, one layer for
+    # all modules), never --from stages or directories.
+    patterns = [src for line in re.findall(r"^COPY\s+(?!--)(.+)$", dockerfile, re.M)
+                for src in line.split()[:-1] if src.endswith(".py")]
     modules = {p.name for p in CONTROLLER.glob("em_*.py")} | {"version.py"}
-    missing = sorted(modules - copied)
+    missing = sorted(m for m in modules
+                     if not any(fnmatch.fnmatchcase(m, pat) for pat in patterns))
     assert not missing, (
         f"Dockerfile is missing COPY lines for {missing} — the container "
         f"will crash-loop at import time"
@@ -365,10 +370,7 @@ def test_streamed_playback_waits_for_the_device_not_a_computed_sleep():
     computes to ~0 and the wait disappears while up to ~5.5s is queued in
     audioChanDepth.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
-    fn = src[src.index("async def _run_streaming_post_turn_playback"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    fn = _sources.def_source("run_streaming_post_turn_playback")
 
     # Named on the API rather than on a variable: `playback_done` was a single
     # Event on the Device and became a queue of per-playback waiters (#373), so
@@ -393,14 +395,13 @@ def test_send_ms_stays_socket_write_time():
     folds HA's synthesis time in and makes it read exactly like delivery.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
     fn = src[src.index("async def stream_speaker_chunks"):]
     fn = fn[:fn.index("\n    async def ", 1) if "\n    async def " in fn[1:] else len(fn)]
     assert "send_seconds" in fn, \
         "socket-write time must be accumulated around the send calls"
 
-    caller = src[src.index("async def _run_streaming_post_turn_playback"):]
-    caller = caller[:caller.index("\nasync def ", 1)]
+    caller = _sources.def_source("run_streaming_post_turn_playback")
     assert "device.playback_send_ms = send_ms" in caller, \
         "send_ms must come from accumulated write time, not the loop duration"
 
@@ -419,12 +420,11 @@ def test_meter_ring_is_raised_when_audio_starts_not_at_playback_setup():
 
     The spinner must therefore stay up until the meter has something to show.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.def_source("run_voice_locked")
     fn = src[src.index("async def post_turn_play_esphome"):]
     fn = fn[:fn.index("\n            # P0-1")]
 
-    assert "_meter_at_playback_start(pcm_chunks" in fn, \
+    assert "em_playback.meter_at_playback_start(pcm_chunks" in fn, \
         "the meter must be gated on the first audio reaching the device"
 
     # A meter send is legitimate inside the nested helpers (_meter_on, and the
@@ -442,10 +442,8 @@ def test_meter_gate_fires_for_responses_shorter_than_the_prime_window():
     threshold — the device starts playing it at EOS instead. Exhaustion must
     fire the callback too, or short answers play with no ring at all.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
-    fn = src[src.index("async def _meter_at_playback_start"):]
-    fn = fn[:fn.index("\nasync def ", 1)]
+    import _sources
+    fn = _sources.def_source("meter_at_playback_start")
 
     body = fn.split("async for")[1]
     assert "if not fired:" in body.rsplit("\n", 4)[-4:][0] or "if not fired" in body, \
@@ -690,8 +688,7 @@ def test_every_deliberate_cancel_also_flushes_the_speaker():
     in one of three places), and fixing them one at a time is how the second
     one survived the first.
     """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     # Each deliberate cancel site, identified by its log line / guard, paired
     # with how far to look for the flush that must accompany it.
@@ -802,7 +799,7 @@ def test_data_reconnect_grace_is_per_stream_not_per_frame():
     is why the shape is pinned rather than the constant.
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     fn = src[src.index("    async def send_data(self, data: bytes):"):]
     fn = fn[:fn.index("\n    async def ", 1)]
@@ -1688,7 +1685,7 @@ def test_an_announcement_clears_the_cancel_flag_before_playing():
     # The literal calls, not the prose: this function's comments name
     # _run_post_turn_playback before either call happens.
     clear = body.find("_d.cancel_event.clear()")
-    play = body.find("await _run_post_turn_playback(")
+    play = body.find("await em_playback.run_post_turn_playback(")
     assert clear != -1, (
         "an announcement no longer clears cancel_event — a cancelled turn "
         "will silently kill every announcement that follows it"
@@ -1714,7 +1711,7 @@ def test_an_announcement_reports_whether_it_actually_played():
 
 def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
     """
-    The dashboard renders `speaking` above `thinking` and _push_device_state
+    The dashboard renders `speaking` above `thinking` and push_device_state
     has always carried it — but nothing pushed the transition. The only pushes
     were at listening, thinking and turn end, so a turn read
     listening -> thinking -> idle and never showed Speaking at all. It appeared
@@ -1724,12 +1721,12 @@ def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
     Setting the flag and telling anyone about it are now one operation, so a
     third streaming path cannot reintroduce the gap by doing only the first.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
                        src, re.S)
     assert setter, "_set_speaking not found"
-    assert "_push_device_state(self)" in setter.group(0), (
+    assert "push_device_state(self)" in setter.group(0), (
         "the setter must push — that is the whole reason it exists"
     )
 
@@ -1755,7 +1752,7 @@ def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
     The playback functions wait on the device's playback_stats; they are the
     only things that know the speaker has stopped.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
 
     for fn_name in ("stream_speaker", "stream_speaker_chunks"):
         fn = re.search(rf"async def {fn_name}\(.*?\n(?=    async def |    def )",
@@ -1766,7 +1763,7 @@ def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
             f"when the audio does"
         )
 
-    for fn_name in ("_run_post_turn_playback", "_run_streaming_post_turn_playback"):
+    for fn_name in ("run_post_turn_playback", "run_streaming_post_turn_playback"):
         fn = _sources.def_source(fn_name)
         assert "_set_speaking(False)" in fn, (
             f"{fn_name} waits for the device's playback_stats and must be what "
@@ -1780,7 +1777,7 @@ def test_speaking_and_thinking_are_mutually_exclusive():
     stale `thinking` is invisible until speaking clears — and then the tile
     reads as if the device started thinking again mid-response.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
                        src, re.S).group(0)
     assert "self.thinking = False" in setter, (
@@ -1796,11 +1793,11 @@ def test_the_speaking_push_cannot_fail_a_speaker_stream():
     not take the stream down with it — turn end pushes the same state moments
     later. The flag assignment is synchronous and happens either way.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
                        src, re.S).group(0)
     assign = setter.find("self.speaking = value")
-    push = setter.find("_push_device_state(self)")
+    push = setter.find("push_device_state(self)")
     assert assign < push, "the flag must be set before the push is attempted"
     assert "except BaseException" in setter, (
         "a bare `except Exception` does not catch the CancelledError this sees "
@@ -1825,26 +1822,24 @@ def test_the_wake_listener_is_started_through_its_supervisor():
     that the call site goes through the supervisor, and nothing else enforces
     that.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     # The supervisor's OWN create_task is the one legitimate use, so check
     # everywhere else. Splitting on the def keeps this honest if the helper
     # moves.
-    start = src.index("def _supervise_wake_listener")
+    start = src.index("def supervise_wake_listener")
     end = src.index("async def wake_word_listener")
     outside = src[:start] + src[end:]
     assert "create_task(wake_word_listener(" not in outside, (
         "wake_word_listener started with a bare create_task outside its "
         "supervisor — an exception would end it silently and nothing would "
-        "restart it. Use _supervise_wake_listener()."
+        "restart it. Use em_wake_listen.supervise_wake_listener()."
     )
-    assert "_supervise_wake_listener(device)" in outside
+    assert "em_wake_listen.supervise_wake_listener(device)" in outside
 
 
 def test_the_supervisor_attaches_a_done_callback():
     """Without one the task ends and no code ever learns that it did."""
-    src = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("def _supervise_wake_listener"):]
-    body = body[:body.index("async def wake_word_listener")]
+    body = _sources.def_source("supervise_wake_listener")
     assert "add_done_callback" in body
     # A restart that ignores cancellation would fight ordinary teardown.
     assert "cancelled()" in body
@@ -1872,7 +1867,7 @@ def test_a_stuck_pause_can_be_recovered():
     turn is legitimate — the spinner TTL alone runs to 135s — and only the
     combination is impossible.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     assert "OWW_PAUSE_STUCK_S" in src
     assert "oww_paused_since" in src
     stuck = src[src.index("oww_paused stuck for") - 2000:
@@ -1976,10 +1971,10 @@ def test_a_device_with_no_ha_stands_down_before_it_can_claim():
     ordering is the whole guard: a check placed after the claim would leave
     the claim taken.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     serves = body.index("can_serve_turn")
-    claim  = body.index("await _claim_wake(")
+    claim  = body.index("await em_wake_claim.claim_wake(")
     assert serves < claim, (
         "the capability check must come BEFORE the arbitration claim — "
         "after it, the unlinked device has already taken the window"
@@ -1995,7 +1990,7 @@ def test_the_button_path_stands_down_the_same_way():
     The button is what someone reaches for when the wake word appeared to do
     nothing, so answering it with silence is the worst version of this bug.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     assert src.count("esphome.can_serve_turn") >= 2, (
         "both the wake path and the button path must ask; a turn that cannot "
         "reach HA should never hold the voice lock"
@@ -2009,11 +2004,11 @@ def test_the_no_ha_cue_does_not_depend_on_another_device_losing():
     when no other Echo took the utterance would make it disappear exactly on
     the multi-device fleets where the confusion is worst.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_wake_listen.py").read_text()
     body = src[src.index("async def wake_word_listener"):]
     stand = body.index("if not serves:")
     tail  = body[stand:stand + 2000]
-    assert "_leds_turn_end(device)" in tail, "no cue on the stand-down path"
+    assert "em_leds.leds_turn_end(device)" in tail, "no cue on the stand-down path"
     assert "record_dropped_wake" in tail, (
         "the wake must still reach the activity history, or an HA outage is "
         "indistinguishable from a device that heard nothing"
@@ -2040,9 +2035,8 @@ def test_a_barge_that_stands_down_for_no_ha_leaves_the_same_trace_as_a_wake():
     decision itself is already covered by `em_barge.cede` — what is not
     covered is whether the watcher acts on it, and where.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
-    for name in ("_barge_watcher", "_private_barge"):
-        fn = _fn_body(src, name)
+    for name in ("barge_watcher", "_private_barge"):
+        fn = _sources.def_source(name)
         assert "em_barge.cede(" in fn, f"{name} must use the shared decision"
         assert "(not serves) or won_by !=" not in fn, (
             f"{name} has the decision inlined again — two copies of a "
@@ -2074,7 +2068,7 @@ def test_every_outcome_cue_names_a_scene_key_that_exists():
     that is already the unusual one.
     """
     import em_scenes
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = (CONTROLLER / "em_leds.py").read_text()
     block = src[src.index("_OUTCOME_ANIM = {"):]
     block = block[:block.index("\n}")]
     keys = re.findall(r':\s*"(\w+_anim)"', block)
@@ -2191,11 +2185,13 @@ def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
     unannounced loses every advertisement with no error at either end.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
+    wire = (CONTROLLER / "em_wire.py").read_text()
 
-    assert "BLE_ADVERTS_TYPE" in src, "the data-plane frame code must be named"
+    assert "em_wire.BLE_ADVERTS_TYPE" in _sources.def_source("handle_data"), \
+        "the data-plane frame code must be named"
     # Double-quoted: the prose around it uses backticks, so this matches the
     # announcement itself rather than the comment explaining it.
-    assert '"ble_adverts_data"' in src, (
+    assert '"ble_adverts_data"' in wire, (
         "the controller must announce the feature, or no device will ever "
         "use the data plane"
     )
@@ -2204,15 +2200,15 @@ def test_ble_adverts_leave_the_control_plane_only_when_negotiated():
     # the field itself is gone.
     ack = re.search(r"send_control\(\{[^}]*\"type\": \"ack\"[^}]*\}", src, re.S)
     assert ack, "could not find the ack send_control call — did it move?"
-    assert "CONTROLLER_FEATURES" in ack.group(0), (
+    assert "em_wire.CONTROLLER_FEATURES" in ack.group(0), (
         "the ack must carry the controller's feature list"
     )
 
     # The advert branch must precede the mic guards, which would otherwise
     # drop a 0x06 frame on the mic header-length test and lose it silently.
-    handler = src[src.index("async def handle_data"):]
-    ble = handler.index("BLE_ADVERTS_TYPE")
-    mic = handler.index("!= MIC_FRAME_TYPE")
+    handler = _sources.def_source("handle_data")
+    ble = handler.index("em_wire.BLE_ADVERTS_TYPE")
+    mic = handler.index("!= em_wire.MIC_FRAME_TYPE")
     assert ble < mic, (
         "the BLE frame branch must come before the mic-frame guards, or the "
         "frame is dropped by a length check written for PCM"
@@ -2247,18 +2243,16 @@ def test_a_barge_in_is_arbitrated_like_any_other_wake():
     `window_s` (300-700ms), not held until `release()`, so it expired seconds
     before anyone talked over the answer.
     """
-    src  = (CONTROLLER / "em_controller.py").read_text()
-    body = src[src.index("async def _barge_watcher"):]
-    body = body[:body.index("\nasync def ", 1)]
+    body = _sources.def_source("barge_watcher")
 
-    assert "await _claim_wake(" in body, (
+    assert "await em_wake_claim.claim_wake(" in body, (
         "the barge watcher must arbitrate — without it a second Echo answers "
         "the same interrupting utterance"
     )
     # Same ordering rule as the wake path: a device that cannot finish a turn
     # must not take the window first.
     serves = body.index("can_serve_turn")
-    claim  = body.index("await _claim_wake(")
+    claim  = body.index("await em_wake_claim.claim_wake(")
     assert serves < claim, (
         "can_serve_turn must precede the claim, or an unlinked device takes "
         "the window and then dies no_ha"
@@ -2273,7 +2267,7 @@ def test_a_ceded_barge_still_stops_playback_but_takes_no_turn():
 
     Folding them into one flag is how both devices answered.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.def_source("run_voice_locked")
     assert "barge_ceded" in src, "the ceded case needs its own flag"
 
     # The ceded branch must be tested BEFORE the branch that starts the
@@ -2300,12 +2294,12 @@ def test_the_no_ha_barge_records_where_nothing_overwrites_it():
     before the ring reads it. The branch also has to clear `barge_detected`
     first, because `_leds_turn_end` suppresses its own cue while it is set.
     """
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.def_source("run_voice_locked")
     ceded = src.index("device.barge_detected and device.barge_ceded")
     start = src.index("Barge-in: starting interrupting turn")
     branch = src[ceded:start]
     for call in ("leds_listening(device)", "record_dropped_wake(",
-                 "_leds_turn_end(device)"):
+                 "em_leds.leds_turn_end(device)"):
         assert call in branch, f"the no-HA stand-down needs {call}"
     assert branch.index("device.barge_detected = False") < \
            branch.index("record_dropped_wake("), (

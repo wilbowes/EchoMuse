@@ -17,8 +17,8 @@ A name that kept its leading underscore is still private to its new module.
 One that lost it is now a module's interface, and callers say
 `module.name(...)`; em_api re-exports nothing.
 
-`em_controller` has not been split yet, and `em_esphome` only in part (see
-"Moved out of em_esphome" below). Only `handle_control` changed shape there: one `_on_<type>` handler per control
+`em_controller` and `em_esphome` are being split the same way, in parts (see
+"Moved out of em_controller" and "Moved out of em_esphome" below). Only `handle_control` changed shape there: one `_on_<type>` handler per control
 message, looked up in `CONTROL_HANDLERS` (#910).
 
 ## The modules
@@ -53,6 +53,21 @@ message, looked up in `CONTROL_HANDLERS` (#910).
 | `em_routes_static` | Routes: the pages and first-run setup. |
 | `em_routes_system` | Routes: status, controller settings, support bundle. |
 | `em_routes_updates` | Routes: the Updates tab (firmware, emOS, releases, maintenance). |
+| `em_barge_watcher` | The barge-in watcher: scores the mic during a reply and cuts it on the wake word. |
+| `em_button_events` | What an Action-button press does: start or cancel a turn, dismiss an alarm, pass a gesture to HA. |
+| `em_control_handlers` | One handler per device-to-controller control message, looked up in em_controller.CONTROL_HANDLERS. |
+| `em_device` | A connected Echo: the `Device` object, its WebSocket planes and speaker stream, and the dashboard push of its state. |
+| `em_leds` | The LED ring as a turn drives it: off, listening, the thinking spin, the outcome cue. |
+| `em_link_gate` | Who may hold a device-link plane: token and TLS per WebSocket, /data and /shell following /control. |
+| `em_planes` | The /data and /shell planes of a connected Echo: mic frames, wake clips, BLE frames; the shell socket. |
+| `em_playback` | Playing a reply or announcement after a turn: buffered and streamed paths, the start-of-sound meter, the per-device limiter and bass guard. |
+| `em_alarm` | The timer alarm ring: start, stop, the burst, holding it through a wake, dismissing it by speech. |
+| `em_private_listen` | Private listening, controller side: the listen report wait, the session loop, private wakes and barge-ins. |
+| `em_turn` | One voice turn: HA's run, the reply and its playback, barge-ins, follow-ups; where turn mic frames are queued. |
+| `em_wake_claim` | Claiming a wake when several Echoes heard it: arbitration windows, when a wake was heard, the claim. |
+| `em_wake_listen` | The wake listener per Echo: supervision and restart backoff, private vs streamed, the stream loop that starts the turn. |
+| `em_wake_model` | The controller-scored wake and barge models per Echo: cache, reset off the loop, buffer trim. |
+| `em_wire` | Device-link constants that must match the Echo's side: frame codes, frame sizes, pacing, keepalive, announced features. |
 
 ## Old em_api names
 
@@ -432,6 +447,48 @@ Grouped by where each one lives now.
 | `_forget_oww_models` | `em_state.forget_oww_models` |
 | `_wake_arbiter` | `em_state.wake_arbiter` |
 | `_loop_lag_peak_ms` | `em_state.loop_lag_peak_ms` |
+
+## Moved out of em_controller (2026-11)
+
+| Was in em_controller | Now |
+|---|---|
+| `CHUNK_BYTES`, `MIC_HEADER_LEN` | `em_wire` (same names) |
+| `SPEAKER_RATE`, `SPEAKER_PERIOD`, `SPEAKER_BYTES`, `SPEAKER_PERIOD_SECONDS` | `em_wire` |
+| `VOICE_LEAD_S`, `SPEAKER_PRIME_SECONDS` | `em_wire` |
+| `WS_PING_INTERVAL_S`, `WS_PING_TIMEOUT_S` | `em_wire` |
+| `MIC_FRAME_TYPE`, `VAD_END_TYPE`, `VAD_NO_SPEECH_TIMEOUT_TYPE`, `BLE_ADVERTS_TYPE`, `BLE_GATT_TYPE`, `SPEAKER_FRAME_TYPE`, `SPEAKER_EOS_TYPE` | `em_wire` |
+| `CONTROLLER_FEATURES` | `em_wire` |
+| `Device` | `em_device.Device` |
+| `_push_device_state` | `em_device.push_device_state` |
+| `DATA_RECONNECT_GRACE_S`, `RTT_EXCURSION_MS`, `OWW_MODEL`, `OWW_THRESHOLD` | `em_device` (same names) |
+| `_log_task_exception` | `em_tasks.log_exception` |
+| `leds_off`, `leds_listening`, `leds_spin_green`, `_make_leds`, `_OUTCOME_ANIM`, `NO_HA_HOLD_S`, `NUM_LEDS` | `em_leds` (same names) |
+| `_leds_turn_end` | `em_leds.leds_turn_end` |
+| `_run_post_turn_playback`, `_run_streaming_post_turn_playback`, `_meter_at_playback_start` | `em_playback.run_post_turn_playback`, `run_streaming_post_turn_playback`, `meter_at_playback_start` |
+| `_limiter_for`, `_guard_for` | `em_playback` (same names) |
+| `start_timer_alarm`, `stop_timer_alarm` | `em_alarm` (same names) |
+| `_ringing_devices`, `_hold_alarms`, `_dismiss_by_speech` | `em_alarm.ringing_devices`, `hold_alarms`, `dismiss_by_speech` |
+| `_release_alarm_holds`, `_ring_timer_alarm`, `_alarm_burst_pcm`, `_wait_for_turn_audio`, `_alarm_pcm_cache`, `_ALARM_HOLD_MARGIN_S` | `em_alarm` (same names) |
+| `_reset_wake_model`, `_trim_oww_raw_buffer` | `em_wake_model.reset_model`, `trim_raw_buffer` |
+| `_acquire_wake_model`, `_acquire_barge_model` | `em_wake_model.acquire_wake_model`, `acquire_barge_model` |
+| `_OWW_RAW_BUFFER_KEEP` | `em_wake_model` (same name) |
+| `_claim_wake`, `_wake_heard_at`, `_wake_dating`, `_device_level` | `em_wake_claim.claim_wake`, `wake_heard_at`, `wake_dating`, `device_level` |
+| `_arbitration_slack`, `_arbitration_hold` | `em_wake_claim` (same names) |
+| `_barge_watcher` | `em_barge_watcher.barge_watcher` |
+| `_link_auth_ok`, `_presented_its_token`, `_not_from_control` | `em_link_gate.link_auth_ok`, `presented_its_token`, `not_from_control` |
+| `_peer_ip`, `REQUIRE_DEVICE_TLS` | `em_link_gate` (same names) |
+| `_run_voice_locked`, `_put_voice_frame` | `em_turn.run_voice_locked`, `put_voice_frame` |
+| `_await_barge_decision`, `BARGE_DECISION_TIMEOUT_S` | `em_turn` (same names) |
+| `_await_listen_report`, `_no_mic`, `_private_listen` | `em_private_listen.await_listen_report`, `no_mic`, `private_listen` |
+| `_private_wake_turn`, `_private_barge` | `em_private_listen` (same names) |
+| `_supervise_wake_listener` | `em_wake_listen.supervise_wake_listener` |
+| `wake_word_listener`, `_stream_listen`, `_after_model_release` | `em_wake_listen` (same names) |
+| `OWW_PAUSE_STUCK_S`, `FRESH_CONN_GRACE_S`, `WAKE_RESTART_BACKOFF_S`, `WAKE_RESTART_MAX_BACKOFF_S`, `WAKE_RESTART_HEALTHY_S` | `em_wake_listen` (same names) |
+| `handle_button_event` | `em_button_events` (same name) |
+| `handle_data`, `handle_shell`, `_store_wake_candidate`, `_persist_wake_candidate` | `em_planes` (same names) |
+| `_on_<type>` for ambient_light, mute_state, volume_state, stats, sendspin_status, sendspin_token, wifi_result, playback_stats, oww_shadow_cross, oww_wake, listen_state, listen_end, ble_adverts, wifi_scan_result, log, pong | `em_control_handlers.on_<type>` |
+| `_note_wear` | `em_control_handlers.note_wear` |
+| `_consider_on_device_wake_sample` | `em_control_handlers` (same name) |
 
 ## Moved out of em_esphome (2026-11)
 

@@ -247,7 +247,7 @@ def test_the_stored_rule_runs_where_the_device_reports_listening():
     """On the listen_state report, not at registration: syncListenState is sent
     after the ack, so at connect time listen_reported is still None and a check
     there reads "not private" for a private Echo."""
-    _, branch = _sources.find_def("_on_listen_state")
+    _, branch = _sources.find_def("on_listen_state")
 
     assert any("stored_off_unsupported" in ast.unparse(n)
                for n in ast.walk(branch)), (
@@ -280,10 +280,7 @@ CONTROLLER = Path(__file__).resolve().parent.parent
 
 
 def _func(name: str) -> str:
-    tree = ast.parse((CONTROLLER / "em_controller.py").read_text())
-    return ast.unparse(next(
-        n for n in ast.walk(tree)
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name))
+    return ast.unparse(_sources.find_def(name)[1])
 
 
 def test_the_rule_does_not_know_where_the_wake_word_is_detected():
@@ -294,7 +291,7 @@ def test_the_rule_does_not_know_where_the_wake_word_is_detected():
 
 def test_the_controller_asks_the_rule_for_wakes_and_for_barges():
     assert "em_wakeword.wake_allowed(" in _func("_stream_listen")
-    assert "em_wakeword.wake_allowed(" in _func("_barge_watcher")
+    assert "em_wakeword.wake_allowed(" in _func("barge_watcher")
 
 
 def test_the_echo_stops_at_the_crossing_before_anything_can_act_on_it():
@@ -318,7 +315,7 @@ def test_a_follow_up_gets_a_microphone_in_every_combination():
 
 
 def test_the_follow_up_path_uses_it():
-    assert "em_wakeword.follow_up_needs_turn_stream(" in _func("_run_voice_locked")
+    assert "em_wakeword.follow_up_needs_turn_stream(" in _func("run_voice_locked")
 
 
 def test_audio_arriving_with_the_wake_word_off_is_a_stream_to_stop():
@@ -378,7 +375,7 @@ def test_home_assistant_is_made_to_read_a_state_it_did_not_set():
 
 
 def test_the_temporary_on_refreshes_home_assistant():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.all_source()
     at = src.index("em_wakeword.stored_off_unsupported(")
     assert "update_wake_word(device_id, True, refresh=True)" in src[at:at + 600]
     esp = (CONTROLLER / "em_esphome.py").read_text()

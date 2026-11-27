@@ -16,6 +16,7 @@ the same way test_deploy.py guards its deployment shapes.
 """
 
 from pathlib import Path
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
@@ -40,7 +41,7 @@ def test_control_dispatch_survives_a_handler_exception():
 
 
 def test_data_plane_survives_a_bad_frame_without_flooding_the_log():
-    src = (CONTROLLER / "em_controller.py").read_text()
+    src = _sources.def_source("handle_data")
     # newline-anchored: an unanchored indent prefix also matches deeper-
     # indented lines (the control plane's own async-for is 12 spaces).
     start = src.index("\n        async for raw in ws:")

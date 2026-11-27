@@ -49,6 +49,8 @@ KINDS: dict[str, str] = {
     "owwModel": STR,
     "owwOnDevice": STR,
     "owwMinFrames": INT,
+    "sshEnabled": BOOL,
+    "sshAuthorizedKeys": STR,
     "bargeInEnabled": BOOL,
     "bargeInThreshold": FLOAT,
     "duckDb": FLOAT,
@@ -86,6 +88,7 @@ KINDS: dict[str, str] = {
     "saveUtterances": BOOL,
     "wakeClipCapture": BOOL,
     "wakeClipMinScore": FLOAT,
+    "wakeClipKeep": INT,
 }
 
 

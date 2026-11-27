@@ -124,6 +124,7 @@ below (`capabilities()` in `control.go`):
 | `identify_ring` | always | Handles `identify` (#860) by taking the whole ring for 30s, above turns, replies, the mute ring and the volume arc, whatever the Echo is doing and whether or not it is muted. The mute button's own LED is a separate GPIO and keeps showing mute. No fallback: the controller offers Identify only to firmware that announces this |
 | `ambient_light` | only if the sensor is actually readable (`als.Present()`) | Reports light readings |
 | `thermal` | only if the kernel exposes a thermal zone | `cpuTempC` and `maxTempC` on the `stats` report become CPU Temperature and Hottest Zone Temperature in Home Assistant, diagnostic sensors disabled by default; a reading it could not take is `null` |
+| `ssh` | only if the image carries `/sbin/tinysshd` (emOS) | The config keys `sshEnabled` and `sshAuthorizedKeys` (Ed25519 only) are written for emOS's init, which runs SSH itself so it works when the firmware does not. The `stats` report carries `ssh`: `{listening, hostKey}`, read from the kernel's socket table and the host key, never from the setting; `null` without the capability |
 | `sendspin` | always | Can be a Sendspin player (#89) for synchronised multi-room audio from Music Assistant, run when `sendspinEnabled` is on. Music Assistant connects to the device directly (port 8928, advertised as `_sendspin._tcp`); nothing of the session crosses the controller. Whether it is running, connected or paired is the `sendspin` status |
 | `wake_word_off` | always | Honours `wakeWordEnabled: false` (Home Assistant's "No wake word"): a wake crossing is reported as a shadow cross and opens no session and no turn. The button still works. Without it the controller declines "No wake word" for an Echo in `listen_state` `local` |
 | `pairing` | always | Asks to pair itself when its owner holds the action button 7 s while it has no controller link or one over plain (5 s, on any link, before v2.19.0; an Echo on wss is already paired, and its hold reaches HA as a long press): a `pair_request` every 5 s on a live link, or otherwise registers with `"pairing": true` on every dial for the 2-minute window, falling back to plain (without its token) when wss cannot connect. The window closes early once new credentials land, so the redial they cause does not ask again. Without it the controller offers the admin a **Pair** action instead, since the device cannot ask |
@@ -395,7 +396,8 @@ meterAttack, meterDecay, meterFloor, meterGamma, meterRef, meterCurve,
 wakeArbitrationMs, duckDb, responseLevel,
 buttonSingleTapEvent, buttonMultiTapMs,
 owwOnDevice, saveUtterances, streamReply,
-wakeSound, wakeSoundLevel, volumeButtonSound
+wakeSound, wakeSoundLevel, volumeButtonSound,
+consolePassword, consoleTimeoutMin, sshEnabled, sshAuthorizedKeys
 ```
 
 `wakeWordEnabled` is sent on its own, not with the stored config: it is

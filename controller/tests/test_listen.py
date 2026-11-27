@@ -492,12 +492,12 @@ def test_streaming_modes_are_not_held_back():
 def test_the_listener_waits_before_either_path_and_stream_rechecks():
     from _sources import def_source, code_only
     listener = code_only(def_source("wake_word_listener"))
-    assert listener.index("awaiting_report") < listener.index("_private_listen"), \
+    assert listener.index("awaiting_report") < listener.index("em_private_listen.private_listen("), \
         "wake_word_listener must wait on an unreported Echo before choosing a path"
     stream = code_only(def_source("_stream_listen"))
     first_mic = stream.index("mic_start()")
     assert "awaiting_report" in stream[:first_mic] and "private_listening" in stream[:first_mic], (
         "_stream_listen must re-check after loading its model and before its first "
         "mic_start: the Echo can go private, or still be unreported, meanwhile")
-    waiter = code_only(def_source("_await_listen_report"))
+    waiter = code_only(def_source("await_listen_report"))
     assert "mic_start" not in waiter, "waiting must start nothing"

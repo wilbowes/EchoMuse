@@ -15,6 +15,7 @@ source.
 
 import re
 from pathlib import Path
+import _sources
 
 CONTROLLER = Path(__file__).resolve().parents[1]
 
@@ -56,10 +57,10 @@ def test_each_cause_of_an_early_end_records_its_own_outcome():
     barge-in — which could only ever find a PLAYBACK barge while a thinking
     barge recorded "cancelled".
     """
-    ctrl = (CONTROLLER / "em_controller.py").read_text()
-    calls = re.findall(r"cancel_voice_turn\(([^)]*)\)", ctrl, re.S)
+    ctrl = _sources.all_source()
+    calls = re.findall(r"(?<!def )cancel_voice_turn\(([^)]*)\)", ctrl, re.S)
     # Two barge paths since private listening (docs/listening.md): the stream
-    # path's _barge_watcher and _private_barge. Both must say "barged".
+    # path's barge_watcher and _private_barge. Both must say "barged".
     assert len(calls) == 4, f"expected 4 call sites, got {len(calls)}"
 
     reasons = sorted(

@@ -155,7 +155,11 @@ func main() {
 	// AEC canceller — far end fed by the speaker's echo tap, near end run
 	// by the data client on the mono mic stream. Starts disabled; armed by
 	// applyAecConfig from env defaults below and on every config push.
-	canceller := aec.New(board.CurrentLayout().Mics.NumMics())
+	mics := board.CurrentLayout().Mics
+	canceller := aec.NewFrame(mics.NumMics(), mics.AECFrame)
+	// Before the speaker exists: its write loop feeds the de-aliasing ring
+	// from the first period, on the side the loopback carries (#273).
+	canceller.SetRefSide(mics.EchoRefSide)
 
 	// The level tap drives the energy-reactive LED ring ("meter" pattern).
 	// The Server doesn't exist yet when the speaker starts its pump loop,
@@ -483,6 +487,9 @@ func main() {
 		// A Bluetooth link's results have nowhere to go now, and a
 		// controller that comes back starts from no links.
 		bleBridge.DropAll()
+		// The controller's duck went with the link: it will not send
+		// `duck off` for that turn, so the local duck must not wait for it.
+		localDuck.Reset()
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker. Safe to
 		// repeat — StopAnim only bumps the animator generation, and the pulse
@@ -677,7 +684,7 @@ func main() {
 	// The depth is read at duck time rather than latched, so a config change
 	// takes effect on the next turn without a restart.
 	controlClient.OnDuck(func(on bool) {
-		localDuck.Confirm()
+		localDuck.Confirm(on)
 		if on {
 			pcmSpeaker.SetDuck(config.Get().DuckDb)
 		} else {
@@ -957,6 +964,7 @@ func collectStats() client.DeviceStats {
 	cpuC, maxC, coreLimit := thermals()
 	return client.DeviceStats{
 		AmbientLux:       als.Lux(),
+		SSH:              client.ReadSSHStatus(),
 		CPUTempC:         cpuC,
 		MaxTempC:         maxC,
 		CoresOnline:      coresOnline(),

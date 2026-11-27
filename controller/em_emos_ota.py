@@ -290,6 +290,14 @@ SBIN_BOTH_ARCHES = ("em-wifi", "e2fsck")
 NEEDS_OWN_E2FSCK = {"donut"}
 
 
+# Ride in both images when the release has them, and are never required: a
+# release cut before them still builds. tinysshd is the SSH server init runs
+# only when the owner turns SSH on for that Echo (init.c ssh_main); nothing
+# else execs it, so it changes nothing on an Echo with SSH off. Not in
+# SBIN_ASSETS, which would strand every older release.
+SBIN_OPTIONAL = ("tinysshd",)
+
+
 # One archive with a manifest of sha256s — see build_payload_bundle.
 PAYLOAD_ASSET = "emos-payload.zip"
 
@@ -388,10 +396,11 @@ def select_payload(files: dict, arch: str, version: str,
     # nudge now prefers.
     #
     # SBIN_BOTH_ARCHES is exempt and rides in both (em-wifi cannot change which
-    # supplicant init starts; e2fsck replaces Amazon's on purpose). Not fatal
+    # supplicant init starts; e2fsck replaces Amazon's on purpose), and so
+    # does SBIN_OPTIONAL (tinysshd: init execs it only with SSH on). Not fatal
     # when missing — a release predating them still builds a FireOS 5 image,
     # exactly as before — except e2fsck on a board with none of its own.
-    sbin = {n: files[n] for n in SBIN_BOTH_ARCHES if n in files}
+    sbin = {n: files[n] for n in SBIN_BOTH_ARCHES + SBIN_OPTIONAL if n in files}
     if board in NEEDS_OWN_E2FSCK and "e2fsck" not in files:
         return None, {}, version, em_http.error(
             "no_e2fsck_for_board",

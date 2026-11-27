@@ -14,7 +14,7 @@
 // position 1: the most precise notch was a setting that could never wake, and
 // it presented as "the Echo stopped responding" rather than as a bad value.
 
-import { readFileSync } from "fs";
+import { readdirSync, readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import assert from "assert";
@@ -144,9 +144,15 @@ assert.ok(/formatValue=\{\(\) => wakeT\.toFixed\(3\)\}/.test(src),
 // rather than merely strict. If either flips to `>`, the reasoning above needs
 // revisiting — and if either stops comparing a score to a threshold at all,
 // this control is no longer setting what this test thinks it sets.
-const ctrl = readFileSync(join(HERE, "..", "em_controller.py"), "utf8");
+// Every controller module, the way tests/_sources.py finds code: the scorer
+// left em_controller.py in the 2026-11 split, and a file-level read would then
+// fail for the wrong reason, or pass on a copy left behind.
+const ctrl = readdirSync(join(HERE, ".."))
+  .filter((f) => /^em_.*\.py$/.test(f))
+  .map((f) => readFileSync(join(HERE, "..", f), "utf8"))
+  .join("\n");
 assert.ok(/score >= eff_threshold/.test(ctrl),
-  "em_controller.py no longer tests `score >= eff_threshold` — re-check whether " +
+  "no controller module tests `score >= eff_threshold` — re-check whether " +
   "the top of the Sensitivity range is still reachable");
 
 const shadow = readFileSync(

@@ -75,7 +75,7 @@ func main() {
 
 	arr := board.BiscuitMics()
 	bf := beamformer.New(arr)
-	c := aec.New(arr.NumMics())
+	c := aec.NewFrame(arr.NumMics(), arr.AECFrame)
 	c.SetParams(true, 0, *tail)
 	c.SetHardwareRef(true)
 	gain := math.Pow(10, *gainDb/20)
@@ -92,7 +92,7 @@ func main() {
 	var mic, ref, speex []byte
 	step := batch * frameBytes
 	if *prime {
-		pb, pc := beamformer.New(arr), aec.New(arr.NumMics())
+		pb, pc := beamformer.New(arr), aec.NewFrame(arr.NumMics(), arr.AECFrame)
 		pc.SetParams(true, 0, *tail)
 		pc.SetHardwareRef(true)
 		var primed []byte

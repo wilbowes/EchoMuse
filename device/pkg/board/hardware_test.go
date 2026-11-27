@@ -254,6 +254,10 @@ func TestEveryCaptureStatesItsMicArray(t *testing.T) {
 		if a.EchoRef >= 0 && (a.EchoRef < a.NumMics() || a.EchoRef >= a.Channels) {
 			t.Errorf("%s: loopback ch%d is a mic or outside the frame", b.ID, a.EchoRef)
 		}
+		// A side is the left or the right, and only a loopback has one.
+		if a.EchoRefSide < 0 || a.EchoRefSide > 1 || (a.EchoRef < 0 && a.EchoRefSide != 0) {
+			t.Errorf("%s: loopback side %d (loopback ch%d)", b.ID, a.EchoRefSide, a.EchoRef)
+		}
 		// A microphone the firmware reads is one mute must silence in
 		// hardware too.
 		if len(hw.MicMutes) == 0 {
@@ -468,6 +472,15 @@ func TestTLVInputGainsCoverEveryChannelAndAreOff(t *testing.T) {
 	checkTable(t, tlvInputGains, want, "0")
 }
 
+// Biscuit's ch8 loops back the playback's RIGHT channel (SETUP.md,
+// 2026-08-29), and radar reads the same array (its tap test, 2026-10-23).
+// The AEC's de-aliasing matches on that side once the two differ (#273).
+func TestBiscuitsLoopbackIsTheRightChannel(t *testing.T) {
+	if a := BiscuitMics(); a.EchoRef != 8 || a.EchoRefSide != 1 {
+		t.Errorf("biscuit loopback ch%d side %d, want ch8 side 1 (right)", a.EchoRef, a.EchoRefSide)
+	}
+}
+
 func checkTable(t *testing.T, table []Ctl, want map[string]bool, value string) {
 	t.Helper()
 	got := map[string]bool{}
@@ -529,5 +542,22 @@ func TestMicADCsAreTheMutedOnes(t *testing.T) {
 		if got := strings.Join(l.MicADCs(), ""); got != c.want {
 			t.Errorf("%q: %q, want %q", c.mutes, got, c.want)
 		}
+	}
+}
+
+// The canceller frame divides the 1280-sample wake chunk (aec.ValidFrame
+// takes the same set and falls back to 1280 on anything else, which would
+// silently undo a board's measured choice). Donut's 160 is measured
+// (2026-11-21: 11 of 12 barge-ins at 3 m against 4 of 8 at 1280).
+func TestEveryBoardStatesAnAllowedAECFrame(t *testing.T) {
+	for _, b := range Known {
+		switch f := b.Hardware.Mics.AECFrame; f {
+		case 0, 160, 320, 640, 1280:
+		default:
+			t.Errorf("%s: AECFrame %d is not 0, 160, 320, 640 or 1280", b.ID, f)
+		}
+	}
+	if f := donutMics.AECFrame; f != 160 {
+		t.Errorf("donut's canceller frame is %d, measured best at 160", f)
 	}
 }

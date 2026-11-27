@@ -16,7 +16,11 @@ import _oww_stub
 
 _oww_stub.install()
 
+import em_device
 import em_controller  # noqa: E402 — must follow the stub
+import em_wake_claim  # noqa: E402
+import em_turn  # noqa: E402
+import em_private_listen  # noqa: E402
 import em_state  # noqa: E402
 from _sources import code_only, def_source  # noqa: E402
 
@@ -28,7 +32,7 @@ def _drop_the_stub():
 
 
 def _barging_device(events, monkeypatch):
-    d = em_controller.Device("dev1", "10.0.0.1", [], None)
+    d = em_device.Device("dev1", "10.0.0.1", [], None)
     d.speaking = True
     d.barge_in_enabled = True
     d.wake_arb_ms = 700
@@ -62,12 +66,12 @@ def test_a_private_barge_flushes_before_it_claims(monkeypatch, winner):
         events.append("claim")
         return winner
 
-    monkeypatch.setattr(em_controller, "_claim_wake", claim)
+    monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
     monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
     monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
-    monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+    monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-    asyncio.run(em_controller._private_barge(d, _wake_event()))
+    asyncio.run(em_private_listen._private_barge(d, _wake_event()))
 
     assert events == ["speaker_flush", "claim"]
     assert d.barge_ceded is (winner != "dev1")
@@ -83,12 +87,12 @@ def test_a_barge_while_thinking_sends_no_flush(monkeypatch):
         events.append("claim")
         return "dev1"
 
-    monkeypatch.setattr(em_controller, "_claim_wake", claim)
+    monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
     monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
     monkeypatch.setattr(em_controller.esphome, "cancel_voice_turn", lambda *_a, **_k: None)
-    monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+    monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-    asyncio.run(em_controller._private_barge(d, _wake_event()))
+    asyncio.run(em_private_listen._private_barge(d, _wake_event()))
 
     assert events == ["claim"]
 
@@ -96,9 +100,9 @@ def test_a_barge_while_thinking_sends_no_flush(monkeypatch):
 def test_the_stream_watcher_flushes_before_it_claims():
     # The watcher is a scoring loop over live audio, so its order is pinned
     # in the source: exactly one flush, ahead of the claim.
-    src = code_only(def_source("_barge_watcher"))
+    src = code_only(def_source("barge_watcher"))
     assert src.count("speaker_flush") == 1
-    assert src.index("speaker_flush") < src.index("_claim_wake(")
+    assert src.index("speaker_flush") < src.index("em_wake_claim.claim_wake(")
 
 
 # The flush ends the reply, so the device reports playback complete and the
@@ -123,14 +127,14 @@ def test_the_turn_loop_waits_for_the_claim_a_flush_outran(monkeypatch, winner):
             return winner
 
         monkeypatch.setattr(d, "send_control", send_control)
-        monkeypatch.setattr(em_controller, "_claim_wake", claim)
+        monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
         monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
         monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
-        monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+        monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-        barge = asyncio.create_task(em_controller._private_barge(d, _wake_event()))
+        barge = asyncio.create_task(em_private_listen._private_barge(d, _wake_event()))
         await flushed.wait()  # the reply has ended; the turn unwinds now
-        await em_controller._await_barge_decision(d)
+        await em_turn._await_barge_decision(d)
         seen = (d.cancel_event.is_set(), d.barge_ceded)
         await barge
         return seen
@@ -141,15 +145,15 @@ def test_the_turn_loop_waits_for_the_claim_a_flush_outran(monkeypatch, winner):
 def test_the_turn_loop_waits_before_it_stops_the_watcher():
     # stop_watcher cancels the watcher, and a watcher cancelled mid-claim
     # never decides the barge at all.
-    src = code_only(def_source("_run_voice_locked"))
+    src = code_only(def_source("run_voice_locked"))
     assert src.index("_await_barge_decision(device)") < src.index("await stop_watcher()")
     assert src.index("_await_barge_decision(device)") < src.index("device.barge_detected and device.barge_ceded")
 
 
 def test_every_barge_exit_marks_the_decision_made():
-    watcher = code_only(def_source("_barge_watcher"))
+    watcher = code_only(def_source("barge_watcher"))
     assert "finally:\n        device.barge_decided.set()" in watcher
-    listen = code_only(def_source("_private_listen"))
+    listen = code_only(def_source("private_listen"))
     assert "await _private_barge(device, ev)\n            finally:\n                device.barge_decided.set()" in listen
 
 
@@ -165,19 +169,19 @@ def test_a_private_barge_marks_the_turn_before_it_flushes(monkeypatch):
         events.append("claim")
         return "dev1"
 
-    monkeypatch.setattr(em_controller, "_claim_wake", claim)
+    monkeypatch.setattr(em_wake_claim, "claim_wake", claim)
     monkeypatch.setattr(em_controller.esphome, "can_serve_turn", lambda _id: True)
     monkeypatch.setattr(em_controller.esphome, "abort_ha_run", lambda _id: None)
     monkeypatch.setattr(em_controller.esphome, "note_barged", lambda _id: events.append("barged"))
-    monkeypatch.setattr(em_controller, "_wake_heard_at", lambda *_a: 0.0)
+    monkeypatch.setattr(em_wake_claim, "wake_heard_at", lambda *_a: 0.0)
 
-    asyncio.run(em_controller._private_barge(d, _wake_event()))
+    asyncio.run(em_private_listen._private_barge(d, _wake_event()))
 
     assert events == ["barged", "speaker_flush", "claim"]
 
 
 def test_the_stream_watcher_marks_the_turn_before_it_flushes():
-    src = code_only(def_source("_barge_watcher"))
+    src = code_only(def_source("barge_watcher"))
     assert src.index("esphome.note_barged(device.device_id)") < src.index("speaker_flush")
 
 

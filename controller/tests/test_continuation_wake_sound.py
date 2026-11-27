@@ -15,6 +15,9 @@ import _oww_stub
 
 _oww_stub.install()
 
+import em_device
+import em_leds
+import em_turn
 import em_controller  # noqa: E402 — must follow the stub
 
 
@@ -32,9 +35,9 @@ def _run_turns(monkeypatch, continues, wake_sound=True, capabilities=("wake_cue"
     was sent, in order (a cue by its name).
     """
     sent = []
-    d = em_controller.Device("dev1", "10.0.0.1", list(capabilities), None)
+    d = em_device.Device("dev1", "10.0.0.1", list(capabilities), None)
     d.wake_sound = wake_sound
-    monkeypatch.setattr(em_controller.Device, "private_listening", property(lambda _d: private))
+    monkeypatch.setattr(em_device.Device, "private_listening", property(lambda _d: private))
 
     async def send_control(msg):
         sent.append(msg.get("cue") or msg["type"])
@@ -49,12 +52,13 @@ def _run_turns(monkeypatch, continues, wake_sound=True, capabilities=("wake_cue"
 
     monkeypatch.setattr(d, "send_control", send_control)
     monkeypatch.setattr(em_controller.esphome, "trigger_voice_turn", trigger_voice_turn)
-    for name in ("leds_listening", "_leds_turn_end", "_push_device_state"):
-        monkeypatch.setattr(em_controller, name, nothing)
+    for name in ("leds_listening", "leds_turn_end"):
+        monkeypatch.setattr(em_leds, name, nothing)
+    monkeypatch.setattr(em_device, "push_device_state", nothing)
     monkeypatch.setattr(em_controller.em_player, "interrupt", nothing)
     monkeypatch.setattr(em_controller.em_player, "resume_interrupted", nothing)
 
-    asyncio.run(em_controller._run_voice_locked(
+    asyncio.run(em_turn.run_voice_locked(
         d, trigger_label="wakeword(0.990)", is_wakeword=True))
     return sent
 

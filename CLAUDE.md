@@ -165,7 +165,7 @@ own wake word fires, then only until end of speech; "On the controller"
 
 Any device/controller pairing can occur in the field (`tests/test_capabilities.py`):
 
-- **Negotiate by capability, never by version string.** The register message lists them (`internal/client/control.go`, `capabilities()`): `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`, `oww_trigger`, `button_hold`, `audio_mix`, `aec_hw_ref`, `oww_local_only`, `output_chain`, `wake_cue`, `volume_cue`, `remote_volume_arc`, `response_level`, `stock_sound`, `wake_mic`, `pairing`, `sendspin`, `ble_connect`, `wake_word_off`, `ambient_light` only when the sensor is readable, and `thermal` only when the kernel exposes a thermal zone. A UI control whose feature is missing is **disabled with the reason**. `oww_shadow` (scores) and `oww_trigger` (acts) must stay two; without `audio_mix` keep the pause/resume path. When a capability cannot be proven at registration, report the runtime state separately (`aec_hw_ref` vs `aecRef` on stats) and gate UI on that.
+- **Negotiate by capability, never by version string.** The register message lists them (`internal/client/control.go`, `capabilities()`): `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `oww_shadow`, `oww_trigger`, `button_hold`, `audio_mix`, `aec_hw_ref`, `oww_local_only`, `output_chain`, `wake_cue`, `volume_cue`, `remote_volume_arc`, `response_level`, `stock_sound`, `wake_mic`, `pairing`, `sendspin`, `ble_connect`, `wake_word_off`, `ambient_light` only when the sensor is readable, `thermal` only when the kernel exposes a thermal zone, and `ssh` only when the image carries tinysshd. A UI control whose feature is missing is **disabled with the reason**. `oww_shadow` (scores) and `oww_trigger` (acts) must stay two; without `audio_mix` keep the pause/resume path. When a capability cannot be proven at registration, report the runtime state separately (`aec_hw_ref` vs `aecRef` on stats) and gate UI on that.
 - **Both ways**: the `ack` carries the controller's `features`. Adding a message is safe unnegotiated; MOVING one never is — the new path is silently discarded.
 - **A static boot property rides REGISTER, not the stats tick, and is persisted** — its consumer (`em_reconcile.on_connect`) runs before the first tick. `base_os` (schema v21): absence means Android for payload gating, but must NOT disable a control.
 - The controller sets the device clock via `time_ms` on the `ack`, stepped only past 30s; no NTP on the device.
@@ -270,6 +270,7 @@ cd emos/init && cc -O2 -o /tmp/cmdlinecheck cmdlinecheck.c && /tmp/cmdlinecheck
 cd emos/init && cc -O2 -o /tmp/serialcheck serialcheck.c && /tmp/serialcheck
 cd emos/init && cc -O2 -o /tmp/trialcheck trialcheck.c && /tmp/trialcheck
 cd emos/init && cc -O2 -o /tmp/devcheck devcheck.c && /tmp/devcheck
+cd emos/init && cc -O2 -o /tmp/sshcheck sshcheck.c && /tmp/sshcheck
 sh emos/device/em-wifi-check.sh
 ```
 
@@ -285,7 +286,9 @@ em_controller imports em_api; `em_routes_*` only from em_api and each other;
 base modules never reach upward), `tests/test_size_ratchet.py` (modules over
 1,500 lines or functions over 150 may not grow; `controller/tools/size_ratchet.py
 --update` after a shrink; a raise goes in the same change), and
-`tests/coverage_floor.json` (never lowered; a new module needs a floor).
+`tests/coverage_floor.json` (never lowered; a new module needs a floor; a pure
+move may re-split floors between the modules involved only if their combined
+line coverage does not fall, with both figures in the commit).
 
 **emOS's off-target tools ARE its suite**: each `#include`s `init.c` and drives
 the real functions. Add one wherever a wrong answer is SILENT on hardware. CI

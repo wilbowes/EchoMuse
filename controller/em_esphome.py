@@ -2619,7 +2619,7 @@ async def trigger_voice_turn(
     """
     Entry point for OWW/button-triggered voice turns in esphome mode.
 
-    Called from em_controller._run_voice_locked(). Finds the active HA
+    Called from em_turn.run_voice_locked(). Finds the active HA
     connection for this device and delegates to
     EchoMuseSatellite.run_esphome_voice_turn().
 
@@ -2696,7 +2696,7 @@ def cancel_voice_turn(device_id: str, abort_ha: bool = False,
     is going to start on this connection (barge-in during thinking). See
     EchoMuseSatellite.cancel_turn.
 
-    Called from em_controller.handle_button_event() when voice_lock is held,
+    Called from em_button_events.handle_button_event() when voice_lock is held,
     and from _barge_watcher.
     """
     server = get_server(device_id)

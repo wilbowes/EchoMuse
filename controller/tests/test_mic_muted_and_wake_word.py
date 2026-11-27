@@ -109,7 +109,7 @@ def test_the_picker_write_is_applied_before_the_handler_yields():
     assert "create_task" not in apply
     assert re.search(r"^\s+set_fn\(on\)\s*$", apply, re.M), "called, not scheduled"
 
-    ctrl = CONTROLLER.read_text()
+    ctrl = _sources.all_source()
     setter = _block(ctrl, "        def _set_wake_word(on: bool, _d=_device_ref) -> None:",
                     "            async def _follow()")
     for line in ("_d.wake_word_enabled = t.enabled",
@@ -121,7 +121,7 @@ def test_the_picker_write_is_applied_before_the_handler_yields():
 
 def test_the_choice_survives_a_controller_restart():
     """Read from the DB at connect and set on the server before its port comes up."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     assert "device.wake_word_enabled = await loop.run_in_executor(\n            None, db.get_wake_word_enabled, device_id" in src
     connect = _block(src, "await esphome.device_connected(", "\n        )")
     assert "wake_word_enabled=device.wake_word_enabled" in connect
@@ -146,13 +146,13 @@ def test_deleting_a_device_forgets_its_choice():
 
 
 def test_the_controller_reports_the_button_mute_to_ha():
-    handler = _sources.def_source("_on_mute_state")
+    handler = _sources.def_source("on_mute_state")
     assert "esphome.update_mic_muted(" in handler
 
 
 def test_the_button_does_not_move_the_wake_word():
     """`mute_state` may read HA's choice but never assign it."""
-    handler = _sources.def_source("_on_mute_state")
+    handler = _sources.def_source("on_mute_state")
     assert "em_wakeword.on_mic_mute(" in handler
     assert not re.search(r"\.wake_word_enabled\s*=", handler)
     assert "esphome.update_wake_word(" not in handler
@@ -161,21 +161,20 @@ def test_the_button_does_not_move_the_wake_word():
 
 def test_unmuting_with_the_wake_word_off_takes_the_stream_back_down():
     """The device restarts its wake stream on unmute; with the wake word off it goes back down."""
-    handler = _sources.def_source("_on_mute_state")
+    handler = _sources.def_source("on_mute_state")
     branch = _block(handler, "em_wakeword.on_mic_mute(", "if device.muted and")
     assert "mic_stop()" in branch
 
 
 def test_the_wake_listener_honours_the_picker():
     """Both the frame gate and the stall watchdog, or the watchdog restarts the stream."""
-    src = CONTROLLER.read_text()
-    listener = _block(src, "async def _stream_listen(", "\nasync def ")
+    listener = _sources.def_source("_stream_listen")
     assert listener.count("em_wakeword.wake_allowed(") >= 2
 
 
 def test_the_wake_stream_does_not_come_up_with_the_wake_word_off():
     """`Device.mic_start` is the one gate; `mic_start_turn` (an HA-initiated turn) is not gated."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     start = _block(src, "    async def mic_start(self):", "    async def mic_start_turn(self):")
     assert "wake_word_enabled" in start
     turn = _block(src, "    async def mic_start_turn(self):", "    async def mic_stop(self):")
@@ -193,20 +192,19 @@ def test_the_api_readout_is_the_stored_choice():
 
 def test_turning_the_wake_word_off_paints_nothing_on_the_ring():
     """No ring indicator (#286); HA driving the idle ring is #66."""
-    src = CONTROLLER.read_text()
+    src = _sources.all_source()
     setter = _block(src, "def _set_wake_word(", "        # Capabilities before")
-    assert "await leds_" not in setter
+    assert "leds_" not in setter
     assert "send_led_anim" not in setter and "set_leds" not in setter
     scenes = (ROOT / "controller" / "em_scenes.py").read_text()
     assert "wake_word" not in scenes
-    for fn in ("async def leds_off(", "async def _leds_turn_end("):
+    for fn in ("async def leds_off(", "async def leds_turn_end("):
         assert "wake_word_enabled" not in _block(src, fn, "\n\n\n")
 
 
 def test_a_private_wake_is_declined_with_the_wake_word_off():
     """The Echo scores its own wake word (#602), so each wake is declined, after the mic mute check and with its own reason."""
-    src = CONTROLLER.read_text()
-    turn = _block(src, "async def _private_wake_turn(", "\n\n\n")
+    turn = _sources.def_source("_private_wake_turn")
     gate = turn.index("if not device.wake_word_enabled:")
     close = turn.index('await device.listen_close(session, "wake_off")', gate)
     assert close < turn.index("Wake word detected"), \

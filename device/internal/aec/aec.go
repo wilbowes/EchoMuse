@@ -53,7 +53,8 @@ import (
 
 const (
 	sampleRate = 16000
-	// FrameSize is the speex frame: 1280 samples = 80ms, two per 160ms mic
+	// FrameSize is the default speex frame (a board may state a smaller one,
+	// board.MicArray.AECFrame): 1280 samples = 80ms, two per 160ms mic
 	// batch and one per 80ms wake chunk, so it adds no latency. With the
 	// 80ms hardware tail the filter is one block (M = 1), which is speex's
 	// cheapest shape: on the 11-06 captures 512/64 gave 15.5dB steady and
@@ -86,12 +87,11 @@ const (
 	// the mic batches.
 	hwTailMs = 80
 
-	// quietHold is how many silent reference frames pass before the unused
-	// microphones rest. The filter sees one frame of far-end history at
-	// the 80ms tail, so by then every state's history is the silence the
-	// skipped frames would have added, and it resumes where it would have
-	// been. 4 frames is 320ms.
-	quietHold = 4
+	// quietHoldMs is how long the reference must be silent before the
+	// unused microphones rest. The filter holds 80ms of far-end history, so
+	// by then every state's history is the silence the skipped frames would
+	// have added, and it resumes where it would have been.
+	quietHoldMs = 320
 )
 
 // Canceller is a single AEC instance shared by the speaker goroutine
@@ -103,6 +103,10 @@ type Canceller struct {
 	enabled bool
 	delayMs int
 	tailMs  int // configured (aecTailMs): the software tap's filter length
+
+	// frame is the speex frame in samples (FrameSize unless the board states
+	// one), fixed at New.
+	frame int
 
 	st       *C.SpeexEchoState
 	stTailMs int // the length st was built with: hwTailMs or tailMs
@@ -224,6 +228,13 @@ type Canceller struct {
 // sets this.
 func (c *Canceller) SetRefClean(on bool) { c.refClean.Store(on) }
 
+// SetRefSide says which of the output's two channels the hardware reference
+// loops back, 0 left or 1 right (board.MicArray.EchoRefSide), so the
+// de-aliasing matches it against that side. The same on mono output; with a
+// plug in, Sendspin plays L != R (#273), and biscuit's ch8 is the right.
+// Call it before the speaker starts writing; any value but 1 is the left.
+func (c *Canceller) SetRefSide(side int) { c.dealias.setSide(side) }
+
 // SetHardwareRef selects the far-end source. True takes it from ch8 of the
 // mic capture; false uses the software tap at the speaker ALSA write.
 //
@@ -309,8 +320,23 @@ func (c *Canceller) RefSource() string {
 //
 // nMics is how many microphones the hardware-reference path cancels: every
 // channel a turn can be given (see micStates), the board's MicArray.NumMics.
-func New(nMics int) *Canceller {
-	return &Canceller{dealias: newDealias(), micStates: make([]*C.SpeexEchoState, nMics)}
+func New(nMics int) *Canceller { return NewFrame(nMics, 0) }
+
+// NewFrame is New with the board's speex frame (board.MicArray.AECFrame).
+// Anything but an allowed size falls back to FrameSize: the mic batches
+// and wake chunks are built in multiples of it.
+func NewFrame(nMics, frame int) *Canceller {
+	return &Canceller{dealias: newDealias(), micStates: make([]*C.SpeexEchoState, nMics), frame: ValidFrame(frame)}
+}
+
+// ValidFrame is frame if it is an allowed speex frame (160, 320, 640 or
+// 1280 samples), else FrameSize.
+func ValidFrame(frame int) int {
+	switch frame {
+	case 160, 320, 640, FrameSize:
+		return frame
+	}
+	return FrameSize
 }
 
 // SetParams applies config. On the software tap, any change to delay or tail
@@ -369,20 +395,20 @@ func (c *Canceller) buildLocked() {
 	c.freeLocked()
 	c.stTailMs = c.effectiveTailLocked()
 	tailSamples := C.int(c.stTailMs * sampleRate / 1000)
-	c.st = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
+	c.st = C.speex_echo_state_init(C.int(c.frame), tailSamples)
 	rate := C.spx_int32_t(sampleRate)
 	C.speex_echo_ctl(c.st, C.SPEEX_ECHO_SET_SAMPLING_RATE, unsafe.Pointer(&rate))
 
-	c.micBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
-	c.refBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
-	c.outBuf = (*C.spx_int16_t)(C.malloc(FrameSize * 2))
+	c.micBuf = (*C.spx_int16_t)(C.malloc(C.size_t(c.frame * 2)))
+	c.refBuf = (*C.spx_int16_t)(C.malloc(C.size_t(c.frame * 2)))
+	c.outBuf = (*C.spx_int16_t)(C.malloc(C.size_t(c.frame * 2)))
 	if c.hwRef {
 		for i := range c.micStates {
-			c.micStates[i] = C.speex_echo_state_init(C.int(FrameSize), tailSamples)
+			c.micStates[i] = C.speex_echo_state_init(C.int(c.frame), tailSamples)
 			C.speex_echo_ctl(c.micStates[i], C.SPEEX_ECHO_SET_SAMPLING_RATE, unsafe.Pointer(&rate))
 		}
 	}
-	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", FrameSize, c.stTailMs, c.delayMs)
+	log.Printf("[aec] enabled: frame=%d tail=%dms delay=%dms", c.frame, c.stTailMs, c.delayMs)
 }
 
 // seedRingLocked seeds the ring with the bulk delay as silence: the mic
@@ -485,10 +511,10 @@ func (c *Canceller) WriteFar(period []byte) {
 }
 
 // Process runs echo cancellation on one mic buffer: 16kHz mono S16LE, any
-// multiple of FrameSize samples. The mic ALSA reader does NOT deliver single
+// multiple of the frame (c.frame). The mic ALSA reader does NOT deliver single
 // 512-sample periods — GoTinyAlsa's GetAudioStream reads pcm_get_buffer_size
 // per chunk (PeriodSize × PeriodCount = 2560 frames = 160ms), so the buffer
-// arriving here is 2 speex frames long. The pre-2026-07-08 version of this
+// arriving here is 2 default speex frames long. The pre-2026-07-08 version of this
 // guard required exactly one frame and silently passed everything through —
 // AEC had therefore never processed a single sample on hardware (ring pegged
 // at ringCap, 0dB cancellation at every delay setting, zero underruns to give
@@ -543,41 +569,41 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 		}
 		return mono
 	}
-	if len(mono) == 0 || len(mono)%(FrameSize*2) != 0 {
+	if len(mono) == 0 || len(mono)%(c.frame*2) != 0 {
 		if !c.sizeWarned {
 			c.sizeWarned = true
 			log.Printf(
 				"[aec] mic buffer %db is not a multiple of the %db speex frame — AEC BYPASSED",
-				len(mono), FrameSize*2,
+				len(mono), c.frame*2,
 			)
 		}
 		return mono
 	}
 
 	out := make([]byte, len(mono))
-	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), FrameSize)
-	ref := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
-	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), FrameSize)
+	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), c.frame)
+	ref := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), c.frame)
+	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), c.frame)
 
-	for off := 0; off < len(mono); off += FrameSize * 2 {
-		sub := mono[off : off+FrameSize*2]
-		for i := 0; i < FrameSize; i++ {
+	for off := 0; off < len(mono); off += c.frame * 2 {
+		sub := mono[off : off+c.frame*2]
+		for i := 0; i < c.frame; i++ {
 			mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))
 		}
 		short := 0
 		if useHW {
 			// Same frame, same clock — a straight copy, no ring, no delay
 			// bookkeeping. This is the whole point of #385.
-			hsub := hwref[off : off+FrameSize*2]
+			hsub := hwref[off : off+c.frame*2]
 			// The reference is the bytes written to ALSA, and the volume is
 			// applied to those bytes before the write (speaker/swvolume.go),
 			// so it is already what the speaker emits — no scalar.
-			for i := 0; i < FrameSize; i++ {
+			for i := 0; i < c.frame; i++ {
 				ref[i] = int16(binary.LittleEndian.Uint16(hsub[i*2:]))
 			}
 			c.hwFrames++
 		} else {
-			for i := 0; i < FrameSize; i++ {
+			for i := 0; i < c.frame; i++ {
 				if c.count > 0 {
 					ref[i] = c.ring[c.tail]
 					c.tail = (c.tail + 1) % ringCap
@@ -596,7 +622,7 @@ func (c *Canceller) processLocked(mono, hwref []byte) []byte {
 		}
 
 		C.speex_echo_cancellation(c.st, c.micBuf, c.refBuf, c.outBuf)
-		for i := 0; i < FrameSize; i++ {
+		for i := 0; i < c.frame; i++ {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
 		}
 
@@ -655,10 +681,13 @@ func (c *Canceller) noteAttLocked(micRMS, outRMS, refRMS float64, useHW bool, mi
 	c.statInSum += micRMS
 	c.statOutSum += outRMS
 	c.statRefSum += refRMS
-	if c.statFrames < 32 { // 32 × 32ms ≈ 1s
+	// One line per 32 default frames of playback (2.56s), whatever the
+	// board's frame, so a smaller frame does not multiply the log.
+	if c.statFrames*c.frame < 32*FrameSize {
 		return
 	}
-	inAvg, outAvg, refAvg := c.statInSum/32, c.statOutSum/32, c.statRefSum/32
+	n := float64(c.statFrames)
+	inAvg, outAvg, refAvg := c.statInSum/n, c.statOutSum/n, c.statRefSum/n
 	att := 0.0
 	if outAvg > 0 {
 		att = 20 * math.Log10(inAvg/outAvg)
@@ -733,7 +762,7 @@ func (c *Canceller) processMics(mics [][]byte, active int, ref []byte, want [][]
 	defer c.mu.Unlock()
 	mono := mics[active]
 	ok := c.enabled && c.hwRef && c.micStates[0] != nil && len(mics) == len(c.micStates) &&
-		len(mono) > 0 && len(mono)%(FrameSize*2) == 0 && len(ref) == len(mono)
+		len(mono) > 0 && len(mono)%(c.frame*2) == 0 && len(ref) == len(mono)
 	for _, m := range mics {
 		ok = ok && len(m) == len(mono)
 	}
@@ -743,12 +772,12 @@ func (c *Canceller) processMics(mics [][]byte, active int, ref []byte, want [][]
 
 	filled := make([]int, len(want))
 	out := make([]byte, len(mono))
-	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), FrameSize)
-	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), FrameSize)
-	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), FrameSize)
-	for off := 0; off < len(mono); off += FrameSize * 2 {
+	mic := unsafe.Slice((*int16)(unsafe.Pointer(c.micBuf)), c.frame)
+	far := unsafe.Slice((*int16)(unsafe.Pointer(c.refBuf)), c.frame)
+	res := unsafe.Slice((*int16)(unsafe.Pointer(c.outBuf)), c.frame)
+	for off := 0; off < len(mono); off += c.frame * 2 {
 		quiet := true
-		for i := 0; i < FrameSize; i++ {
+		for i := 0; i < c.frame; i++ {
 			far[i] = int16(binary.LittleEndian.Uint16(ref[off+i*2:]))
 			quiet = quiet && far[i] == 0
 		}
@@ -762,28 +791,28 @@ func (c *Canceller) processMics(mics [][]byte, active int, ref []byte, want [][]
 		// for the telemetry below.
 		for k := 1; k <= len(mics); k++ {
 			m := (active + k) % len(mics)
-			if m != active && c.farQuiet > quietHold {
+			if m != active && c.farQuiet > quietHoldMs*sampleRate/1000/c.frame {
 				continue
 			}
 			c.micFrames++
-			sub := mics[m][off : off+FrameSize*2]
-			for i := 0; i < FrameSize; i++ {
+			sub := mics[m][off : off+c.frame*2]
+			for i := 0; i < c.frame; i++ {
 				mic[i] = int16(binary.LittleEndian.Uint16(sub[i*2:]))
 			}
 			C.speex_echo_cancellation(c.micStates[m], c.micBuf, c.refBuf, c.outBuf)
 			if m < len(want) && want[m] != nil {
-				for i := 0; i < FrameSize; i++ {
+				for i := 0; i < c.frame; i++ {
 					binary.LittleEndian.PutUint16(want[m][off+i*2:], uint16(res[i]))
 				}
 				filled[m]++
 			}
 		}
-		for i := 0; i < FrameSize; i++ {
+		for i := 0; i < c.frame; i++ {
 			binary.LittleEndian.PutUint16(out[off+i*2:], uint16(res[i]))
 		}
 		c.noteAttLocked(frameRMS(mic), frameRMS(res), frameRMS(far), true, active)
 	}
-	frames := len(mono) / (FrameSize * 2)
+	frames := len(mono) / (c.frame * 2)
 	for m := range want {
 		if want[m] != nil && filled[m] != frames {
 			want[m] = nil
@@ -829,7 +858,7 @@ func (c *Canceller) exportStateLocked(st *C.SpeexEchoState) ([]byte, error) {
 	out := make([]byte, stateHeader+n)
 	copy(out, stateMagic)
 	h := out[len(stateMagic):]
-	binary.LittleEndian.PutUint16(h[0:], uint16(FrameSize))
+	binary.LittleEndian.PutUint16(h[0:], uint16(c.frame))
 	binary.LittleEndian.PutUint16(h[2:], uint16(c.stTailMs))
 	binary.LittleEndian.PutUint32(h[4:], uint32(sampleRate))
 	binary.LittleEndian.PutUint32(h[8:], uint32(n))
@@ -867,9 +896,9 @@ func (c *Canceller) checkStateLocked(st *C.SpeexEchoState, b []byte) error {
 	h := b[len(stateMagic):]
 	frame, tail := int(binary.LittleEndian.Uint16(h[0:])), int(binary.LittleEndian.Uint16(h[2:]))
 	rate, n := int(binary.LittleEndian.Uint32(h[4:])), int(binary.LittleEndian.Uint32(h[8:]))
-	if frame != FrameSize || tail != c.stTailMs || rate != sampleRate {
+	if frame != c.frame || tail != c.stTailMs || rate != sampleRate {
 		return fmt.Errorf("aec: saved for frame %d tail %dms rate %d, running %d/%dms/%d",
-			frame, tail, rate, FrameSize, c.stTailMs, sampleRate)
+			frame, tail, rate, c.frame, c.stTailMs, sampleRate)
 	}
 	if n != int(C.em_echo_state_size(st)) || len(b) != stateHeader+n {
 		return errors.New("aec: saved echo path is the wrong size")

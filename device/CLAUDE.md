@@ -108,7 +108,7 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
     (cost unmeasured).
   - `[aec] far:` logs only while `aecEnabled`; read `mean` beside `rms`
     (`mean≈±rms` is a DC offset, not audio).
-- **Barge-in** (controller `_barge_watcher`): device `speaker_flush` drains and
+- **Barge-in** (controller `em_barge_watcher.barge_watcher`): device `speaker_flush` drains and
   discards until EOS. `bargeInThreshold` (0.05–0.10) sits below `owwThreshold`
   by design (echo depresses speech-over-TTS scores). **A barge must abort HA's
   run before starting the interrupting turn** (`controller/CLAUDE.md`).
@@ -148,6 +148,7 @@ raw frame (the board's MicArray: biscuit 9ch S24_3LE, Dot 3 4ch S32_LE) → beam
 | `pkg/board/` | Board identity (idme `device_type_id`), parts BY NAME, `Resolve`, emOS thermal tuning. `guard_test.go` fails on hardware numbers anywhere else |
 | `internal/wakeword/` | Pure-Go openWakeWord feature pipeline behind `Inferer`; golden fixture `testdata/` (`gen_fixture.py`) |
 | `internal/wakeword/ort/` | ONNX Runtime, **dlopen'd, never linked**, so a device without it boots. `DefaultOptions` (1 thread, XNNPACK, no spinning) is measured — more threads raise CPU |
+| `internal/wakeword/melnative/` | The melspectrogram on pffft (NEON), replacing ORT's for that one model: 29× cheaper on C95. Held to the golden fixture on the host and, at every load, to the installed model (`Checked`); disagreement keeps ORT and says why in the scorer's info. Shares `aec/src/pffft` under renamed symbols (`pffft_rename.h`): without it the link fails on duplicates |
 | `internal/wakeword/shadow/` | On-device scoring; `Push` never blocks |
 | `internal/wakeword/fixture/` | One tolerance policy for the host test and `tools/oww_probe`; tolerances relative to the tensor's scale |
 | `internal/listen/` | Private-listening gate and `Resolve`; pure, clock-injected |
@@ -468,7 +469,7 @@ with no known mechanism; do not call it the cause.
   Mute red and volume cyan are device-local.
 - Outcomes by rhythm, not colour, from `device.last_turn_outcome` (set in
   `em_turn_record.persist_turn` **and `em_turn_record.record_dropped_turn`**, consumed by
-  `_leds_turn_end`); **`no_ha` alone uses colour** (orange), after a 600ms
+  `em_leds.leds_turn_end`); **`no_ha` alone uses colour** (orange), after a 600ms
   listening hold.
 - **Start a device-local pulse ONCE per state** (`pulseKind`); phase from
   elapsed time (`pulsePhase`).
@@ -522,6 +523,18 @@ console works without the firmware. Never undo:
 
 Record `<iterations>:<salt hex>:<hash hex>`, hashed by the controller; design
 in `controller/CLAUDE.md`.
+
+## emOS SSH (2026-11-11)
+
+Per Echo, off by default. **init runs it, never the firmware** (`ssh_main`:
+accept on 22, tinysshd per connection), so it is the way in when the server
+will not start. The firmware writes `config.SSHDir/{enabled,authorized_keys}`
+from `sshEnabled`/`sshAuthorizedKeys` (pointers, change-only writes, keys
+before the flag) and reports `ssh` on stats from `/proc/net/tcp`, never the
+setting. **Ed25519 only, options refused** (`ParseSSHKeys`, vectors shared
+with the controller in `config/testdata/ssh_keys.json`). Keys are copied to
+`/run/ssh` because tinysshd refuses /data's modes. busybox stays free of
+listening daemons. `emos/init/sshcheck.c` covers init's half.
 
 ## cgo dependency
 

@@ -11,23 +11,23 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-SOURCE = Path(__file__).resolve().parents[1] / "em_controller.py"
+SOURCE = Path(__file__).resolve().parents[1] / "em_wake_model.py"
 
 
 def _load(log=None):
-    """Exec `_trim_oww_raw_buffer` and its keep length from em_controller.py."""
+    """Exec `trim_raw_buffer` and its keep length from em_wake_model.py."""
     tree = ast.parse(SOURCE.read_text())
     wanted = [
         node for node in tree.body
         if (isinstance(node, ast.Assign) and any(
             getattr(target, "id", None) == "_OWW_RAW_BUFFER_KEEP"
             for target in node.targets))
-        or (isinstance(node, ast.FunctionDef) and node.name == "_trim_oww_raw_buffer")
+        or (isinstance(node, ast.FunctionDef) and node.name == "trim_raw_buffer")
     ]
     assert len(wanted) == 2, "the trim function or its keep length moved"
     scope = {"collections": collections, "log": log or logging.getLogger(__name__)}
     exec(compile(ast.Module(body=wanted, type_ignores=[]), str(SOURCE), "exec"), scope)
-    return scope["_trim_oww_raw_buffer"], scope["_OWW_RAW_BUFFER_KEEP"]
+    return scope["trim_raw_buffer"], scope["_OWW_RAW_BUFFER_KEEP"]
 
 
 def test_a_fresh_ten_second_buffer_is_trimmed_to_the_recent_samples():

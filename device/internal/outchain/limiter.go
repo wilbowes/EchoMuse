@@ -27,6 +27,9 @@ type limiter struct {
 
 	delay []float64 // lookahead-1 samples, ring
 	di    int
+	// delayR is the right channel's delay line, for stepStereo only; di
+	// indexes both.
+	delayR []float64
 
 	// Sliding maximum of |x| over the look-ahead window: a monotonic deque of
 	// (sequence number, value), decreasing in value.
@@ -50,6 +53,7 @@ func newLimiter(fs float64) *limiter {
 	l := &limiter{
 		lookahead: la,
 		delay:     make([]float64, la-1),
+		delayR:    make([]float64, la-1),
 		dqSeq:     make([]int64, la+1),
 		dqVal:     make([]float64, la+1),
 	}
@@ -144,7 +148,72 @@ func (l *limiter) step(x float64) float64 {
 	return out
 }
 
+// stepStereo is step on a stereo frame (#273), LINKED: one envelope from the
+// louder side and one gain for both, so limiting never moves the image; each
+// channel keeps its own delay line. With L == R it computes exactly what
+// step does, on each side. step is deliberately not refactored to share this
+// body: the mono path's code, and so its float rounding on the device, stays
+// as it was.
+func (l *limiter) stepStereo(xl, xr float64) (float64, float64) {
+	l.push(max(math.Abs(xl), math.Abs(xr)))
+
+	var curL, curR float64
+	if len(l.delay) > 0 {
+		curL, curR = l.delay[l.di], l.delayR[l.di]
+		l.delay[l.di], l.delayR[l.di] = xl, xr
+		if l.di++; l.di == len(l.delay) {
+			l.di = 0
+		}
+	} else {
+		curL, curR = xl, xr
+	}
+
+	outL, outR := curL, curR
+	if !l.enabled {
+		l.gainDb = 0
+	} else {
+		targetDb := 0.0
+		if env := l.dqVal[l.dqHead]; env > l.thresh && env > eps {
+			targetDb = 20 * math.Log10(max(l.thresh/env, 1e-12))
+		}
+		l.gainDb = min(targetDb, l.gainDb+l.slew)
+		if r := -l.gainDb; r > l.maxReductionDb {
+			l.maxReductionDb = r
+		}
+		if l.gainDb < 0 {
+			g := l.gain.of(l.gainDb)
+			outL, outR = curL*g, curR*g
+		}
+	}
+
+	// #275's counts, per FRAME: one clipped on either side counts once, so
+	// dual-mono audio counts what the mono path counts.
+	if math.Abs(outL) > ceiling || math.Abs(outR) > ceiling {
+		if l.enabled {
+			l.clipped++
+		} else {
+			l.clippedBypassed++
+		}
+	}
+	return outL, outR
+}
+
+// split starts the right channel's delay line from the left's, which is what
+// it would hold had it run on the dual-mono audio before.
+func (l *limiter) split() { copy(l.delayR, l.delay) }
+
+// merge folds the right channel's delay line into the left's, as their mean,
+// when the chain goes back to one channel; the gain is shared already.
+func (l *limiter) merge() {
+	for i := range l.delay {
+		l.delay[i] = (l.delay[i] + l.delayR[i]) / 2
+	}
+}
+
 func (l *limiter) reset() {
+	for i := range l.delayR {
+		l.delayR[i] = 0
+	}
 	for i := range l.delay {
 		l.delay[i] = 0
 	}

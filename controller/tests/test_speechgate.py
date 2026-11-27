@@ -1,6 +1,7 @@
 """
 The speech gate: a turn's audio reaches HA only once a frame scores as speech,
-and when it does, HA receives the whole held stream, in order.
+and when it does, HA receives the last RELEASE_LEAD_S of the held stream, in
+order, then everything after.
 
 Silero itself needs onnxruntime, which the suite does not have, so the model
 is stubbed; its per-turn state handling is tested against a stub session.
@@ -37,13 +38,52 @@ def test_opening_releases_the_held_stream_in_order_then_passes_through():
     assert g.push(fs[5], 0.0) == [fs[5]]
 
 
+def test_a_late_opening_releases_only_the_lead():
+    # C95 2026-11-19 (barge heard as "Yeah."): loud residue, a 1.5s pause, the command
+    # at frame 23. Released whole, HA's segmenter ended the turn on the
+    # residue before the command arrived.
+    g = sg.SpeechGate(threshold=0.5, release_lead_s=0.4)     # 5 frames
+    fs = _frames(24)
+    for f in fs[:23]:
+        assert g.push(f, 0.1) == []
+    assert g.push(fs[23], 0.9) == fs[18:24]
+    assert g.trimmed == 18
+    assert "first 1440ms not sent" in g.summary()
+
+
+def test_an_opening_inside_the_lead_releases_everything():
+    # A command run on from the wake word opens the gate early; nothing of
+    # it may be cut.
+    g = sg.SpeechGate(threshold=0.5, release_lead_s=0.4)
+    fs = _frames(5)
+    for f in fs[:4]:
+        g.push(f, 0.1)
+    assert g.push(fs[4], 0.9) == fs
+    assert g.trimmed == 0
+    assert "not sent" not in g.summary()
+
+
+def test_the_default_lead_outlasts_ha_vad_warm_up():
+    # HA's pymicro-vad 1.0.1 returns -1 for its first 760ms, and its
+    # VoiceCommandSegmenter then needs speech_seconds=0.3 of speech (HA
+    # 2026.11.2 assist_pipeline/vad.py). A shorter lead hands HA a command's
+    # onset inside the warm-up, the failure ha_vad_stalled_verdict exists for.
+    assert sg.RELEASE_LEAD_S >= 0.76 + 0.3
+    g = sg.SpeechGate(threshold=0.5)
+    fs = _frames(40)
+    for f in fs[:39]:
+        g.push(f, 0.0)
+    out = g.push(fs[39], 1.0)
+    assert len(out) * sg.FRAME_S >= sg.RELEASE_LEAD_S
+
+
 def test_threshold_is_inclusive():
     g = sg.SpeechGate(threshold=0.5)
     assert g.push(b"x", 0.5) == [b"x"]
 
 
 def test_hold_is_bounded_and_keeps_the_newest():
-    g = sg.SpeechGate(threshold=0.5, max_hold_s=0.4)   # 5 frames
+    g = sg.SpeechGate(threshold=0.5, max_hold_s=0.4, release_lead_s=8.0)   # 5 frames
     fs = _frames(8)
     for f in fs[:7]:
         g.push(f, 0.0)
