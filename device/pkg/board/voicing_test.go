@@ -57,6 +57,13 @@ func TestRadarButtonFloor(t *testing.T) {
 	}
 }
 
+func TestDonutButtonFloor(t *testing.T) {
+	v := donutVoicing
+	if got := float64(57-127)*v.DbPerLevel + v.CeilingDb; math.Abs(got+50) > 1e-9 {
+		t.Errorf("donut floor %v dB, want -50", got)
+	}
+}
+
 // Stock Dot 3 adds bass as the volume falls and takes it away at the top, as
 // radar does; the table must keep that direction.
 func TestDonutBassFollowsVolumeDown(t *testing.T) {
@@ -75,6 +82,25 @@ func TestDonutBassFollowsVolumeDown(t *testing.T) {
 	for i := 1; i < len(bass.Gains); i++ {
 		if bass.Gains[i].Percent <= bass.Gains[i-1].Percent {
 			t.Errorf("percents not ascending at %d", i)
+		}
+	}
+}
+
+// The Dot 3's bass follows loudness, not the knob: at every level in the
+// button band it equals #1230's table read at the level that gave the same
+// loudness on the plain 0.5dB slope.
+func TestDonutBassFollowsLoudness(t *testing.T) {
+	plain := VolumeEQ{Gains: []VolumeGain{
+		{45, 5.10}, {55, 3.46}, {65, 0}, {75, -2.70}, {85, -8.18}, {95, -8.85},
+	}}
+	bass := donutVoicing.ByVolume[0]
+	for level := 57; level <= 127; level++ {
+		db := float64(level-127)*donutVoicing.DbPerLevel + donutVoicing.CeilingDb
+		plainLevel := 127 + (db-donutVoicing.CeilingDb)/0.5
+		want := plain.GainAt(plainLevel * 100 / 127)
+		got := bass.GainAt(float64(level) * 100 / 127)
+		if math.Abs(got-want) > 1e-9 {
+			t.Errorf("level %d (%.1fdB): bass %.3f, want %.3f", level, db, got, want)
 		}
 	}
 }

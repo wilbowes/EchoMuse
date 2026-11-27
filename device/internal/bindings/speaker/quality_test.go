@@ -56,6 +56,9 @@ const (
 	// S16 output of an undithered tone is itself harmonic (-38dB at -66dBFS),
 	// a hundred dB under full scale and inaudible; the baseline still holds it.
 	qBoundFloorDbfs = -45
+	// qSilentDb is what a distortion measure reads when the output is
+	// digital silence (see qDistortionDb).
+	qSilentDb = -200
 )
 
 var qLevels = []int{16, 32, 48, 64, 80, 96, 107, 112, 120, 127}
@@ -226,6 +229,13 @@ func qDistortionDb(p []float64, tones []float64, grid float64) float64 {
 	for _, t := range tones {
 		s, _ := band(t-10, t+10)
 		sig += s
+	}
+	if sig == 0 {
+		// Nothing of the signal survived the S16 output (a level far under
+		// the button floor, where the law puts the tone below one LSB).
+		// Silence has no distortion; report it as a finite floor so the
+		// baseline can hold it.
+		return qSilentDb
 	}
 	var dist float64
 	for f := grid; f <= 10000; f += grid {
