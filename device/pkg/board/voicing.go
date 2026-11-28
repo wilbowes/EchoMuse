@@ -212,11 +212,36 @@ var donutVoicing = &Voicing{
 	BassFloorDb:    -40,
 	BassHoldMs:     20,
 	ByVolume: []VolumeEQ{
+		// Stock's anchors (45..95%, #1230) were set on the plain 0.5dB
+		// slope. ByVolume is keyed on the level, so with the steeper
+		// DbPerLevel below they would land the bass of a louder volume at
+		// every loudness (thin in the middle, heard on a Dot 3,
+		// 2026-11-19). donutBassPct moves each anchor to the level that
+		// now gives the loudness it had, so every loudness keeps the bass
+		// #1230 tuned for it.
 		{Hz: 73.1, Q: 0.428, Gains: []VolumeGain{
-			{45, 5.10}, {55, 3.46}, {65, 0}, {75, -2.70}, {85, -8.18}, {95, -8.85},
+			{donutBassPct(45), 5.10}, {donutBassPct(55), 3.46}, {donutBassPct(65), 0},
+			{donutBassPct(75), -2.70}, {donutBassPct(85), -8.18}, {donutBassPct(95), -8.85},
 		}},
 	},
 	CeilingDb: 5,
+	// The button floor (level 57) at -50dB, radar's floor (#1157): at the
+	// plain 0.5dB slope it was -30dB, and -40dB was still loud at the lowest
+	// step on a Dot 3 (2026-11-19). One straight line to the ceiling, so
+	// every press is the same ~1.6dB and full volume is unchanged. ByVolume
+	// follows it through donutBassPct, above.
+	DbPerLevel: donutDbPerLevel,
+}
+
+// donutDbPerLevel is the Dot 3's volume slope: -50dB at the button floor
+// (level 57), +5dB at full.
+const donutDbPerLevel = 55.0 / 70
+
+// donutBassPct maps a ByVolume anchor set on the plain 0.5dB slope to the
+// percent (of level 127) that gives the same loudness under donutDbPerLevel.
+// Both laws meet at full volume, so 100% stays 100%.
+func donutBassPct(plainPct float64) float64 {
+	return 100 - (100-plainPct)*0.5/donutDbPerLevel
 }
 
 // BiscuitVoicing is biscuit's voicing, for the output chain's tests and its
