@@ -1316,7 +1316,6 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 
 	if mode == config.OnDeviceOff {
 		if dc.ShadowScorer() != nil {
-			syncSecondLook(dc, cc, spk, srv, nil, model)
 			dc.SetShadowScorer(nil)
 			log.Printf("[shadow] on-device wake word disabled")
 		}
@@ -1358,7 +1357,6 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 			shadowState.lastErr = msg
 			log.Printf("[shadow] not started: %v", err)
 		}
-		syncSecondLook(dc, cc, spk, srv, nil, model)
 		dc.SetShadowScorer(nil)
 		shadowState.mode, shadowState.model = mode, model
 		return
@@ -1373,7 +1371,6 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if spk != nil && benchScorer != nil {
 		benchScorer(sc, spk)
 	}
-	syncSecondLook(dc, cc, spk, srv, sc, model)
 	dc.SetShadowScorer(sc)
 	syncReplyTaps(dc, cc, spk, srv, model, threshold, true)
 	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""

@@ -389,10 +389,6 @@ type beamSet struct {
 	whU  [][]complex128 // [bin] whitened unit steering
 	phiS []float64      // [bin] static residual noise PSD
 	ref  int
-	// norm is ‖d‖/√m per bin, d distortionless on ref: scaling the output by
-	// it gives the talker at the mics' average gain instead of as ref hears
-	// it, so nothing depends on which mic is the reference (Probe).
-	norm []float64
 }
 
 // beamFor computes the beam for a crossing leadS ago: the WakeS before the
@@ -420,7 +416,7 @@ func (s *Stage) beamFor(leadS float64) (*beamSet, error) {
 	rn := s.sumBlocks(skipB+wakeB, noiseB)
 	lo, hi := bandLoHz*frameN/sampleRate, bandHiHz*frameN/sampleRate
 	b := &beamSet{h: make([][]complex128, bins), whL: make([][]complex128, bins),
-		whU: make([][]complex128, bins), phiS: make([]float64, bins), norm: make([]float64, bins)}
+		whU: make([][]complex128, bins), phiS: make([]float64, bins)}
 	// Reference mic: most talker over noise in the speech band.
 	best := math.Inf(-1)
 	for c := 0; c < m; c++ {
@@ -449,7 +445,6 @@ func (s *Stage) beamFor(leadS float64) (*beamSet, error) {
 		for i := range d {
 			d[i] /= r
 		}
-		b.norm[k] = math.Sqrt(real(dot(d, d)) / float64(m))
 		x := solveUpperH(l, m, solveLower(l, m, d)) // n⁻¹·d
 		den := real(dot(d, x))
 		if den <= 0 {

@@ -34,11 +34,9 @@ type turnBeam struct {
 	// newVAD returns a fresh speech detector for one turn, or nil.
 	newVAD func() speechScorer
 
-	mu      sync.Mutex // guards lockReq/crossAt (set by OpenListen) and the probe request
+	mu      sync.Mutex // guards lockReq/crossAt (set by OpenListen)
 	lockReq bool
 	crossAt time.Time
-	probeAt   time.Time
-	probeDone func(*turnbeam.Probe, error)
 
 	active bool
 	vad    speechScorer
@@ -98,7 +96,6 @@ func (t *turnBeam) step(chans [][]int16, plain []byte, sessionOpen bool) []byte 
 	if crossAt, req := t.takeLock(); req && sessionOpen {
 		t.lock(time.Since(crossAt).Seconds())
 	}
-	t.takeProbe(sessionOpen)
 	if t.active && !sessionOpen {
 		t.st.Unlock()
 		t.active = false
@@ -111,52 +108,6 @@ func (t *turnBeam) step(chans [][]int16, plain []byte, sessionOpen bool) []byte 
 	t.fifo = append(t.fifo, y...)
 	t.score()
 	return t.emit(len(plain) / 2)
-}
-
-// probeAfter is how long after a near-miss's crossing the probe is taken:
-// the scorer looks at the beam up to that far past the crossing.
-const probeAfter = 600 * time.Millisecond
-
-// requestProbe asks for a second look at a near-miss whose peak frame was
-// captured at at; done gets the probe (or why there is none) on its own
-// goroutine. A newer request replaces an older one still waiting.
-func (t *turnBeam) requestProbe(at time.Time, done func(*turnbeam.Probe, error)) {
-	if t == nil {
-		return
-	}
-	t.mu.Lock()
-	t.probeAt, t.probeDone = at, done
-	t.mu.Unlock()
-}
-
-func (t *turnBeam) takeProbe(sessionOpen bool) {
-	t.mu.Lock()
-	at, done := t.probeAt, t.probeDone
-	if done == nil || time.Since(at) < probeAfter {
-		t.mu.Unlock()
-		return
-	}
-	t.probeDone = nil
-	t.mu.Unlock()
-	if sessionOpen || t.active { // a wake already got there
-		return
-	}
-	p, err := t.st.Probe(time.Since(at).Seconds())
-	go done(p, err)
-}
-
-// TurnStageOn reports whether the turn stage runs on this device.
-func (d *DataClient) TurnStageOn() bool { return d.tb != nil }
-
-// SecondLook asks the turn stage for a second look at a wake near-miss whose
-// peak frame was captured at at. False when the stage is off; otherwise done
-// runs later on its own goroutine with the probe, or why there is none.
-func (d *DataClient) SecondLook(at time.Time, done func(*turnbeam.Probe, error)) bool {
-	if d.tb == nil {
-		return false
-	}
-	d.tb.requestProbe(at, done)
-	return true
 }
 
 func (t *turnBeam) lock(leadS float64) {
@@ -217,7 +168,7 @@ func (t *turnBeam) score() {
 func (t *turnBeam) emit(n int) []byte {
 	out := make([]byte, 2*n)
 	delay := int(turnbeam.SegDelayS * 16000)
-	// A late lock (a second look) starts with a backlog: drop what is
+	// A late lock starts with a backlog: drop what is
 	// already known to be silence, so the session catches up with the room.
 	drop := 0
 	for len(t.fifo)-drop-n > delay && t.seg.FinalZero(t.fifoT+float64(drop)/16000) {
