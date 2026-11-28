@@ -100,6 +100,24 @@ check("runConnectAndroid calls _unlockVerdict",
 check("in recovery the release comes from /system, not TWRP's getprop",
   /effRelease\s*=\s*\(sys && sys\.release\)/.test(connect));
 
+// ── lk_a is read off the device, never through `od` on it (#903) ──
+// TWRP 3.2.3's BusyBox 1.22.1 `od` has no -A, so the old `od -An` probe could
+// never read lk_a on the recovery amonet 1 installs. The probe must report
+// the device node and let the browser pull and decode the bytes — the way
+// the emOS donor check already does.
+const probe = connect.slice(connect.indexOf("'P=\"\";"), connect.indexOf('_UNLOCKCHK'));
+check("the probe resolves lk_a's node and reports it as LKDEV",
+  /echo "LKDEV=\$P"/.test(probe));
+check("no od runs on the device to read lk_a",
+  !/\bod\b/.test(probe));
+check("the bytes are dd'd to a file and pulled for the browser to decode",
+  /dd if=\$\{lkDev\} of=\/tmp\/em_lk\.bin/.test(connect)
+  && /c\.pull\('\/tmp\/em_lk\.bin'\)/.test(connect)
+  && /subarray\(0, 8\)[\s\S]{0,120}padStart\(2, '0'\)/.test(connect));
+check("lkDev is pinned to a partition node before it reaches a shell line",
+  connect.includes("/^\\/dev\\/block\\/mmcblk0p\\d+$/.test(lkDev)")
+  && connect.indexOf("test(lkDev)") < connect.indexOf("dd if=${lkDev}"));
+
 if (failures) {
   console.error(`\n${failures} failure(s)`);
   process.exit(1);
