@@ -30,9 +30,38 @@ const (
 )
 
 type chunk struct {
-	ts  int64 // server µs of the first sample
-	pcm []int16
+	ts  int64   // server µs of the first frame
+	pcm []int16 // ch channels interleaved
+	ch  uint8   // 1, or 2 for a stereo chunk (#273)
 }
+
+// frames is the chunk's length in frames. Not a divide by ch: 32-bit ARM Go
+// has no divide instruction, and this runs per chunk in Fill.
+func (c chunk) frames() int {
+	if c.ch == 2 {
+		return len(c.pcm) / 2
+	}
+	return len(c.pcm)
+}
+
+// frame returns frame j's two sides as the speaker is to play them: a mono
+// chunk on both, a stereo one as it is when stereo is allowed, else folded.
+func (c chunk) frame(j int, stereo bool) (l, r int16) {
+	if c.ch != 2 {
+		return c.pcm[j], c.pcm[j]
+	}
+	l, r = c.pcm[2*j], c.pcm[2*j+1]
+	if !stereo {
+		m := fold(l, r)
+		return m, m
+	}
+	return l, r
+}
+
+// fold is a stereo frame to mono, the exact expression and order the decoder
+// used to average FLAC and PCM sides with before stereo existed, so folding a
+// stereo chunk here plays the same bytes as decoding it to mono did.
+func fold(l, r int16) int16 { return int16((int32(l) + int32(r)) / 2) }
 
 // player holds decoded audio and hands it to the speaker at the right time.
 //
@@ -43,7 +72,7 @@ type chunk struct {
 type player struct {
 	mu      sync.Mutex
 	q       []chunk
-	off     int // samples consumed from q[0]
+	off     int // frames consumed from q[0]
 	playing bool
 
 	filter  *timeFilter
@@ -98,15 +127,22 @@ func (p *player) setDelay(ms int) {
 	p.mu.Unlock()
 }
 
-// push queues one decoded chunk. A chunk that starts before the one already
-// at the tail is a server that went backwards; it is taken as a restart.
-func (p *player) push(ts int64, pcm []int16) {
+// push queues one decoded chunk of ch interleaved channels (1 or 2; anything
+// else is taken as 1). A chunk that starts before the one already at the
+// tail is a server that went backwards; it is taken as a restart. Mono and
+// stereo chunks may follow each other in the queue (a plug change
+// mid-stream): time is counted in frames, so they keep it.
+func (p *player) push(ts int64, pcm []int16, ch int) {
+	c := chunk{ts: ts, pcm: pcm, ch: 1}
+	if ch == 2 {
+		c.ch = 2
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if n := len(p.q); n > 0 && ts < p.q[n-1].ts {
 		p.clearLocked()
 	}
-	p.q = append(p.q, chunk{ts: ts, pcm: pcm})
+	p.q = append(p.q, c)
 }
 
 // clear drops everything buffered: stream/clear, stream/end, or HA taking
@@ -139,7 +175,7 @@ func (p *player) buffered() time.Duration {
 	defer p.mu.Unlock()
 	n := -p.off
 	for _, c := range p.q {
-		n += len(c.pcm)
+		n += c.frames()
 	}
 	return time.Duration(n) * time.Second / outRate
 }
@@ -153,7 +189,13 @@ func (p *player) active() bool {
 // Fill writes one period of stereo S16LE to out, whose first frame will
 // reach the DAC at playAt. It returns false when there is nothing to play at
 // that moment, so the speaker treats the music plane as empty.
-func (p *player) Fill(out []byte, playAt time.Time) bool {
+//
+// stereo is the speaker's word, for this period, on whether L may differ
+// from R (#273): only with a plug known to be in the jack, since the
+// internal speaker plays the right channel alone. Without it every stereo
+// chunk is folded to mono, so a queue decoded while the plug was in plays
+// mono from the next period after it comes out.
+func (p *player) Fill(out []byte, playAt time.Time, stereo bool) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	frames := len(out) / 4
@@ -210,12 +252,13 @@ func (p *player) Fill(out []byte, playAt time.Time) bool {
 
 	i := 0
 	for ; i < lead; i++ {
-		put(out, i, 0)
+		put(out, i, 0, 0)
 	}
 	if repeat > 0 {
-		s := p.q[0].pcm[p.off]
-		for r := 0; r < repeat && i < frames; r++ {
-			put(out, i, scale(s, gainAt(i)))
+		l, r := p.q[0].frame(p.off, stereo)
+		for k := 0; k < repeat && i < frames; k++ {
+			g := gainAt(i)
+			put(out, i, scale(l, g), scale(r, g))
 			i++
 		}
 	}
@@ -224,16 +267,34 @@ func (p *player) Fill(out []byte, playAt time.Time) bool {
 			// Ran dry mid-period: the rest is silence, and the next Fill
 			// resyncs from scratch.
 			for ; i < frames; i++ {
-				put(out, i, 0)
+				put(out, i, 0, 0)
 			}
 			p.playing = false
 			p.st.Underruns++
 			break
 		}
-		c := p.q[0].pcm
-		n := min(len(c)-p.off, frames-i)
-		for k := 0; k < n; k++ {
-			put(out, i+k, scale(c[p.off+k], gainAt(i+k)))
+		ch := p.q[0]
+		c := ch.pcm
+		n := min(ch.frames()-p.off, frames-i)
+		switch {
+		case ch.ch != 2:
+			for k := 0; k < n; k++ {
+				s := scale(c[p.off+k], gainAt(i+k))
+				put(out, i+k, s, s)
+			}
+		case stereo:
+			for k := 0; k < n; k++ {
+				g := gainAt(i + k)
+				j := 2 * (p.off + k)
+				put(out, i+k, scale(c[j], g), scale(c[j+1], g))
+			}
+		default:
+			// Folded BEFORE the gain, as the decoder averaged before it.
+			for k := 0; k < n; k++ {
+				j := 2 * (p.off + k)
+				s := scale(fold(c[j], c[j+1]), gainAt(i+k))
+				put(out, i+k, s, s)
+			}
 		}
 		i += n
 		p.advanceLocked(n)
@@ -248,11 +309,11 @@ func (p *player) localTimeLocked() int64 {
 	return p.filter.clientTime(ts) - p.delayUs
 }
 
-// dropLocked discards n samples, reporting false if the queue ran out first.
+// dropLocked discards n frames, reporting false if the queue ran out first.
 func (p *player) dropLocked(n int) bool {
 	for n > 0 && len(p.q) > 0 {
-		k := min(len(p.q[0].pcm)-p.off, n)
-		if k == len(p.q[0].pcm)-p.off && p.off == 0 {
+		k := min(p.q[0].frames()-p.off, n)
+		if k == p.q[0].frames()-p.off && p.off == 0 {
 			p.st.LateDrops++
 		}
 		p.advanceLocked(k)
@@ -263,8 +324,8 @@ func (p *player) dropLocked(n int) bool {
 
 func (p *player) advanceLocked(n int) {
 	p.off += n
-	for len(p.q) > 0 && p.off >= len(p.q[0].pcm) {
-		p.off -= len(p.q[0].pcm)
+	for len(p.q) > 0 && p.off >= p.q[0].frames() {
+		p.off -= p.q[0].frames()
 		p.q[0].pcm = nil
 		p.q = p.q[1:]
 	}
@@ -277,9 +338,9 @@ func scale(s int16, g int32) int16 {
 	return int16((int32(s) * g) >> 15)
 }
 
-// put writes one mono sample to both channels of stereo frame i.
-func put(out []byte, i int, s int16) {
-	u := uint16(s)
-	out[i*4], out[i*4+1] = byte(u), byte(u>>8)
-	out[i*4+2], out[i*4+3] = byte(u), byte(u>>8)
+// put writes stereo frame i.
+func put(out []byte, i int, l, r int16) {
+	ul, ur := uint16(l), uint16(r)
+	out[i*4], out[i*4+1] = byte(ul), byte(ul>>8)
+	out[i*4+2], out[i*4+3] = byte(ur), byte(ur>>8)
 }

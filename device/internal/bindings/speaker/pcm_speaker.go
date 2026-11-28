@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +97,16 @@ type PcmSpeaker struct {
 	jackInserted bool
 	jackKnown    bool
 	chainParams  outchain.Params
+
+	// jack serialises the jack's mixer writes and owns `plugged`, which the
+	// write loop reads without a lock (#273): true only once an Insert set
+	// has been written without error, cleared before anything that can turn
+	// the internal speaker on. See jackGate for the whole contract.
+	// stereoJack is the board's word that its jack takes stereo
+	// (board.Speaker.StereoJack); without it a plug changes nothing here.
+	jack       jackGate
+	stereoJack bool
+
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
@@ -199,11 +210,13 @@ type PcmSpeaker struct {
 // the source smooths it), reporting false when it has nothing due. uncertain
 // is how far playAt may be off from the measurement itself — half the time
 // the status read took — so a source can decline to learn from a reading
-// the scheduler interrupted. Active says whether it has anything queued at
-// all, so an idle source costs no status read.
+// the scheduler interrupted. stereo says whether the period may carry
+// L != R; false, the source writes L == R in every frame, since the internal
+// speaker plays the right channel alone (#273). Active says whether it has
+// anything queued at all, so an idle source costs no status read.
 type MusicSource interface {
 	Active() bool
-	Fill(out []byte, playAt time.Time, uncertain time.Duration) bool
+	Fill(out []byte, playAt time.Time, uncertain time.Duration, stereo bool) bool
 }
 
 type sourceBox struct{ s MusicSource }
@@ -227,7 +240,10 @@ func (p *PcmSpeaker) SetMusicSource(s MusicSource) {
 // pause between the two (scheduler, GC) a late measurement: +4–10ms
 // readings every minute on C95, 2026-10-01 (#707). The bracket's width says
 // how much to trust the reading, and the source is told.
-func (p *PcmSpeaker) pullSource() []byte {
+//
+// stereo is the period's stereoOut, passed on: false, the source writes
+// L == R (#273).
+func (p *PcmSpeaker) pullSource(stereo bool) []byte {
 	box := p.src.Load()
 	if box == nil || !box.s.Active() {
 		return nil
@@ -245,7 +261,7 @@ func (p *PcmSpeaker) pullSource() []byte {
 	}
 	playAt := now.Add(time.Duration(d) * time.Second / 48000)
 	p.dacStep.note(playAt, read, string(b), time.Duration(len(p.srcBuf)/4)*time.Second/48000)
-	if !box.s.Fill(p.srcBuf, playAt, read/2) {
+	if !box.s.Fill(p.srcBuf, playAt, read/2, stereo) {
 		return nil
 	}
 	p.srcLastNs.Store(now.UnixNano())
@@ -290,7 +306,10 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 		stockWide:     make([]float64, periodSize*2),
 		voiceFilter:   outchain.NewVoiceFilter(48000, board.CurrentLayout().Speaker.Voicing),
 		responseGains: make([]float64, periodSize),
+		stereoJack:    board.CurrentLayout().Speaker.StereoJack,
 	}
+	s.jack.write = func(w mixerWrite) error { return mixer.Set(w.Ctl, w.Args...) }
+	s.jack.read = mixer.Get
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
 	s.duckTarget.Store(unityGain)
@@ -363,7 +382,7 @@ func (p *PcmSpeaker) Init() error {
 
 	p.waitRunning(pcmRunTimeout)
 	time.Sleep(100 * time.Millisecond)             // silence reaches the DAC (~2 periods)
-	p.applyJackWrites(p.out.amp(true))             // enable amp onto a clocked, silent DAC
+	p.jack.speakerOn(p.out.amp(true))              // enable amp onto a clocked, silent DAC
 	time.Sleep(50 * time.Millisecond)              // let amp settle
 	p.applyJackWrites([]mixerWrite{p.out.unity()}) // unmute: volume is applied in software
 	// Last, so the DAC's step happens behind it: the quietest order of the
@@ -464,21 +483,62 @@ func waitForFreePcm(card, device int, timeout time.Duration) {
 //     ON, so a device booted with a cable in played out its internal speaker
 //     until someone unplugged and replugged — which is exactly why replugging
 //     was the folk remedy. It manufactures the edge the boot never had.
+//
+// Stereo (#273) follows `plugged`, which p.jack (jackGate, host-tested)
+// orders so L != R is never written while the internal speaker (right
+// channel only) may be on: on REMOVAL it is cleared first, before anything
+// else, so the next period the write loop builds is mono; on INSERT it is
+// set last, after the chain and stock law have been re-derived and the
+// writes (internal amp off) have been made, and only if every one of them
+// succeeded. The state update and the writes are one sequence under the
+// gate's lock, so the 30s reconcile cannot interleave with them.
+// What removal cannot reach is the ALSA ring: up to alsaBufferFrames
+// (~171ms) plus the period being built, ~0.2s, already written as stereo,
+// play out of the internal speaker as its right channel. Accepted (#273):
+// holding the mixer writes back until the ring drains would leave the jack
+// routed after the plug has gone, and the speaker off for as long.
 func (p *PcmSpeaker) SetJackRouting(inserted bool) {
-	p.jackMu.Lock()
-	p.jackInserted = inserted
-	p.jackKnown = true
-	p.chain.SetParams(chainForJack(p.chainParams, inserted))
-	p.refreshStock()
-	guardBypassed := inserted && p.chainParams.GuardEnabled
-	p.jackMu.Unlock()
+	var guardBypassed bool
+	failed := p.jack.route(inserted, func() {
+		p.jackMu.Lock()
+		p.jackInserted = inserted
+		p.jackKnown = true
+		p.chain.SetParams(chainForJack(p.chainParams, inserted))
+		p.refreshStock()
+		guardBypassed = inserted && p.chainParams.GuardEnabled
+		p.jackMu.Unlock()
+	}, p.out.jack(inserted))
 
-	p.applyJackWrites(p.out.jack(inserted))
-	log.Printf("[speaker] jack routing applied (%s)",
-		map[bool]string{true: "external", false: "internal"}[inserted])
+	where := map[bool]string{true: "external", false: "internal"}[inserted]
+	if len(failed) > 0 {
+		// Every time, not once per control as mixer.Set logs: a plug change
+		// whose writes did not land leaves the outputs in an unknown state.
+		log.Printf("[speaker] jack routing (%s): %d write(s) FAILED: %s",
+			where, len(failed), strings.Join(failed, ", "))
+		if inserted {
+			log.Printf("[speaker] jack: stereo withheld, the internal speaker may still be on; the reconcile retries every %s", JackReconcileInterval)
+		}
+	} else {
+		log.Printf("[speaker] jack routing applied (%s)", where)
+	}
 	if guardBypassed {
 		log.Printf("[speaker] output chain: bass guard bypassed while the jack is in use")
 	}
+	if inserted && len(failed) == 0 {
+		if p.stereoJack {
+			log.Printf("[speaker] stereo permitted: a plug is in the jack")
+		} else {
+			log.Printf("[speaker] jack: mono, this board's jack is not known to take stereo")
+		}
+	}
+}
+
+// StereoOut reports whether the write loop may currently play L != R
+// (stereoOut, #273): a plug known to be in with its writes made, a board
+// whose jack takes stereo, and no stock-sound law. For the Sendspin decode
+// hint; the write loop reads its own answer every period.
+func (p *PcmSpeaker) StereoOut() bool {
+	return stereoOut(p.stock.Load(), p.jack.plugged.Load(), p.stereoJack)
 }
 
 func (p *PcmSpeaker) applyJackWrites(ws []mixerWrite) {
@@ -505,28 +565,25 @@ const JackReconcileInterval = 30 * time.Second
 // Does nothing until a jack position has actually been observed: before
 // jack.Watch has run there is no desired state, and guessing one would fight
 // whatever Init established.
+//
+// The read of the desired position and every write happen under the jack
+// gate's lock (jackGate.reconcile), so a reconcile that read "out" cannot
+// write the Remove set (amp ON) over an insert that completed meanwhile; a
+// reconcile about to write the Remove set clears `plugged` first, and one
+// that finds the Insert set fully in place recovers a failed insert (#273).
 func (p *PcmSpeaker) ReconcileJackRouting() int {
-	p.jackMu.Lock()
-	inserted, known := p.jackInserted, p.jackKnown
-	p.jackMu.Unlock()
-	if !known {
-		return 0
+	n, failed, permitted := p.jack.reconcile(p.out.spec.Jack, func() (bool, bool) {
+		p.jackMu.Lock()
+		defer p.jackMu.Unlock()
+		return p.jackInserted, p.jackKnown
+	})
+	if len(failed) > 0 {
+		log.Printf("[speaker] jack reconcile: %d write(s) FAILED: %s", len(failed), strings.Join(failed, ", "))
 	}
-
-	current := map[string]string{}
-	jack := p.out.spec.Jack
-	for _, ctl := range jackControls(jack) {
-		if v, err := mixer.Get(ctl); err == nil {
-			current[ctl] = v
-		} // a failed read is not evidence of drift
+	if permitted && p.stereoJack {
+		log.Printf("[speaker] jack: insert confirmed by the reconcile, stereo permitted")
 	}
-
-	drift := jackRoutingDrift(jack, inserted, current)
-	if len(drift) == 0 {
-		return 0
-	}
-	p.applyJackWrites(drift)
-	return len(drift)
+	return n
 }
 
 // WatchJackRouting re-applies the routing for as long as ctx lives.
@@ -575,6 +632,14 @@ func (p *PcmSpeaker) silenceLoop() {
 		default:
 		}
 
+		// One answer per period on whether it may carry L != R (#273),
+		// given to the music source and the chain alike; stock is read
+		// once with it and also picks the branch below. plugged implies a
+		// known plug position: only the jack gate sets it.
+		stock := p.stock.Load()
+		stereo := stereoOut(stock, p.jack.plugged.Load(), p.stereoJack)
+		p.chain.SetStereo(stereo)
+
 		var voice, music []byte
 		if p.voice.ready(primePeriods) {
 			voice = p.voice.take()
@@ -587,7 +652,7 @@ func (p *PcmSpeaker) silenceLoop() {
 			p.report(p.music.drained(), "music")
 		}
 		if music == nil && !p.music.playing && !p.music.isActive() {
-			music = p.pullSource()
+			music = p.pullSource(stereo)
 		}
 
 		var response responsePeriod
@@ -618,7 +683,7 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 
 		var out []byte
-		if p.stock.Load() {
+		if stock {
 			tgt := p.vol.targetGain()
 			if hasResponse {
 				tgt = response.volumeTarget

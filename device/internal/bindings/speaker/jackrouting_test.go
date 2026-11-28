@@ -131,3 +131,26 @@ func TestChainForJackDoesNotModifyTheStoredParams(t *testing.T) {
 		t.Errorf("stored params were modified")
 	}
 }
+
+// L != R only with a plug KNOWN to be in (plugged), on a board whose jack is
+// known to take stereo, and with no stock-sound law (#273): the internal
+// speaker plays the right channel alone.
+func TestStereoNeedsAKnownPlug(t *testing.T) {
+	for _, stock := range []bool{false, true} {
+		for _, plugged := range []bool{false, true} {
+			for _, boardStereo := range []bool{false, true} {
+				want := plugged && boardStereo && !stock
+				if got := stereoOut(stock, plugged, boardStereo); got != want {
+					t.Errorf("stock=%v plugged=%v boardStereo=%v: stereo %v, want %v", stock, plugged, boardStereo, got, want)
+				}
+			}
+		}
+	}
+	// Every registered board, as the speaker asks: only biscuit's jack.
+	for _, b := range board.Known {
+		want := b.ID == "biscuit"
+		if got := stereoOut(false, true, b.Hardware.Speaker.StereoJack); got != want {
+			t.Errorf("%s with a plug in: stereo %v, want %v", b.ID, got, want)
+		}
+	}
+}

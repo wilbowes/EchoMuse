@@ -155,7 +155,9 @@ func main() {
 		dac := start.Add(time.Duration(k) * period).Add(*latency)
 		time.Sleep(time.Until(dac.Add(-*latency)))
 		measured := dac.Add(time.Duration((rand.Float64()*2 - 1) * float64(*noise)))
-		if cur.Load().Fill(out, measured, 0) { // simulated: the read takes no time
+		// Simulated: the read takes no time. Mono, as the device plays with
+		// no plug in.
+		if cur.Load().Fill(out, measured, 0, false) {
 			// Where the first frame truly lands, on the server's clock.
 			raw := rawUs() + dac.Sub(time.Now()).Microseconds()
 			var rms float64

@@ -40,7 +40,7 @@ func TestFlacChunksFromTheServerEncoderDecodeBitExact(t *testing.T) {
 		if !flacSync(b) {
 			t.Fatalf("chunk %d does not start with a FLAC frame sync", i)
 		}
-		if got, err = d.decode(got, b); err != nil {
+		if got, _, err = d.decode(got, b, false); err != nil {
 			t.Fatalf("chunk %d: %v", i, err)
 		}
 	}
@@ -105,8 +105,8 @@ func TestPCMStereoIsDownmixed(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := []byte{0x10, 0x27, 0xF0, 0xD8, 0x00, 0x10, 0x00, 0x30} // (10000,-10000), (4096,12288)
-	got, _ := d.decode(nil, in)
-	if len(got) != 2 || got[0] != 0 || got[1] != 8192 {
+	got, ch, _ := d.decode(nil, in, false)
+	if ch != 1 || len(got) != 2 || got[0] != 0 || got[1] != 8192 {
 		t.Errorf("got %v, want [0 8192]", got)
 	}
 }
@@ -204,7 +204,7 @@ func TestOpusStreamDecodesToMono(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if pcm, err = d.decode(pcm, payload); err != nil {
+		if pcm, _, err = d.decode(pcm, payload, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -230,7 +230,7 @@ func TestDecoderResetAndCloseAreSafe(t *testing.T) {
 	d.reset()
 	d.close()
 	d.close()
-	if _, err := d.decode(nil, opusPackets(t)[0]); err == nil {
+	if _, _, err := d.decode(nil, opusPackets(t)[0], false); err == nil {
 		t.Error("decoded after close")
 	}
 	f, _ := newDecoder(streamFormat{Codec: "flac", SampleRate: 48000, Channels: 1, BitDepth: 16})

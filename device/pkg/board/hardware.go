@@ -107,6 +107,14 @@ type Speaker struct {
 	BassGuard BassBand
 	// Voicing is nil until the board's driver has been measured.
 	Voicing *Voicing
+	// StereoJack says the board may play L != R while a plug is in the jack
+	// (#273): its Jack.Insert set is known to silence the internal speaker,
+	// and the jack carries the two channels apart. False until measured on
+	// that board: biscuit's speaker plays the RIGHT channel alone, so a
+	// board that keeps its speaker on with a plug in would play half the
+	// music on it (docs/history/device.md, 2026-11-19: radar's and donut's
+	// jacks unchecked).
+	StereoJack bool
 }
 
 // Volume is a hardware volume control and its silent and 0dB values.
@@ -353,6 +361,13 @@ var biscuitHardware = &Hardware{
 		// Read off biscuit's MBCL.cfg (#229).
 		BassGuard: BassBand{CrossoverHz: 115, ThresholdDb: -50},
 		Voicing:   biscuitVoicing,
+
+		// L/R through the jack on FireOS, 2026-10-03 (the #273 community
+		// patch; sascha-hemi on FireOS 6 with hot-plug), and on emOS with a
+		// left/right test track and hot-plug, 2026-11-20 to 11-27. Insert
+		// switches Ext_Speaker_Amp_Switch off, and the speaker plays only
+		// with it on (docs/history/device.md, 2026-11-19).
+		StereoJack: true,
 	},
 }
 

@@ -142,6 +142,11 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 			c.OnVolume(func(pct int) { vol.SetVolume(pctToLevel(pct)) })
 			c.SetVolume(levelToPct(vol.VolumeLevel()))
 			c.SetMinBuffer(sendspinBuffer(ss.proxy))
+			// The decode hint (#273), before a server can connect. Under
+			// ss.mu, which the jack callback's sendspinPlayer also takes, so
+			// a plug change either lands before this read or finds the
+			// player and tells it.
+			c.SetStereo(spk.StereoOut())
 			// Open before Start advertises: Music Assistant dials when the
 			// record appears and may not retry a timeout. Logged, not
 			// fatal: FireOS has no filter to open.
@@ -167,9 +172,15 @@ func applySendspinConfig(spk *speaker.PcmSpeaker, cc *client.ControlClient, vol 
 // sendspinPoll runs on the BLE yield ticker (100ms). Home Assistant's music
 // wins the music plane, so while the 0x04 plane has anything in it the
 // player reports itself taken, and the server moves it out of its group.
+//
+// It also refreshes the decode hint (#273). The jack edge sets it, but a
+// stereo grant can come later from the reconcile (a failed insert write
+// repaired), or be withdrawn by it, with no edge; without this the decoder
+// would keep folding to mono until the next plug change. An atomic store.
 func sendspinPoll(spk *speaker.PcmSpeaker) {
 	if c := sendspinPlayer(); c != nil {
 		c.SetExternal(spk.MusicPlaneBusy())
+		c.SetStereo(spk.StereoOut())
 		if c.Active() && time.Since(sendspinLoggedAt) >= time.Minute {
 			sendspinLoggedAt = time.Now()
 			logSendspinStats(c.Status())

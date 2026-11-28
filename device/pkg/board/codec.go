@@ -57,8 +57,10 @@ const tlvAmp = "Ext_Speaker_Amp_Switch"
 
 // tlvJack: measured 2026-09-03 against a stock FireOS 5.5.5.4 Dot driving the
 // same cable, by diffing all 239 controls across an insert. Stock changed
-// five; two are left out. Right Channel Only selects a codec channel and our
-// wire is mono, so it changes nothing; Ignore Ramp Up was never measured.
+// five; two are left out. Right Channel Only selects a codec channel; at its
+// default Off, L and R reach the jack apart under emOS too (a left/right test
+// track on a Dot 2, 2026-11-23, #273), so it is not written. Ignore Ramp Up
+// was never measured.
 //
 //   - HP Driver Gain (0..35 = -6..+29dB): something drops it to 0 when a plug
 //     goes in, and stock's HAL raises it to 11. Nothing of ours did, so the

@@ -120,3 +120,16 @@ func jackRoutingDrift(j board.Jack, inserted bool, current map[string]string) []
 func stockLawOn(v *board.Voicing, chainActive bool, p outchain.Params, plugged bool) bool {
 	return v != nil && chainActive && chainForJack(p, plugged).StockSound
 }
+
+// stereoOut is whether a period may carry L != R (#273): only on a board
+// whose jack is known to take stereo (board.Speaker.StereoJack), with a plug
+// KNOWN to be in and its Insert set written without error (plugged, which
+// jackGate sets), and never under the stock-sound law. The Dot 2's internal
+// speaker plays the right channel alone, so a guess, a failed write, or the
+// boot before jack.Watch has dispatched, is mono. stock is redundant while
+// chainForJack clears stock sound with a plug in, and is here so the two
+// can never both be on whatever that rule becomes. The write loop takes
+// one answer per period and gives it to the music source and the chain.
+func stereoOut(stock, plugged, boardStereo bool) bool {
+	return plugged && boardStereo && !stock
+}

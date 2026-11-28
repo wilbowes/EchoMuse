@@ -51,6 +51,9 @@ type Client struct {
 	store  *store
 	player *player
 	oc     atomic.Pointer[OutputClock] // made and fed by the speaker goroutine (Fill); read for diagnostics
+	// stereo is the decode hint (SetStereo): set by the jack goroutine,
+	// read by each session's reader per chunk.
+	stereo atomic.Bool
 
 	mu         sync.Mutex
 	admitted   *session
@@ -209,6 +212,14 @@ func (c *Client) SetUnpaired(on bool) {
 	}
 }
 
+// SetStereo tells the decoder whether to keep a stereo stream's two sides
+// (#273): the speaker says so while a plug is known to be in the jack. A
+// HINT only, taken from the next chunk decoded. It sends nothing and changes
+// no format, and audio already queued plays as it was decoded; whether L may
+// differ from R in what reaches the DAC is decided per period by the speaker,
+// through Fill, never by this.
+func (c *Client) SetStereo(on bool) { c.stereo.Store(on) }
+
 func (c *Client) unpairedAccess() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -343,8 +354,9 @@ func (c *Client) applySettings(p playerSettings) {
 // caller passes its raw reading, and how uncertain that reading is. A reading
 // the scheduler interrupted is not learned from: the tracker coasts on its
 // prediction for that period. False when there is nothing to play then.
-// Called from one goroutine only.
-func (c *Client) Fill(out []byte, playAt time.Time, uncertain time.Duration) bool {
+// stereo says whether this period may carry L != R (player.Fill); false
+// folds every stereo chunk to mono. Called from one goroutine only.
+func (c *Client) Fill(out []byte, playAt time.Time, uncertain time.Duration, stereo bool) bool {
 	oc := c.oc.Load()
 	if oc == nil {
 		oc = NewOutputClock(time.Duration(len(out)/4) * time.Second / outRate)
@@ -356,7 +368,7 @@ func (c *Client) Fill(out []byte, playAt time.Time, uncertain time.Duration) boo
 	} else {
 		at = oc.Observe(playAt)
 	}
-	return c.player.Fill(out, at)
+	return c.player.Fill(out, at, stereo)
 }
 
 // Active reports whether Sendspin has audio queued: the speaker's cue that
@@ -410,7 +422,9 @@ func (c *Client) hello() clientHello {
 // memory: roughly 12s of mono decoded, ~1.1MB. One value covers every format,
 // so at Opus rates it allows ~36s, but aiosendspin also holds a player to 30s
 // in flight (max_duration_us) and sends to its own lead, not to the cap: the
-// worst case decoded is 30s of mono, ~2.9MB.
+// worst case decoded is 30s of mono, ~2.9MB, and twice that, ~5.8MB, for
+// stereo decoded while a plug is in the jack (#273). Unchanged for stereo:
+// the hello is sent once per connection, before any plug change.
 const bufferCapacity = 6 * outRate * outChannels * outBits / 8
 
 // ── admission ──────────────────────────────────────────────────────────────

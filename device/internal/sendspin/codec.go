@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 
 	"github.com/mewkiz/flac/frame"
 
@@ -21,7 +22,12 @@ import (
 // (MA does it per client anyway).
 //
 // The speaker is mono, so every stream is decoded to mono: Opus by libopus,
-// FLAC and PCM by averaging the sides.
+// FLAC and PCM by averaging the sides. The one exception is a plug known to
+// be in the jack (#273), where the sides are kept: the device's speaker
+// tells the client so (Client.SetStereo) and the decoder then yields
+// interleaved stereo from a stereo stream. Neither the hello nor these
+// formats change with it, so nothing is renegotiated: the stereo Opus asked
+// for first is already stereo, and a server on mono FLAC stays mono.
 const (
 	outRate     = 48000
 	outChannels = 1 // what the decoder produces
@@ -62,13 +68,33 @@ type streamFormat struct {
 	Header     string `json:"codec_header,omitempty"`
 }
 
-// decoder turns one chunk of the current format into mono S16 at outRate.
-// Close it when its stream ends; reset it when the stream is cut.
+// decoder turns one chunk of the current format into S16 at outRate: mono,
+// or interleaved stereo from a stereo stream when asked (decode). Close it
+// when its stream ends; reset it when the stream is cut.
 type decoder struct {
 	f    streamFormat
 	op   *opus.Decoder // Opus streams only
 	opus []int16       // scratch, one packet's worth
+
+	// ch is how many channels op decodes to. Mono unless setStereo has
+	// swapped it; a 1-channel libopus decode is what the unplugged speaker
+	// has always played, and decoding stereo and averaging is not the same
+	// to the bit (1 LSB on a quarter of the samples of tones.pk).
+	ch int
+	// hist holds the last opusReplay packets, oldest at histHead once full,
+	// so a swapped-in decoder can be brought up to the stream's state
+	// (setStereo). Slots are reused: nothing grows per packet.
+	hist     [opusReplay][]byte
+	histN    int
+	histHead int
 }
+
+// opusReplay is how many packets a decoder swapped in mid-stream is fed,
+// output discarded, before it decodes for real. Measured on tones.pk: a
+// fresh decoder needs about this many earlier packets to come within 1 LSB
+// of one that ran from the start (TestOpusSwapAfterReplayIsWithinOneLSB).
+// 0.5s of audio, decoded once per plug change.
+const opusReplay = 25
 
 var errFormat = errors.New("sendspin: stream format the device did not ask for")
 
@@ -90,7 +116,9 @@ func newDecoder(f streamFormat) (*decoder, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &decoder{f: f, op: op, opus: make([]int16, opus.MaxFrame*outChannels)}, nil
+		// Room for stereo, so a swap never reallocates; mono decodes into
+		// the first MaxFrame*outChannels of it, as always.
+		return &decoder{f: f, op: op, opus: make([]int16, opus.MaxFrame*2), ch: outChannels}, nil
 	default:
 		return nil, fmt.Errorf("%w: codec %q", errFormat, f.Codec)
 	}
@@ -103,7 +131,61 @@ func newDecoder(f streamFormat) (*decoder, error) {
 func (d *decoder) reset() {
 	if d != nil && d.op != nil {
 		d.op.Reset()
+		// What came before the cut is not this stream's past either.
+		d.histN, d.histHead = 0, 0
 	}
+}
+
+// setStereo makes an Opus decoder decode a stereo stream to two channels
+// (want) or one, from the next packet (#273). A change swaps in a new
+// libopus decoder, brought up to the stream by replaying the packets in hist
+// with their output discarded, and closes the old one. Nothing for FLAC or
+// PCM, whose decode takes the choice per chunk, or for a mono stream. If
+// the new decoder cannot be made the old one stays, and with it its
+// channels: the player plays whatever a chunk says it is.
+func (d *decoder) setStereo(want bool) {
+	if d == nil || d.op == nil || d.f.Channels != 2 {
+		return
+	}
+	n := 1
+	if want {
+		n = 2
+	}
+	if n == d.ch {
+		return
+	}
+	op, err := opus.NewDecoder(n)
+	if err != nil {
+		log.Printf("[sendspin] opus: %dch decoder: %v", n, err)
+		return
+	}
+	scratch := d.opus[:opus.MaxFrame*n]
+	for i := 0; i < d.histN; i++ {
+		j := d.histHead + i
+		if j >= opusReplay {
+			j -= opusReplay
+		}
+		op.Decode(d.hist[j], scratch) // state only; a bad packet changes none
+	}
+	d.op.Close()
+	d.op, d.ch = op, n
+}
+
+// remember keeps a copy of an Opus packet in hist, dropping the oldest.
+func (d *decoder) remember(p []byte) {
+	j := d.histHead + d.histN
+	if d.histN == opusReplay {
+		j = d.histHead
+		if d.histHead++; d.histHead == opusReplay {
+			d.histHead = 0
+		}
+	} else {
+		d.histN++
+	}
+	if j >= opusReplay {
+		j -= opusReplay
+	}
+	d.hist[j] = append(d.hist[j][:0], p...)
 }
 
 // close frees the Opus decoder's C state. Safe on nil and twice.
@@ -113,18 +195,72 @@ func (d *decoder) close() {
 	}
 }
 
-// decode appends the chunk's samples to dst as mono. A stereo stream (which
-// the device never asks for, but a server may send) is averaged.
-func (d *decoder) decode(dst []int16, payload []byte) ([]int16, error) {
+// decode appends the chunk's samples to dst and says how many channels they
+// are interleaved in. Mono, a stereo stream averaged, unless stereo is set:
+// then a stereo FLAC or PCM stream keeps both sides (2). An Opus stream
+// decodes to the channels setStereo last chose, whatever stereo says here.
+func (d *decoder) decode(dst []int16, payload []byte, stereo bool) ([]int16, int, error) {
 	if d.op != nil {
 		// One packet per chunk, as aiosendspin sends them. The server has
 		// already moved the stream's timestamps by the encoder's pre-skip.
-		n, err := d.op.Decode(payload, d.opus)
+		n, err := d.op.Decode(payload, d.opus[:opus.MaxFrame*d.ch])
 		if err != nil {
-			return dst, err
+			return dst, d.ch, err
 		}
-		return append(dst, d.opus[:n*outChannels]...), nil
+		if d.f.Channels == 2 {
+			// Only a stereo stream is ever swapped (setStereo), so only it
+			// needs the history.
+			d.remember(payload)
+		}
+		return append(dst, d.opus[:n*d.ch]...), d.ch, nil
 	}
+	if stereo && d.f.Channels == 2 {
+		return d.decodeStereo(dst, payload)
+	}
+	dst, err := d.decodeMono(dst, payload)
+	return dst, 1, err
+}
+
+// decodeStereo is decode for a stereo FLAC or PCM stream with the sides kept.
+func (d *decoder) decodeStereo(dst []int16, payload []byte) ([]int16, int, error) {
+	if d.f.Codec == "pcm" {
+		n := len(payload) / 4
+		for i := 0; i < n; i++ {
+			dst = append(dst, int16(binary.LittleEndian.Uint16(payload[i*4:])),
+				int16(binary.LittleEndian.Uint16(payload[i*4+2:])))
+		}
+		return dst, 2, nil
+	}
+	r := bytes.NewReader(payload)
+	for r.Len() > 0 {
+		fr, err := frame.Parse(r)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return dst, 2, err
+		}
+		if len(fr.Subframes) == 0 {
+			continue
+		}
+		n := len(fr.Subframes[0].Samples)
+		if len(fr.Subframes) == 1 {
+			for _, s := range fr.Subframes[0].Samples[:n] {
+				dst = append(dst, int16(s), int16(s))
+			}
+			continue
+		}
+		l, rr := fr.Subframes[0].Samples, fr.Subframes[1].Samples
+		for i := 0; i < n; i++ {
+			dst = append(dst, int16(l[i]), int16(rr[i]))
+		}
+	}
+	return dst, 2, nil
+}
+
+// decodeMono is decode for FLAC and PCM to one channel, a stereo stream's
+// sides averaged: what the device has always played.
+func (d *decoder) decodeMono(dst []int16, payload []byte) ([]int16, error) {
 	if d.f.Codec == "pcm" {
 		n := len(payload) / 2 / d.f.Channels
 		for i := 0; i < n; i++ {
