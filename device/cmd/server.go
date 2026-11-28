@@ -1341,8 +1341,10 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		sc.SetMinFrames(snap.OwwMinFrames)
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 			sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
+			sc.SetReplyAudible(replyAudible(spk))
 		} else {
 			sc.SetBargeThreshold(0, nil)
+			sc.SetReplyAudible(nil)
 		}
 		syncReplyTaps(dc, cc, spk, srv, model, threshold, false)
 		if shadowState.mode != mode {
@@ -1374,6 +1376,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// against the normal threshold would disagree on every barge-in.
 	if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 		sc.SetBargeThreshold(float32(snap.BargeInThreshold), speakerPlaying(spk))
+		sc.SetReplyAudible(replyAudible(spk))
 	}
 	if spk != nil && benchScorer != nil {
 		benchScorer(sc, spk)
@@ -1412,6 +1415,7 @@ func syncReplyTaps(dc *client.DataClient, cc *client.ControlClient, spk *speaker
 		sc.SetMinFrames(snap.OwwMinFrames)
 		// Fed only while a reply plays, so always at the barge bar.
 		sc.SetBargeThreshold(bar, func() bool { return true })
+		sc.SetReplyAudible(func() bool { return true })
 	}
 	if have := dc.TapScorers(); !rebuild && len(have) == n {
 		for _, sc := range have {
@@ -1458,6 +1462,12 @@ func speakerPlaying(spk *speaker.PcmSpeaker) func() bool {
 	return func() bool {
 		return spk.VoiceAudible(wakeword.ScoreSpan) || spk.MusicAudible(wakeword.ScoreSpan)
 	}
+}
+
+// replyAudible is when the scorer applies the reply rules whatever the two
+// thresholds are: the voice plane only, never music (shadow.barsLocked).
+func replyAudible(spk *speaker.PcmSpeaker) func() bool {
+	return func() bool { return spk.VoiceAudible(wakeword.ScoreSpan) }
 }
 
 // benchScorer instruments a newly opened scorer; set only in bench builds

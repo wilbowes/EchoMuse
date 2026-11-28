@@ -87,6 +87,12 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+# The lowest score at which ONE frame during playback is a wake word, whatever
+# the wake threshold says. No genuine wake word scored below 0.502 across 505
+# near-misses and 30 real detections (decide's docstring); mirrored in the
+# device's shadow.PlaybackOneFrameBar.
+PLAYBACK_ONE_FRAME_BAR = 0.5
+
 
 class BargeDecision(NamedTuple):
     fired: bool
@@ -154,9 +160,13 @@ def decide(*,
         # frame (2026-11-18, C95 at 3m: 4 of 9 misses peaked 0.53-0.73 on one
         # frame), and the reply alone never got near it (20 min of stories:
         # one frame at 0.30, otherwise <= 0.006).
-        if score >= wake_threshold:
+        # Never below PLAYBACK_ONE_FRAME_BAR: a wake threshold lowered to
+        # bargeInThreshold or under (office Dot 2026-11-20, both 0.25) made
+        # one frame at that bar enough to cut a reply nobody interrupted.
+        one_frame = max(wake_threshold, PLAYBACK_ONE_FRAME_BAR)
+        if score >= one_frame:
             return BargeDecision(
-                True, f"score={score:.3f} >= {wake_threshold:.2f} (one frame at the wake bar)")
+                True, f"score={score:.3f} >= {one_frame:.2f} (one frame at the wake bar)")
         return BargeDecision(False, "")
 
     if score >= wake_threshold:

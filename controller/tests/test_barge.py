@@ -82,6 +82,25 @@ def test_one_frame_at_the_wake_threshold_fires_during_playback():
     assert playback(0.302, prev=0.0).fired is False
 
 
+def test_a_low_wake_threshold_does_not_lower_the_one_frame_bar():
+    """
+    Office Dot, 2026-11-20: owwThreshold 0.25 = bargeInThreshold, so one frame
+    at that bar was enough to cut a reply with nobody talking (0.317). One
+    frame needs PLAYBACK_ONE_FRAME_BAR whatever the wake threshold; two in a
+    row at the barge bar still fire.
+    """
+    def low(score, prev=0.0):
+        return em_barge.decide(score=score, prev_score=prev, in_playback=True,
+                               barge_threshold=0.25, wake_threshold=0.25)
+    for s in (0.25, 0.317, 0.49):
+        assert low(s).fired is False
+    assert low(em_barge.PLAYBACK_ONE_FRAME_BAR).fired is True
+    assert low(0.317, prev=0.26).fired is True
+    # Idle (thinking) keeps the configured wake threshold.
+    assert em_barge.decide(score=0.26, prev_score=0.0, in_playback=False,
+                           barge_threshold=0.25, wake_threshold=0.25).fired is True
+
+
 def test_a_genuine_barge_still_fires_at_realistic_scores():
     """
     Speech over TTS is depressed to ~0.3-0.5 by the echo, which is what the

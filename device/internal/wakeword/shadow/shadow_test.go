@@ -630,6 +630,77 @@ func TestBargeBarFiresOnOneFrameAtTheWakeBar(t *testing.T) {
 	}
 }
 
+// TestLowWakeThresholdKeepsThePairRuleDuringAReply: a wake threshold at or
+// under bargeInThreshold (office Dot, 2026-11-20: both 0.25) used to switch the
+// reply rules off, so one frame at that bar was enough to cut a reply (0.317).
+// While a reply plays it still takes two consecutive frames at the bar, or one
+// at PlaybackOneFrameBar. Music alone and idle keep the one-frame wake.
+func TestLowWakeThresholdKeepsThePairRuleDuringAReply(t *testing.T) {
+	var mu sync.Mutex
+	var crosses int
+	speaker, reply := true, true
+	inf := &fakeInferer{}
+	open := func() *Scorer {
+		s := NewScorer(inf, 0.25, func(float32, float32, time.Time) {
+			mu.Lock()
+			crosses++
+			mu.Unlock()
+		})
+		s.SetBargeThreshold(0.25, func() bool { mu.Lock(); defer mu.Unlock(); return speaker })
+		s.SetReplyAudible(func() bool { mu.Lock(); defer mu.Unlock(); return reply })
+		inf.set(0.0, 0)
+		pushAll(t, s, wakeword.FeatWindow+1)
+		return s
+	}
+	count := func() int { mu.Lock(); defer mu.Unlock(); return crosses }
+
+	s := open()
+	defer s.Close()
+	for _, v := range []float32{0.25, 0.317, 0.49} {
+		inf.set(v, 0)
+		pushAll(t, s, 1)
+		inf.set(0.0, 0)
+		pushAll(t, s, 1)
+	}
+	if got := count(); got != 0 {
+		t.Fatalf("crossed %d times on single frames under %.1f during a reply", got, PlaybackOneFrameBar)
+	}
+	if _, bar, n := s.TakeBargeWindow(); n == 0 || bar != 0.25 {
+		t.Fatalf("barge window frames %d bar %.2f: the reply rules were not in force", n, bar)
+	}
+	// Two in a row at the bar: a barge.
+	inf.set(0.3, 0)
+	pushAll(t, s, 2)
+	waitFor(t, "a two-frame barge", func() bool { return count() == 1 })
+
+	// One frame at PlaybackOneFrameBar during a reply: a barge.
+	s2 := open()
+	defer s2.Close()
+	inf.set(0.55, 0)
+	pushAll(t, s2, 1)
+	waitFor(t, "a one-frame barge at the playback bar", func() bool { return count() == 2 })
+
+	// Music only: one frame at the wake threshold wakes, as before.
+	mu.Lock()
+	reply = false
+	mu.Unlock()
+	s3 := open()
+	defer s3.Close()
+	inf.set(0.3, 0)
+	pushAll(t, s3, 1)
+	waitFor(t, "a one-frame wake over music", func() bool { return count() == 3 })
+
+	// Idle: the same.
+	mu.Lock()
+	speaker = false
+	mu.Unlock()
+	s4 := open()
+	defer s4.Close()
+	inf.set(0.3, 0)
+	pushAll(t, s4, 1)
+	waitFor(t, "an idle one-frame wake", func() bool { return count() == 4 })
+}
+
 // TestMinFramesKeepsTheBargeBarAtTwoFrames: with OWW_MIN_FRAMES above 1 a
 // wake needs that many frames, so one frame at the wake bar does not barge.
 func TestMinFramesKeepsTheBargeBarAtTwoFrames(t *testing.T) {
